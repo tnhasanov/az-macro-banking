@@ -166,9 +166,23 @@ def build_workbook(fp: dict[str, Any], nar: dict[str, Any], db: Database, out_pa
                                        "publication", "published_at", "population", "definition", "citation", "passage_id"],
            rows, [30, 36, 9, 6, 14, 9, 13, 20, 8, 44, 18, 13, 30, 60, 22, 40])
 
-    rows = [[p_["pub_type"], p_.get("edition_label"), p_.get("reporting_period_end"), p_.get("published_at")]
-            for p_ in (pubs.get("all") or [])]
-    _sheet(wb, "Publications", ["pub_type", "edition", "reporting_period_end", "published_at"], rows, [30, 22, 20, 14])
+    # one row per file, because the file is the provenance record: the register on the appendix slide
+    # shows the sixteen most recent publications, this sheet holds every document behind all of them
+    rows = []
+    for p_ in (pubs.get("register") or []):
+        for doc in (p_.get("documents") or [{}]):
+            rows.append([p_.get("type"), p_.get("edition"), p_.get("reporting_period_start"), p_.get("reporting_period_end"),
+                         p_.get("reporting_frequency"), p_.get("published_at"), p_.get("published_at_basis"),
+                         doc.get("language"), doc.get("version"), doc.get("pages"), doc.get("sha256"),
+                         doc.get("retrieved_at"), doc.get("url"), p_.get("publication_id")])
+    if not rows:                                            # older fact packs carry only the slim list
+        rows = [[p_["pub_type"], p_.get("edition_label"), None, p_.get("reporting_period_end"), None,
+                 p_.get("published_at"), None, None, None, None, None, None, None, p_.get("publication_id")]
+                for p_ in (pubs.get("all") or [])]
+    _sheet(wb, "Publications", ["publication", "edition", "reporting_period_start", "reporting_period_end",
+                                "frequency", "published_at", "published_at_basis", "language", "file_version",
+                                "pages", "sha256", "retrieved_at", "url", "publication_id"],
+           rows, [26, 22, 20, 20, 10, 13, 52, 9, 11, 7, 20, 22, 62, 34])
 
     rows = []
     for r in (stab.get("source_reconciliation") or []):
