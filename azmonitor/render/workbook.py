@@ -202,7 +202,10 @@ def build_workbook(fp: dict[str, Any], nar: dict[str, Any], db: Database, out_pa
         for i in m["inputs"]:
             rows.append([sid, m["status"], i["input"], i["status"], i.get("latest_period")])
     for u in fp["availability"]["unverified"]:
-        rows.append(["—", "unverified", u, "unverified", None])
+        if isinstance(u, str):                      # older fact packs
+            rows.append(["—", "unverified", u, "unverified", None])
+        else:
+            rows.append(["—", u["status"], f'{u["item"]} — {u["note"]}', u["status"], u.get("latest_period")])
     _sheet(wb, "Availability", ["slide", "slide_status", "input", "input_status", "latest_period"], rows, [8, 12, 46, 12, 12])
 
     # Narrative

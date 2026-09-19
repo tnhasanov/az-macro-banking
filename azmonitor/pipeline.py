@@ -290,7 +290,14 @@ class Pipeline:
         return None, "unknown: the publication page states no release date"
 
     def _latest_period(self, dataset_id: str) -> dt.date | None:
-        row = self.db.conn.execute("SELECT MAX(period_end) FROM observations WHERE dataset_id=? AND status='current' AND value IS NOT NULL", (dataset_id,)).fetchone()
+        """Latest period the dataset reports *on*.
+
+        Forecasts and stress paths carry a period end in the future by construction, so counting
+        them here would present a projection horizon as the freshness of the data.
+        """
+        row = self.db.conn.execute(
+            "SELECT MAX(period_end) FROM observations WHERE dataset_id=? AND status='current' AND value IS NOT NULL "
+            "AND COALESCE(period_type, '') NOT IN ('forecast', 'stress_test_projection')", (dataset_id,)).fetchone()
         return dt.date.fromisoformat(row[0]) if row and row[0] else None
 
     def _materiality_for(self, ds: dict[str, Any]) -> float:

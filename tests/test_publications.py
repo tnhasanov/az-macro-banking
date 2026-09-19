@@ -265,3 +265,37 @@ def test_older_stability_readings_keep_their_own_dates_and_are_not_carried_forwa
         "SELECT period_end FROM observations WHERE series_id='cba.fsr.car'")}
     assert periods == {"2025-12-31"}
     db.close()
+
+
+def test_an_indicator_the_monthly_tables_lack_is_not_still_called_unavailable(tmp_path):
+    """The stability report publishes CAR and LCR, so the availability matrix must stop saying
+    they are unverified and say instead what is held and at what frequency."""
+    from azmonitor.parsers.base import Observation
+    from azmonitor.facts import FactPackBuilder
+
+    db = Database(tmp_path / "t.sqlite")
+    _seed_publication(db, "financial_stability_report:2025-A", "financial_stability_report", "2025-A",
+                      "2025-12-31", "2026-04-13")
+    db.store_observations("cba_financial_stability_report", "financial_stability_report:2025-A:en", [
+        Observation(series_id="cba.fsr.car", period_end=dt.date(2025, 12, 31), value=17.6, unit="%", freq="A",
+                    period_type="period_end_ratio", dims={"basis": "regulatory"},
+                    publication_id="financial_stability_report:2025-A"),
+        Observation(series_id="cba.fsr.stress.car", period_end=dt.date(2027, 12, 31), value=13.6, unit="%", freq="A",
+                    period_type="stress_test_projection", dims={"scenario": "adverse", "exercise": "2025-12-31"},
+                    publication_id="financial_stability_report:2025-A"),
+    ])
+    av = FactPackBuilder(db, dt.date(2026, 9, 19)).availability_matrix()
+
+    car = next(u for u in av["unverified"] if u["item"].startswith("Regulatory capital adequacy"))
+    assert car["status"] == "available at a lower frequency"
+    assert car["latest_period"] == "2025-12-31" and car["value"] == 17.6
+
+    # and the slides that report it resolve, although the scenario and exercise dimensions of a
+    # stress path are not addressable without knowing the edition
+    assert [i for i in av["slides"]["M21"]["inputs"] if i["input"] == "cba.fsr.car"][0]["status"] == "available"
+    assert [i for i in av["slides"]["M22"]["inputs"] if i["input"] == "cba.fsr.stress.car"][0]["status"] == "available"
+
+    # an indicator nothing publishes is still reported as unverified, with the reason
+    nsfr = next(u for u in av["unverified"] if u["item"].startswith("NSFR"))
+    assert nsfr["status"] == "unverified" and nsfr["note"]
+    db.close()

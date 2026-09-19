@@ -198,6 +198,14 @@ class FactPackBuilder:
         out["prices"]["period_end"] = cpi.index[-1].isoformat() if not cpi.empty else out["prices"].get("period_end")
         return out
 
+    def _elsewhere(self, item: str, series_id: str, where: str) -> dict[str, Any]:
+        """An input the monthly tables do not carry, but another publication does."""
+        hit = self.store.latest_any(series_id)
+        if hit is None:
+            return {"item": item, "status": "unverified", "note": f"expected in {where}, but nothing is held"}
+        return {"item": item, "status": "available at a lower frequency", "series_id": series_id,
+                "latest_period": hit[0].isoformat(), "value": hit[1], "note": where}
+
     def availability_matrix(self) -> dict[str, Any]:
         """Slide-input availability: available / partial / unavailable / unverified."""
         needs = {
@@ -215,9 +223,29 @@ class FactPackBuilder:
             "M15": ["cba.bank.pnl.net_profit", "cba.bank.pnl.net_interest_income", "cba.bank.pnl.provisions", "cba.bank.pnl.cost_to_income", "cba.bank.roa_annualised"],
             "M16": ["cba.bank.capital.total", "cba.bank.equity_to_assets", "cba.bank.liquid_assets_ratio", "cba.bank.fx_assets_share"],
             "M17": ["cba.loans.region.total", "cba.hh_savings.region.total"],
+            "M19": ["cba.policy.rate", "cba.policy.corridor_floor", "cba.policy.corridor_ceiling"],
+            "M20": ["ssc.cpi.all.yoy", "cba.forecast.inflation"],
+            "M21": ["cba.fsr.car", "cba.fsr.lcr", "cba.fsr.npl_ratio", "cba.fsr.roa", "cba.fsr.roe"],
+            "M22": ["cba.fsr.stress.car", "cba.fsr.deposit_dollarisation"],
         }
-        unverified = ["Regulatory capital adequacy ratio (CBA aggregate)", "LCR / NSFR (published sector aggregates)", "Balance of payments / current account (CBA, 90-day lag)",
-                      "CBA FX interventions", "Stage 3 / IFRS 9 sector aggregates", "Real wage index (official)", "Regional population for per-capita measures"]
+        # Inputs the monthly statistical tables do not publish. Some of them are published elsewhere
+        # at a lower frequency, and saying only "unverified" would now be wrong: the entry names the
+        # publication that carries it, its frequency and the reporting date actually held.
+        unverified = [
+            self._elsewhere("Regulatory capital adequacy ratio", "cba.fsr.car",
+                            "Financial Stability Report, annual and half-yearly; not in the monthly tables"),
+            self._elsewhere("Liquidity coverage ratio (LCR)", "cba.fsr.lcr",
+                            "Financial Stability Report, annual and half-yearly; not in the monthly tables"),
+            {"item": "NSFR (published sector aggregate)", "status": "unverified",
+             "note": "not found in the monthly tables or in the stability reports collected"},
+            {"item": "Balance of payments / current account", "status": "unverified",
+             "note": "CBA publishes with about a 90-day lag; not collected"},
+            {"item": "CBA FX interventions", "status": "unverified", "note": "not published in the collected tables"},
+            {"item": "Stage 3 / IFRS 9 sector aggregates", "status": "unverified", "note": "not published in the collected tables"},
+            {"item": "Real wage index (official)", "status": "unverified",
+             "note": "not published; the deck shows an estimate derived from nominal wages and CPI, labelled as such"},
+            {"item": "Regional population for per-capita measures", "status": "unverified", "note": "not collected"},
+        ]
         matrix = {}
         missing = []
         for slide, ids in needs.items():
@@ -230,6 +258,15 @@ class FactPackBuilder:
                     dims = {"region": "national"}
                 if sid in ("cba.bank.capital.total",):
                     dims = {"currency": "all"}
+                if sid.startswith(("cba.fsr.", "cba.forecast.", "cba.policy.")):
+                    # scenario, vintage and exercise change with every edition, so availability asks
+                    # whether the series is published at all rather than whether one slice resolves
+                    hit = self.store.latest_any(sid)
+                    rows.append({"input": sid, "status": "available" if hit else "unavailable",
+                                 "latest_period": hit[0].isoformat() if hit else None})
+                    if not hit:
+                        missing.append(f"{slide}:{sid}")
+                    continue
                 s = self._series(sid, dims)
                 ok = not s.empty
                 rows.append({"input": sid, "status": "available" if ok else "unavailable", "latest_period": s.index[-1].isoformat() if ok else None})
@@ -736,18 +773,47 @@ class FactPackBuilder:
         return {k: d.get(k) for k in ("doc_id", "source_id", "dataset_id", "title_original", "title_en", "document_url", "discovery_url", "published_at",
                                        "published_at_basis", "retrieved_at", "sha256", "content_type", "size_bytes", "status")}
 
+    def _latest_publication_period(self, dataset_id: str) -> str | None:
+        """Latest period covered by a dataset that yields publications rather than observations.
+
+        The decision releases and the policy directions carry passages and decision records, not a
+        numeric series, so their freshness is the latest edition they report on.
+        """
+        row = self.db.conn.execute(
+            "SELECT MAX(COALESCE(p.reporting_period_end, p.announcement_date, p.published_at)) "
+            "FROM publications p JOIN publication_documents pd USING (publication_id) "
+            "JOIN documents d ON d.doc_id = pd.doc_id WHERE d.dataset_id = ?", (dataset_id,)).fetchone()
+        return row[0] if row and row[0] else None
+
+    def _latest_publication_release(self, dataset_id: str) -> tuple[str | None, str | None]:
+        """Release date of the newest edition of a publication dataset, with the basis for it."""
+        row = self.db.conn.execute(
+            "SELECT p.published_at, p.published_at_basis FROM publications p "
+            "JOIN publication_documents pd USING (publication_id) JOIN documents d ON d.doc_id = pd.doc_id "
+            "WHERE d.dataset_id = ? AND p.published_at IS NOT NULL ORDER BY p.published_at DESC LIMIT 1",
+            (dataset_id,)).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
     def source_register(self) -> list[dict[str, Any]]:
         out = []
         for sid, scfg, ds in config.iter_datasets():
             st = self.states.get(ds["id"], {})
             docs = [r for r in self.db.documents_for_dataset(ds["id"])]
             latest_doc = docs[-1] if docs else None
+            pub_release, pub_basis = self._latest_publication_release(ds["id"])
+            doc_release = latest_doc["published_at"] if latest_doc else None
+            doc_basis = latest_doc["published_at_basis"] if latest_doc else None
+            # documents are not ordered by date, so the newest edition of a publication dataset can
+            # be more recent than the document row that happens to be last
+            if pub_release and (not doc_release or pub_release > doc_release):
+                doc_release, doc_basis = pub_release, pub_basis
             out.append({"source_id": sid, "institution": scfg.get("institution"), "dataset_id": ds["id"], "title_en": ds.get("title_en"), "role": ds.get("role"),
                         "discovery_url": scfg.get("entry_point"), "document_url": latest_doc["document_url"] if latest_doc else None,
                         "title_original": latest_doc["title_original"] if latest_doc else None, "format": (latest_doc["stored_path"] or "").rsplit(".", 1)[-1] if latest_doc else None,
-                        "published_at": latest_doc["published_at"] if latest_doc else None, "published_at_basis": latest_doc["published_at_basis"] if latest_doc else None,
+                        "published_at": doc_release, "published_at_basis": doc_basis,
                         "frequency": ds.get("frequency"), "expected_lag_days": ds.get("expected_lag_days"), "parser": ds.get("parser"), "status": st.get("status"),
-                        "latest_period_end": st.get("latest_period_end"), "n_documents": len(docs), "history_in_file": ds.get("history_in_file"),
+                        "latest_period_end": st.get("latest_period_end") or self._latest_publication_period(ds["id"]),
+                        "n_documents": len(docs), "history_in_file": ds.get("history_in_file"),
                         "known_limitations": ds.get("limitations")})
         return out
 

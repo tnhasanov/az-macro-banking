@@ -65,6 +65,19 @@ class ObservationStore:
             s = s[s.index <= cutoff]
         return s
 
+    def latest_any(self, series_id: str) -> tuple[dt.date, float, str] | None:
+        """Latest reading of a series across every published slice.
+
+        Availability asks whether anything is published at all, which is a different question from
+        the one `series` answers: a stress path or a forecast is only addressable once its scenario
+        and vintage are known, and those change with each edition.
+        """
+        sub = self.df[self.df["series_id"] == series_id]
+        if sub.empty:
+            return None
+        last = sub.sort_values("period_end").iloc[-1]
+        return last["period_end"], float(last["value"]), last["dims"]
+
     def _is_forward_looking(self, series_id: str) -> bool:
         if series_id in self._forward_cache:
             return self._forward_cache[series_id]

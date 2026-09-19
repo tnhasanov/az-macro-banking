@@ -677,7 +677,15 @@ class MonthlyRenderer(PolicyStabilitySlides):
         d.add_table(s, 0.45, 1.45, 12.35, 5.25, ["Dataset", "Title", "Source", "Latest period", "Published", "Status", "Role"], rows[:32],
                     col_widths=[2.3, 4.6, 1.3, 1.1, 1.0, 1.6, 0.9], font_size=6.5, align=["l", "l", "l", "l", "l", "l", "l"], row_height=0.155)
         miss = self.fp["availability"]["unverified"]
-        d.add_footer(s, "Unverified / unavailable inputs: " + "; ".join(miss)[:400], d.page)
+        lower = [u for u in miss if not isinstance(u, str) and u["status"] != "unverified"]
+        none_ = [u if isinstance(u, str) else u["item"] for u in miss if isinstance(u, str) or u["status"] == "unverified"]
+        parts = []
+        if lower:
+            parts.append("Published only at a lower frequency: " + "; ".join(
+                f'{u["item"]} ({u["value"]:g}% at {u["latest_period"]}, from the Financial Stability Report)' for u in lower))
+        if none_:
+            parts.append("Not published in the collected sources: " + "; ".join(none_))
+        d.add_footer(s, " · ".join(parts), d.page)
         d.add_notes(s, "Publication dates: 'title_date' = date in the CBA link title; 'page_news_date' = SSC page date; n/a = not explicitly available (not inferred). Full register in the workbook.")
         self.slides_index.append({"id": "A02", "page": d.page, "title": "Source register"})
 
