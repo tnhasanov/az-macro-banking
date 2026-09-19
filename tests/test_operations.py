@@ -262,3 +262,22 @@ def test_an_exception_must_name_every_failing_period():
     accepted = classify(dict(check), dt.date(2023, 8, 1), full)
     assert accepted["severity"] == "accepted_exception" and accepted["ok"] is True
     assert accepted["exception"]["decided_by"] == "CRO"
+
+
+def test_a_run_without_the_analyst_narrative_says_so_rather_than_blaming_the_file():
+    """A scheduled run that falls back to facts-only text produces a different deck, so it is a
+    change - but the reason is the source, not an edit to a file nobody touched."""
+    from azmonitor.scheduling.fingerprint import describe_change
+
+    with_file = {"inputs": {"narrative": "file:abc123"}}
+    facts_only = {"inputs": {"narrative": "mode:facts_only"}}
+
+    assert describe_change(with_file, facts_only)["details"] == [
+        "the narrative source changed from an analyst narrative to facts_only text"]
+    assert describe_change(facts_only, with_file)["details"] == [
+        "the narrative source changed from facts_only text to an analyst narrative"]
+    # an edited analyst file is still reported as exactly that
+    assert describe_change(with_file, {"inputs": {"narrative": "file:def456"}})["details"] == [
+        "the supplied narrative changed"]
+    # and an unchanged narrative is not a reason for a new edition
+    assert describe_change(with_file, with_file)["trigger"] == "no material change"

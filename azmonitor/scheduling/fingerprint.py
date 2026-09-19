@@ -120,7 +120,16 @@ def describe_change(previous: dict[str, Any] | None, current: dict[str, Any]) ->
     if revised:
         details.append(f"{len(revised)} metric value(s) revised for an unchanged period, including {', '.join(sorted(revised)[:4])}")
     if prev.get("narrative") != cur.get("narrative"):
-        details.append("the supplied narrative changed")
+        # the component is "file:<hash>" for an analyst narrative and "mode:<mode>" otherwise, so
+        # say which of the two moved rather than always reporting a changed file
+        pn, cn = str(prev.get("narrative") or ""), str(cur.get("narrative") or "")
+        if pn.split(":")[0] != cn.split(":")[0]:
+            describe = lambda x: "an analyst narrative" if x.startswith("file:") else f"{x.split(':', 1)[-1]} text"
+            details.append(f"the narrative source changed from {describe(pn)} to {describe(cn)}")
+        elif cn.startswith("file:"):
+            details.append("the supplied narrative changed")
+        else:
+            details.append(f"the narrative mode changed to {cn.split(':', 1)[-1]}")
     if prev.get("config") != cur.get("config"):
         details.append("configuration changed")
     if prev.get("availability") != cur.get("availability"):
