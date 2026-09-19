@@ -13,12 +13,24 @@ own:
 """
 from __future__ import annotations
 
+import re
+
 import datetime as dt
 from typing import Any
 
 from ..narrative.fmt import num, plabel
 
 BAND = "Interest rate corridor"
+
+
+def _month(value: str | None) -> str:
+    """A release date shortened to its month, for the small print on a KPI card."""
+    if not value:
+        return "n/a"
+    try:
+        return dt.date.fromisoformat(value).strftime("%b %Y")
+    except ValueError:
+        return value
 
 
 def _d(value: str | None) -> str:
@@ -110,13 +122,17 @@ class PolicyStabilitySlides:
             (_pct((cpi.get("latest") or {}).get("value"), 1), "CPI inflation, actual",
              plabel((cpi.get("latest") or {}).get("period"), cpi.get("period_type"))),
         ]
+        # the horizon rides on the sub-line with the vintage: label and sub then take one line each,
+        # and neither runs past the bottom of the card
         for horizon, entry in list(by_horizon.items())[:3]:
-            kpis.append((_pct(entry["value"], 1), f"CBA inflation projection, {horizon}", f"{f.get('current_vintage')} round"))
+            short = re.sub(r"\s*\([^)]*\)", "", horizon or "")   # the full horizon label is in the table beside it
+            kpis.append((_pct(entry["value"], 1), "CBA inflation projection",
+                         f"{short}, {f.get('current_vintage')} round"))
         growth = [x for x in forecasts if x["series_id"].startswith("cba.forecast.gdp")]
         if growth:
             kind = "non-oil GDP" if "nonoil" in growth[0]["series_id"] else "GDP"
-            kpis.append((_pct(growth[0]["value"], 1), f"CBA {kind} growth, {growth[0].get('horizon')}",
-                         f"{f.get('current_vintage')} round"))
+            kpis.append((_pct(growth[0]["value"], 1), f"CBA {kind} growth",
+                         f"{growth[0].get('horizon')}, {f.get('current_vintage')} round"))
 
         def main(s, x, y, w, h):
             self._caption(s, x, y, w * 0.55, "Actual CPI inflation, y/y (%) — outcomes only")
@@ -170,7 +186,10 @@ class PolicyStabilitySlides:
             row = dash.get(series_id)
             if not row:
                 return ("not published", label, "not in the collected reports")
-            return (_pct(row["value"], 1), label, f"{plabel(row['observation_date'], 'month_end_stock')} · published {_d(row['publication']['published_at'])}")
+            # the day of the release is in the table beside this card and in the subtitle; the card
+            # keeps the month so the sub-line stays on one line and does not print past the panel
+            return (_pct(row["value"], 1), label,
+                    f"{plabel(row['observation_date'], 'month_end_stock')} · published {_month(row['publication']['published_at'])}")
 
         kpis = [kpi_for("cba.fsr.car", "Capital adequacy (regulatory)"), kpi_for("cba.fsr.lcr", "Liquidity coverage ratio"),
                 kpi_for("cba.fsr.npl_ratio", "NPL ratio (stability report)"), kpi_for("cba.fsr.roe", "Return on equity"),
@@ -316,7 +335,7 @@ class PolicyStabilitySlides:
                   x.get("scenario") or "baseline", x.get("publication", {}).get("label") or ""] for x in (fc.get("current") or [])]
         d.add_text(s, 4.7, 1.45, 4.2, 0.25, f"CBA projections, {fc.get('current_vintage')} round", size=9, bold=True, color=self.C["muted"])
         d.add_table(s, 4.7, 1.72, 4.2, 2.2, ["Projection", "Horizon", "Target", "Value", "Scenario", "Edition"], frows,
-                    col_widths=[1.0, 0.9, 0.8, 0.5, 0.5, 0.5], font_size=7)
+                    col_widths=[0.9, 0.85, 0.75, 0.45, 0.65, 0.6], font_size=7)
         st = (f.get("stress") or {}).get("results") or []
         srows = [[x.get("scenario") or "", x["observation_date"], _pct(x["value"], 1), (x.get("dims") or {}).get("exercise", "")]
                  for x in st]
@@ -331,7 +350,7 @@ class PolicyStabilitySlides:
                          {"text": f"{(r['primary'] or {}).get('series_id')} {num((r['primary'] or {}).get('value'), 1, '%')} "
                                   f"({(r['primary'] or {}).get('period')}) vs {(r['secondary'] or {}).get('series_id')} "
                                   f"{num((r['secondary'] or {}).get('value'), 1, '%')} ({(r['secondary'] or {}).get('period')}). "
-                                  f"{r['note']} — {r['resolution']}.", "size": 8}])
+                                  f"{r['note'][:1].upper()}{r['note'][1:]} — {r['resolution']}.", "size": 8}])
         d.add_text(s, 9.1, 1.72, 3.7, 4.6, body or [[{"text": "No overlapping concepts in this edition.", "size": 9}]],
                    size=8.5, color=self.C["text"], space_after=4, autofit=True)
         d.add_footer(s, self._source(["CBA monetary policy decisions, Monetary Policy Review, Financial Stability Report"]), d.page)

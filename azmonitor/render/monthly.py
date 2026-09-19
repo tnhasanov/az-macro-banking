@@ -130,7 +130,11 @@ class MonthlyRenderer(PolicyStabilitySlides):
         y = y0
         for i, (val, lbl, sub) in enumerate(kpis[:6]):
             col, row = i % 2, i // 2
-            d.add_kpi(s, right_x + col * (tw + gap), y0 + row * (th + gap), tw, th, val, lbl, sub, value_size=(16 if len(val) > 11 else None))
+            # a card whose label and sub-line together run past two lines is set one point smaller,
+            # so the last line stays inside the panel instead of printing across its edge
+            small = len(lbl) + len(sub or "") > 46
+            d.add_kpi(s, right_x + col * (tw + gap), y0 + row * (th + gap), tw, th, val, lbl, sub,
+                      value_size=(16 if len(val) > 11 else None), label_size=(7 if small else None))
         rows_used = (n_k + 1) // 2
         y = y0 + rows_used * (th + gap) + 0.05
         so_h = 1.25
