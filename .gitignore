@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# Persistent dataset and generated outputs live outside source control.
+# Configure AZMONITOR_DATA_DIR / AZMONITOR_OUTPUT_DIR for a persistent runner.
+data/
+outputs/
+*.lock
+
+# Secrets
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

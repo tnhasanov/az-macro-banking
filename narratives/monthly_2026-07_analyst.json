@@ -1,0 +1,217 @@
+{
+  "report_type": "monthly",
+  "as_of": "2026-09-19",
+  "lang": "en",
+  "mode": "analyst_file",
+  "author": "Analyst narrative prepared from the validated fact pack (edition 2026-07, banking data to end-July 2026, macro data to January–August 2026). Every number is taken from the fact pack; the grounding validator rejects any figure that is not an approved fact-pack value.",
+  "cover": {
+    "headline": "Credit is growing at 12.9% y/y while deposits grow 6.5%, lifting the loan-to-deposit ratio 4.3 pp to 76.8%. Overdue balances are up AZN 194 mln y/y (2.1% of loans) although the bank NPL ratio is broadly stable at 2.9%. Sector profit is up 25.8% and dollarisation keeps falling. Non-oil growth has eased to 2.1% YTD with construction value added down 12.5% while construction lending is up 43.3%."
+  },
+  "findings": [
+    {
+      "id": "F1", "rank": 1, "slide_id": "M14", "classification": "interpretation", "direction": "adverse", "status": "continuing",
+      "statement": "Loans to the economy grew 12.9% y/y at end-July 2026 against 6.5% for deposits, a 6.4 pp gap; the loan-to-deposit ratio rose 4.3 pp y/y to 76.8%.",
+      "metric_refs": ["m14.loans_yoy", "m14.deposits_yoy", "cba.loans_minus_deposits.yoy_growth_gap", "cba.ldr"], "period": "2026-07-31", "comparison": "y/y",
+      "banking_relevance": "Sector funding is tightening at the margin; deposit growth was held back by a 4.3% y/y fall in non-financial corporate deposits. Worth comparing with the bank's own loan-to-deposit trend and wholesale or FX funding fallbacks.",
+      "caveat": "The loan-to-deposit ratio is gross loans of all credit institutions over total deposits; it is not a regulatory liquidity ratio."
+    },
+    {
+      "id": "F2", "rank": 2, "slide_id": "M10", "classification": "observed_fact", "direction": "adverse", "status": "new",
+      "statement": "Overdue loans (all credit institutions) reached AZN 723 mln, up AZN 194 mln y/y, and 2.1% of loans (+0.4 pp). Bank NPLs rose AZN 140 mln to AZN 932 mln, but the NPL ratio moved only 0.1 pp to 2.9% because portfolio growth offset most of the increase (numerator effect +0.49 pp, denominator effect -0.37 pp).",
+      "metric_refs": ["cba.loans.overdue", "cba.loans.overdue_ratio", "cba.bank.npl.total", "cba.bank.npl.ratio", "cba.bank.npl.decomp_yoy"], "period": "2026-07-31", "comparison": "y/y",
+      "banking_relevance": "Headline NPL stability is partly a denominator effect. The consumer NPL ratio is 3.7% (+0.3 pp y/y) versus 3.0% for business loans; early-arrears trends in consumer lending are the item to check internally.",
+      "caveat": "Overdue loans and prudential NPLs are different published concepts; the decomposition is arithmetic and does not establish cures or recoveries."
+    },
+    {
+      "id": "F3", "rank": 3, "slide_id": "M11", "classification": "observed_fact", "direction": "favourable", "status": "continuing",
+      "statement": "Deposit growth of 6.5% y/y was driven by households (+15.8% y/y, contributing 5.8 pp) and financial corporations (+3.1 pp), while non-financial corporate deposits fell 4.3% y/y (-2.4 pp). The FX share of deposits fell 3.5 pp to 34.7% and the household FX share fell 4.2 pp to 28.1%.",
+      "metric_refs": ["cba.deposits.total.yoy", "cba.deposits.hh.total.yoy", "cba.deposits.hh.contrib", "cba.deposits.nfc.total.yoy", "cba.deposits.fx_share", "cba.deposits.hh.fx_share"], "period": "2026-07-31", "comparison": "y/y",
+      "banking_relevance": "Retail manat deposits are the growing funding source; corporate balances are the volatile part. Product and pricing plans for household term deposits (63.4% of household deposits are time deposits) matter more than a year ago.",
+      "caveat": "Aggregate corporate deposit movements do not establish concentration in particular customers; FX shares are at current exchange rates."
+    },
+    {
+      "id": "F4", "rank": 4, "slide_id": "M15", "classification": "observed_fact", "direction": "favourable", "status": "continuing",
+      "statement": "Banking-sector net profit for January–July 2026 was AZN 859 mln, up 25.8% y/y: net interest income added AZN 196 mln and non-interest income AZN 123 mln, against AZN 98 mln more operating expense and AZN 36 mln more profit tax; the provision charge was flat at AZN 235 mln.",
+      "metric_refs": ["cba.bank.pnl.net_profit", "cba.bank.pnl.net_profit.yoy", "bridge.net_interest_income", "bridge.non_interest_income", "bridge.non_interest_expense", "bridge.tax", "cba.bank.pnl.provisions"], "period": "2026-07-31", "comparison": "YTD y/y",
+      "banking_relevance": "Cost-to-income improved 3.2 pp to 58.9% and annualised ROE is 19.5%. Earnings capacity gives the sector room to absorb higher impairment if arrears keep rising.",
+      "caveat": "Prudential P&L, not IFRS; ROA/ROE annualise YTD profit over average month-end balances."
+    },
+    {
+      "id": "F5", "rank": 5, "slide_id": "M09", "classification": "interpretation", "direction": "adverse", "status": "new",
+      "statement": "Non-oil GDP growth eased to 2.1% YTD in January–August (2.2% in January–July) and construction value added fell 12.5% YTD, yet construction loans grew 43.3% y/y and now make up 7.5% of real-sector loans (+1.6 pp).",
+      "metric_refs": ["ssc.hl.gdp_nonoil.growth", "ssc.gdp.sector.construction.real_growth_ytd", "m09.construction.credit", "m09.construction.share"], "period": "2026-08-31", "comparison": "YTD vs prior edition",
+      "banking_relevance": "The largest credit-activity divergence in the mapping. Project-finance timing, reclassification or price effects can explain part of it; the sector deserves a specialist review before any conclusion about repayment capacity.",
+      "caveat": "Nominal loan-stock growth (CBA) is compared with real value-added growth (SSC, YTD); coverage and basis differ."
+    }
+  ],
+  "slides": {
+    "M02": {"title": "Five findings: credit outpaces deposits, overdue balances rise, dollarisation and corporate deposits fall, profits up 25.8%, construction diverges"},
+    "M03": {"title": "Scorecard: funding and asset-quality indicators weaken while profitability, dollarisation and inflation improve"},
+    "M04": {
+      "title": "Growth is easing at the margin: real GDP +1.2% YTD with non-oil +2.1% and oil-gas -0.8%; construction is the main drag",
+      "interpretations": [
+        "Non-oil GDP growth eased to 2.1% YTD in January–August from 2.2% in January–July; oil-gas value added fell 0.8%. Real GDP growth is 1.2% YTD.",
+        "Transport and storage (+8.7%), information and communication (+10.7%) and trade (+3.9%) lead; construction value added is down 12.5% YTD after -9.4% in January–July.",
+        "Non-oil activities make up 70.1% of nominal GDP (+0.7 pp y/y); industry remains the largest activity at 34.7% of GDP."
+      ],
+      "so_what": "Service sectors are generating the activity that supports credit demand; construction-linked exposures deserve closer review because output is contracting while sector lending expands quickly (see the credit-versus-activity slide).",
+      "caveat": "YTD growth is cumulative; the change between editions is a change in the cumulative rate, not a monthly reading."
+    },
+    "M05": {
+      "title": "Inflation steady at 5.7% y/y; nominal wages +7.2% YTD leave estimated real wage growth near 1.4%",
+      "interpretations": [
+        "CPI rose 5.7% y/y in August 2026 (5.8% in July) and 0.2% m/m; the YTD average is also 5.7%.",
+        "Food prices (+7.2% y/y) are rising faster than non-food goods (+3.7%) and services (+5.0%).",
+        "Average nominal wages grew 7.2% YTD to January–July (AZN 1,177) and nominal income 9.4% YTD; the real wage estimate is +1.4% YTD, up from 1.2%."
+      ],
+      "so_what": "Household purchasing power is growing only slowly while retail turnover still expands 3.9% in real terms; with the consumer NPL ratio at 3.7%, affordability of consumer credit is a question for internal data, not this aggregate.",
+      "caveat": "Real wage growth is an estimate (nominal YTD wage growth deflated by the YTD average CPI) and not a debt-service measure."
+    },
+    "M06": {
+      "title": "Services lead, construction lags: ICT +10.7%, transport +8.7%, non-oil industry +5.4% YTD; construction value added -12.5%",
+      "interpretations": [
+        "Non-oil industrial output accelerated to +5.4% YTD from +4.4%; agriculture slowed to +2.6% from +2.8%; total industry including oil-gas is -0.4%.",
+        "Fixed capital investment is up 10.0% YTD, but non-oil investment only 1.4% (1.9% in January–July).",
+        "Construction value added fell 12.5% YTD, the largest deterioration between editions (-9.4% in January–July)."
+      ],
+      "so_what": "Construction is the sector selected for further investigation this month: contracting output, weak non-oil investment and rapid sector lending point in different directions.",
+      "caveat": "Rows mix output, services turnover and investment measures; a change between editions is a change in cumulative growth."
+    },
+    "M07": {
+      "title": "Exports +39.1% YTD to USD 20.1 bn and imports -27.4%: a USD 10.3 bn trade surplus; CBA reserves up 23.0% y/y to USD 13.8 bn",
+      "interpretations": [
+        "Exports reached USD 20.1 bn in January–July 2026 (+39.1% y/y) while imports fell to USD 9.9 bn (-27.4%); the trade surplus is USD 10.3 bn.",
+        "Non-oil-gas exports are reported at USD 5.9 bn, up from USD 2.1 bn a year earlier (+180% as published), a large base and classification effect that deserves a source check.",
+        "CBA official reserves rose to USD 13.8 bn at end-July (+23.0% y/y); SSC strategic FX reserves are USD 90.8 bn; the manat is unchanged at 1.70 per USD."
+      ],
+      "so_what": "The external position is supportive of manat liquidity and FX supply, which is consistent with falling deposit dollarisation; no causal link between trade, reserves and deposits is asserted here.",
+      "caveat": "Trade data lag the banking anchor by one month; CBA reserves are distinct from total strategic reserves; merchandise trade is not the current account."
+    },
+    "M08": {
+      "title": "Lending +12.9% y/y to AZN 34.2 bn: households add 7.8 pp, construction 2.6 pp and transport 2.0 pp while agriculture and mining shrink",
+      "interpretations": [
+        "Household loans grew 13.2% y/y and account for 59.6% of real-sector loans; they contributed 7.8 pp of the 12.9% growth.",
+        "Construction (+43.3% y/y) and transport and communication (+32.1%) are the fastest-growing corporate segments; trade and services grew 6.8%, agriculture fell 9.4% and mining and energy fell 25.0%.",
+        "New lending was AZN 10.4 bn over the latest three months; in July new loans were up 20.8% y/y after +50.8% in June. Bank business loans grew 15.1%, consumer loans 11.5% and mortgages 6.4%."
+      ],
+      "so_what": "Growth is concentrated in households and two fast-growing corporate segments; the sector split of new lending is not published, so origination trends by segment must come from internal data.",
+      "caveat": "Stock changes combine originations, repayments, write-offs, reclassifications and valuation; overdue loans are not sector-classified in the CBA table."
+    },
+    "M09": {
+      "title": "Credit and activity diverge most in construction (loans +43.3% vs value added -12.5%) and agriculture (loans -9.4% vs output +2.6%)",
+      "interpretations": [
+        "Construction combines the fastest loan growth (+43.3% y/y) with the weakest activity (-12.5% YTD); transport shows strong credit (+32.1%) and strong activity (+8.7%).",
+        "Trade is aligned (loans +6.8%, activity +3.9%), industry roughly aligned (+3.3% vs +3.4%); agriculture lending is shrinking (-9.4%) despite +2.6% output growth.",
+        "Mining and energy loans fell 25.0% against flat activity (+0.1%); the segment is small (1.6% of real-sector loans)."
+      ],
+      "so_what": "Questions for sector specialists rather than credit-limit changes: is construction lending financing projects whose output is recognised later, and is the agriculture decline a repayment cycle or a policy-lending shift?",
+      "caveat": "Nominal stock growth versus real flow growth, with different coverage and reference periods (end-July loans, January–August value added)."
+    },
+    "M10": {
+      "title": "Overdue balances up AZN 194 mln y/y to 2.1% of loans; bank NPL ratio 2.9% (+0.1 pp) as portfolio growth offsets AZN 140 mln more NPLs",
+      "interpretations": [
+        "Bank NPLs rose to AZN 932 mln (+17.7% y/y); the y/y ratio change of +0.13 pp splits into a +0.49 pp numerator effect and a -0.37 pp denominator effect. Month on month the ratio fell 0.09 pp.",
+        "The consumer NPL ratio is 3.7% (+0.3 pp y/y), business 3.0% and mortgage 0.8%; the allowance stock covers 209.1% of NPLs and 6.1% of gross loans.",
+        "Overdue loans across all credit institutions reached AZN 723 mln (+AZN 194 mln y/y), 2.1% of loans against 1.7% a year earlier."
+      ],
+      "so_what": "Asset-quality deterioration is visible in balances rather than ratios; the consumer segment is where the ratio itself is rising. Internal early-arrears and roll-rate data are needed to tell new formation from slower write-offs.",
+      "caveat": "Overdue loans (all credit institutions) and NPLs (banks, prudential) are different concepts; the decomposition is sequence-dependent and does not establish causes."
+    },
+    "M11": {
+      "title": "Deposits +6.5% y/y to AZN 44.5 bn: households (+15.8%) add 5.8 pp while non-financial corporate deposits fall 4.3% (-2.4 pp)",
+      "interpretations": [
+        "Household deposits rose to AZN 17.9 bn (+15.8% y/y) and now hold a 40.2% share (+3.2 pp); non-financial corporate deposits fell to AZN 22.2 bn (-4.3% y/y, about AZN 1,000 mln lower).",
+        "Financial-corporation deposits grew 41.8% y/y and contributed 3.1 pp; total deposits rose AZN 346 mln in July after AZN 1,923 mln in June.",
+        "Deposit growth improved from 2.8% y/y at end-June to 6.5% at end-July, partly a base effect from corporate balances."
+      ],
+      "so_what": "Retail balances are the reliable growth engine; corporate and financial-institution balances are volatile and can swing monthly deposit growth by several percentage points.",
+      "caveat": "Aggregate corporate deposit growth does not establish concentration in particular customers."
+    },
+    "M12": {
+      "title": "Dollarisation keeps falling: deposit FX share 34.7% (-3.5 pp y/y), household FX share 28.1% (-4.2 pp); loan FX share edges up to 15.2%",
+      "interpretations": [
+        "The FX share of corporate deposits fell 2.6 pp to 37.9%; the household FX share fell 4.2 pp to 28.1% and household savings show the same 28.1%.",
+        "Time deposits are 46.5% of total deposits (+0.1 pp) and 63.4% of household deposits (+1.8 pp), so the retail base is lengthening in term as well as de-dollarising.",
+        "The FX share of loans rose 1.5 pp to 15.2%; FX assets are 28.2% of bank assets and FX liabilities 33.3%, both down about 2.5 pp y/y."
+      ],
+      "so_what": "Manat funding is becoming more available while FX lending inches up; the currency mix of new business and the pricing of manat term deposits are the items to review, without inferring any open position from these aggregates.",
+      "caveat": "Shares are at current exchange rates (USD/AZN unchanged at 1.70) and are not exchange-rate-adjusted flows."
+    },
+    "M13": {
+      "title": "New AZN lending priced at 19.0% against 7.5% on new term deposits: an 11.5 pp indicative spread, 0.4 pp narrower y/y",
+      "interpretations": [
+        "The average rate on new AZN loans was 19.0% in July (-0.1 pp y/y) while new AZN term deposits paid 7.5% (+0.4 pp), narrowing the indicative spread to 11.5 pp; month on month the spread widened 1.0 pp.",
+        "In FX, new loans were priced at 7.1% (+0.3 pp) and new term deposits at 3.0%, down from 3.6%; the FX spread widened 0.9 pp to 4.1 pp.",
+        "Rates on outstanding balances are lower and stickier: 15.7% on AZN loans and 9.1% on AZN term deposits."
+      ],
+      "so_what": "Deposit competition is showing in manat term-deposit pricing while loan pricing is flat; a rising share of household term deposits at higher rates would compress margins unless asset yields follow.",
+      "caveat": "Averages across all maturities and institutions; composition changes can move them without like-for-like repricing. The spread is not NIM."
+    },
+    "M14": {
+      "title": "Loan growth (12.9%) outpaces deposit growth (6.5%) by 6.4 pp; loan-to-deposit ratio up 4.3 pp to 76.8%",
+      "interpretations": [
+        "Loans rose AZN 3.9 bn y/y and deposits AZN 2.7 bn; the loan-to-deposit ratio is 76.8% against 72.4% a year earlier.",
+        "The long-term share of loans slipped 1.0 pp to 83.0% while the time share of deposits is flat at 46.5%; broad money M3 grew 13.1% y/y.",
+        "Loans to the economy were 25.1% of trailing-four-quarter nominal GDP at end-March 2026 (+1.8 pp y/y)."
+      ],
+      "so_what": "The sector is lending faster than it collects deposits; without maturity data by bank this is a prompt to review own liquidity buffers and funding plans, not evidence of a structural gap.",
+      "caveat": "Partial maturity buckets do not give a liquidity or repricing gap; bank-specific ALM data are required."
+    },
+    "M15": {
+      "title": "Net profit +25.8% y/y to AZN 859 mln (Jan–Jul): net interest income +196 mln and other income +123 mln outweigh +98 mln opex and +36 mln tax",
+      "interpretations": [
+        "Net interest income reached AZN 1,985 mln (+10.9% y/y) and non-interest income AZN 1,197 mln; operating expenses were AZN 1,875 mln and the provision charge AZN 235 mln (AZN 238 mln a year earlier).",
+        "Cost-to-income fell 3.2 pp to 58.9%; annualised ROA is 2.5% and ROE 19.5%; July's monthly profit was AZN 142 mln versus AZN 106 mln in July 2025.",
+        "The bridge reconciles exactly to the AZN 176 mln increase in net profit; there is no material residual."
+      ],
+      "so_what": "Earnings are income-driven, not provision-release-driven, which is the healthier pattern; the question is how much of the fee and FX income is repeatable.",
+      "caveat": "Prudential P&L; ROA/ROE annualise YTD profit over average month-end balances since December."
+    },
+    "M16": {
+      "title": "Book capital AZN 7.6 bn (+9.1% y/y) keeps capital/assets at 12.5%; liquid assets fall 5.6 pp to 28.4% of assets as balance sheets grow 9.5%",
+      "interpretations": [
+        "Total capital rose AZN 639 mln y/y to AZN 7.6 bn while total assets grew to AZN 61.0 bn (+9.5%); the book capital ratio is unchanged at 12.5%.",
+        "Cash, CBA accounts, nostro balances and securities are 28.4% of assets, down from 33.9%, consistent with faster lending than deposit growth.",
+        "FX assets are 28.2% of the balance sheet and FX liabilities 33.3%; the number of banks fell to 21 from 22."
+      ],
+      "so_what": "Book measures only: the capital ratio is stable and liquidity buffers are lower than a year ago; regulatory capital adequacy, LCR and NSFR are not published in these tables and are not inferred.",
+      "caveat": "Aggregate book ratios do not establish the position of any single bank."
+    },
+    "M17": {
+      "title": "Baku books 76.2% of bank loans and 87.6% of household savings; Abşeron-Xızı (3.9% / 4.0%) and Gəncə-Daşkəsən (3.0% / 1.6%) are the largest regional markets",
+      "interpretations": [
+        "Outside Baku, loan shares exceed savings shares in most regions (Gəncə-Daşkəsən 3.0% vs 1.6%, Lənkəran-Astara 2.3% vs 0.9%, Şəki-Zaqatala 2.0% vs 0.9%).",
+        "Abşeron-Xızı is the only region where savings (4.0%) roughly match loans (3.9%)."
+      ],
+      "so_what": "Regional loan-to-savings ratios far above 100% reflect booking of head-office and corporate lending as well as genuine regional credit demand; they do not by themselves indicate under-served or over-indebted populations.",
+      "caveat": "Booking location can differ from the location of economic activity."
+    },
+    "M18": {"title": "Three questions for management: funding gap, consumer arrears, construction credit"}
+  },
+  "questions": [
+    {
+      "question": "Is the sector-wide gap between loan growth (12.9%) and deposit growth (6.5%) visible in the bank's own funding, and what is the fallback if corporate deposits keep falling?",
+      "signal": "Loan-to-deposit ratio 76.8% (+4.3 pp y/y); non-financial corporate deposits -4.3% y/y; liquid assets 28.4% of bank assets (-5.6 pp).",
+      "why": "Funding costs and liquidity buffers move first when credit outpaces deposits; manat term-deposit pricing is already rising (7.5%, +0.4 pp).",
+      "internal_data": "Own loan-to-deposit trend, deposit concentration, wholesale and FX funding capacity, liquidity buffer against internal limits.",
+      "watch": "CBA deposits table 2.11 and rates table 3.2.1 for August 2026 (expected by end-September).",
+      "function": "Treasury / ALM"
+    },
+    {
+      "question": "Overdue loans are up AZN 194 mln y/y and the consumer NPL ratio is 3.7% (+0.3 pp): are internal early-arrears and roll rates in consumer lending moving the same way?",
+      "signal": "Overdue ratio 2.1% (+0.4 pp); NPL balance +AZN 140 mln with the ratio held at 2.9% by portfolio growth.",
+      "why": "Ratio stability driven by the denominator can mask new formation; provisioning and underwriting settings depend on the direction of arrears.",
+      "internal_data": "Vintage arrears, roll rates, restructured exposures, coverage by segment.",
+      "watch": "CBA NPL structure table 5.6 for August 2026; next monthly edition.",
+      "function": "Credit Risk"
+    },
+    {
+      "question": "Construction loans are up 43.3% y/y while construction value added is down 12.5% YTD: which projects and borrowers drive sector credit, and how is completion risk assessed?",
+      "signal": "Construction is 7.5% of real-sector loans (+1.6 pp y/y); non-oil investment growth is only 1.4% YTD.",
+      "why": "The largest credit-versus-activity divergence in the mapping; project timing or reclassification may explain it, but that needs confirmation.",
+      "internal_data": "Sector exposure by project stage, collateral and completion status, utilisation of committed lines.",
+      "watch": "SSC January–September macro release (value added by activity) and CBA sector loans table 2.8 for August 2026.",
+      "function": "Business / Credit Risk"
+    }
+  ]
+}
