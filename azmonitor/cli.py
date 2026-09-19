@@ -195,6 +195,19 @@ def cmd_schedule(args) -> int:
         db.close()
 
 
+def cmd_archive(args) -> int:
+    from .scheduling import archive
+
+    if args.action == "index":
+        _print(archive.index())
+        return 0
+    if args.action == "plan":
+        _print(archive.plan())
+        return 0
+    _print(archive.prune(dry_run=not args.apply))
+    return 0
+
+
 def cmd_delivery(args) -> int:
     from . import config
     from .delivery import dispatch
@@ -316,6 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=["status", "check"], nargs="?", default="status",
                    help="status: readiness and history; check: compare config with the installed timers")
     s.set_defaults(fn=cmd_schedule)
+
+    s = sub.add_parser("archive", help="The report archive: what it holds, and what retention would remove")
+    s.add_argument("action", choices=["index", "plan", "prune"], nargs="?", default="index")
+    s.add_argument("--apply", action="store_true", help="actually remove; without it, prune only reports")
+    s.set_defaults(fn=cmd_archive)
 
     s = sub.add_parser("delivery", help="The delivery ledger: what was sent, what is waiting, what needs a person")
     s.add_argument("action", choices=["status", "resolve", "send"])
