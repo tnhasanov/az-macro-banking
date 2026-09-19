@@ -68,7 +68,8 @@ def backup_database(db_path: Path, dest_dir: Path, keep: int = 7) -> dict[str, A
     finally:
         con.close()
     ok, detail = integrity_ok(target)
-    manifest = {"created_at": stamp, "source": str(db_path), "file": target.name, "bytes": target.stat().st_size,
+    # "file" is the name, as the manifest sits beside the file; "path" is what a caller can open
+    manifest = {"created_at": stamp, "source": str(db_path), "file": target.name, "path": str(target), "bytes": target.stat().st_size,
                 "integrity": detail, "counts": table_counts(target) if ok else {}}
     (dest_dir / f"monitor-{stamp}.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (dest_dir / "latest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

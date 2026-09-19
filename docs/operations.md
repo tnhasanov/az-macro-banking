@@ -92,6 +92,47 @@ both believe they hold it. A lock whose holder process no longer exists, or whic
 `outputs/latest` is repointed only after a successful render; the run state records the failure while
 `last_successful_run` keeps its previous value.
 
+### Recovery: bringing the monitor up on a machine that has nothing
+
+A container that has just started has no dataset and no reporting memory. These are the exact steps;
+they are the same ones `scripts/run_due.sh` performs for itself on every scheduled run.
+
+```bash
+# 1. environment
+bash scripts/setup_env.sh                    # python deps, LibreOffice, poppler
+export TZ=Asia/Baku
+export AZMONITOR_DATA_DIR=/srv/azmonitor/data
+export AZMONITOR_OUTPUT_DIR=/srv/azmonitor/outputs
+export AZMONITOR_RESTORE_CMD='...'           # whatever brings data/ back (see above)
+export AZMONITOR_SAVE_CMD='...'              # whatever writes it away again
+
+# 2. restore and check what came back before trusting it
+python -m azmonitor.cli status                # documents, publications, latest periods, last run
+
+# 3. one scheduled cycle: restore, verify, back up, refresh, validate, publish what is due, save
+./scripts/run_due.sh; echo "exit $?"
+```
+
+`run_due.sh` exit codes: **0** ok, **2** partial, **3** failed, **4** another run holds the lock,
+**5** the restore failed and nothing was processed, **6** the work succeeded but saving state back
+failed (the outputs are on local disk and the next run will redo the save).
+
+Failure cases and what to do:
+
+| Symptom | What happened | What to do |
+|---|---|---|
+| exit 5, `restore_verification.ok = false` | the restored database failed its integrity check, or held fewer documents than `settings.persistence.min_documents` | nothing was overwritten: fix the source of the restore, or restore an earlier file from `data/backups/`, then re-run |
+| exit 4 | a previous run is still going, or its lock is younger than `schedule.lock_stale_minutes` | wait; a lock whose process is gone is taken over automatically and the takeover is logged |
+| exit 3 with the previous report still current | the run failed after restoring | `outputs/latest` still points at the last good edition; read `data/state/last_run_due.json` for the failing step and `data/logs/` for the traceback |
+| exit 2, `monthly.status = blocked` | a critical data-quality check failed inside the displayed window | fix the source data, or record a justified exception in `config/quality_exceptions.yaml` (see `docs/quality_exceptions.md`) |
+| the database is unusable | corruption, a truncated copy | `python -c "from azmonitor.storage.backup import restore_database as r; print(r('data/backups/<file>.sqlite', 'data/monitor.sqlite'))"` - it refuses a backup that fails its integrity check and keeps the existing file until the new one passes; `data/backups/latest.json` names the newest snapshot and its row counts |
+| nothing restored at all | no store configured yet | `python -m azmonitor.cli backfill --start 2020-01` rebuilds from the sources; it re-downloads everything and takes about half an hour |
+
+To rehearse a recovery without touching the live dataset, point `AZMONITOR_DATA_DIR` and
+`AZMONITOR_OUTPUT_DIR` at empty directories and run the cycle there. The first run restores and
+publishes whatever is due; a second run over the same inputs reports `unchanged` and writes no new
+version.
+
 ### Vintages and the as-of definition
 
 * Observations are append-only. A replacement file with a different value for an existing (series, dims, period) supersedes the old row (`status='superseded'`, `superseded_at`) and adds the new one with a new `vintage_id`. Revisions since the previous edition appear in appendix A03 and the workbook `Revisions` sheet.
