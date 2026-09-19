@@ -561,8 +561,15 @@ class DecisionUpdate(BriefRenderer):
             d.add_table(s, x, y + 0.25, w * 0.45, h * 0.5, ["", "Previous", "Current"], rows,
                         col_widths=[1.4, 1.0, 1.05], font_size=8)
             d.add_text(s, x + w * 0.47, y, w * 0.53, 0.25, "What the statement says", size=9, bold=True, color=self.C["muted"])
+            # a verbatim extract is cut at a sentence boundary, so the reader can see the quotation
+            # ends rather than wondering whether the statement itself stops mid-clause
+            rationale = decision.get("rationale") or ""
+            if len(rationale) > 1100:
+                head = rationale[:1100]
+                cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+                rationale = (head[:cut + 1] if cut > 600 else head.rsplit(" ", 1)[0]) + " […]"
             d.add_text(s, x + w * 0.47, y + 0.25, w * 0.53, h * 0.75,
-                       [[{"text": (decision.get("rationale") or "")[:1100], "size": 9}]], size=9,
+                       [[{"text": rationale, "size": 9}]], size=9,
                        color=self.C["text"], autofit=True)
             rows2 = [[i["label"], _snap(i)[0], _snap(i)[1]] for i in (self.pack.get("context") or {}).get("items", [])[:6]]
             d.add_text(s, x, y + h * 0.56, w * 0.45, 0.25, "Banking context at the latest month", size=9, bold=True,
