@@ -333,11 +333,26 @@ class MprBrief(BriefRenderer):
 
 
 class FsrBrief(BriefRenderer):
+    def _this_exercise(self, stab: dict[str, Any]) -> list[dict[str, Any]]:
+        """Stress results from this report's own exercise only.
+
+        Results from two exercises are not one path: the 2023 round projected 2024 from end-2023
+        data and the 2025 round projects 2026 from end-2025 data. Drawing them on one axis would
+        show a trajectory nobody published.
+        """
+        results = stab.get("stress_tests", {}).get("results") or []
+        pub_id = self.pub.get("publication_id") or self.pub.get("id")
+        mine = [r for r in results if (r.get("publication") or {}).get("id") == pub_id]
+        if mine:
+            return mine
+        exercises = sorted({(r.get("dims") or {}).get("exercise") for r in results if (r.get("dims") or {}).get("exercise")})
+        return [r for r in results if not exercises or (r.get("dims") or {}).get("exercise") == exercises[-1]]
+
     def render(self, out_path: Path) -> dict[str, Any]:
         stab = self.pack["stability"]
         dash = {r["series_id"]: r for r in stab.get("dashboard") or []}
         car, lcr = dash.get("cba.fsr.car"), dash.get("cba.fsr.lcr")
-        stress = stab.get("stress_tests", {}).get("results") or []
+        stress = self._this_exercise(stab)
         adverse = [x for x in stress if x.get("scenario") == "adverse"]
         self.cover("S01", f"{self.pub.get('type')} {self.pub.get('edition')}: what the Central Bank found",
                    f"Reporting period {self.pub.get('reporting_period_end')} · published {_d(self.pub.get('published_at'))} · "
@@ -431,7 +446,7 @@ class FsrBrief(BriefRenderer):
 
     def s04_stress(self, stab: dict[str, Any]):
         d = self.d
-        results = stab.get("stress_tests", {}).get("results") or []
+        results = self._this_exercise(stab)
         scenarios = sorted({r.get("scenario") for r in results if r.get("scenario")})
         years = sorted({r["observation_date"][:4] for r in results})
         kpis = []
@@ -451,7 +466,10 @@ class FsrBrief(BriefRenderer):
                        size=9, bold=True, color=self.C["muted"])
             d.add_bar_chart(s, x, y + 0.25, w * 0.5 - 0.1, h * 0.55, years, series, number_format="0.0",
                             data_labels=True, gap_width=60)
-            rows = [[p["cite"], p["text"][:200]] for p in (self.pack.get("passages") or []) if "stress" in p["topics"]][:5]
+            # a python-pptx table grows to fit its text, so the rows are kept short enough that the
+            # table stays inside its box and does not run over the note beneath it
+            rows = [[p["cite"], p["text"][:130] + ("…" if len(p["text"]) > 130 else "")]
+                    for p in (self.pack.get("passages") or []) if "stress" in p["topics"]][:4]
             d.add_table(s, x + w * 0.5, y + 0.25, w * 0.5, h * 0.55, ["Page", "Scenario description"], rows,
                         col_widths=[0.9, 2.98], font_size=7)
             d.add_text(s, x, y + h * 0.55 + 0.35, w, h * 0.45 - 0.35,

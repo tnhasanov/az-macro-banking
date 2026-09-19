@@ -322,3 +322,30 @@ def test_the_rationale_comparison_shows_what_differs_not_the_shared_formula():
     only_a, only_b = _rationale_difference(shared, cur)
     assert only_a == "nothing the current statement does not also say"
     assert "inflation forecast" in only_b
+
+
+def test_a_stability_brief_charts_one_exercise_not_three():
+    """The 2023 round projected 2024 from end-2023 data and the 2025 round projects 2026 from
+    end-2025 data. Putting them on one axis would draw a path nobody published."""
+    from azmonitor.render.briefs import FsrBrief
+
+    stab = {"stress_tests": {"results": [
+        {"scenario": "baseline", "observation_date": "2024-12-31", "value": 18.1,
+         "dims": {"exercise": "2023-12-31"}, "publication": {"id": "financial_stability_report:2023-A"}},
+        {"scenario": "baseline", "observation_date": "2025-12-31", "value": 20.3,
+         "dims": {"exercise": "2024-12-31"}, "publication": {"id": "financial_stability_report:2024-A"}},
+        {"scenario": "baseline", "observation_date": "2026-12-31", "value": 19.4,
+         "dims": {"exercise": "2025-12-31"}, "publication": {"id": "financial_stability_report:2025-A"}},
+        {"scenario": "adverse", "observation_date": "2026-12-31", "value": 14.8,
+         "dims": {"exercise": "2025-12-31"}, "publication": {"id": "financial_stability_report:2025-A"}},
+    ]}}
+
+    brief = FsrBrief.__new__(FsrBrief)
+    brief.pub = {"publication_id": "financial_stability_report:2025-A"}
+    kept = brief._this_exercise(stab)
+    assert {r["value"] for r in kept} == {19.4, 14.8}
+    assert {(r["dims"]["exercise"]) for r in kept} == {"2025-12-31"}
+
+    # where the rows do not name this publication, the newest exercise is used rather than all of them
+    brief.pub = {"publication_id": "financial_stability_report:2099-A"}
+    assert {r["value"] for r in brief._this_exercise(stab)} == {19.4, 14.8}
