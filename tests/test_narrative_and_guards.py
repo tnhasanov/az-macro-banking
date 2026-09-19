@@ -21,33 +21,49 @@ def _fp():
     }
 
 
-def test_validator_accepts_rounded_fact_pack_numbers_and_rejects_others():
+def test_validator_accepts_a_bound_number_and_rejects_an_unsupported_one():
+    """Grounding is per claim: the number, its metric, period, unit and basis all have to hold."""
     fp = _fp()
-    good = {"fact_pack_hash": "abc", "findings": [{"id": "F1", "slide_id": "M08", "classification": "observed_fact", "statement": "Loans grew 12.9% y/y (12.1% in June) to AZN 34.2 bn.",
-                                                    "metric_refs": ["cba.loans.total_ci.yoy"], "period": "2026-07-31"}],
-            "slides": {"M08": {"title": "Lending up 12.9%", "interpretations": ["Loans rose to AZN 34,155 mln."], "so_what": "x"}}, "questions": []}
+    good = {"fact_pack_hash": "abc",
+            "findings": [{"id": "F1", "slide_id": "M08", "classification": "observed_fact",
+                          "statement": {"text": "Loans grew 12.9% y/y.",
+                                        "claims": ["cba.loans.total_ci.yoy@2026-07-31#yoy"]},
+                          "metric_refs": ["cba.loans.total_ci.yoy"], "period": "2026-07-31"}],
+            "slides": {"M08": {"title": {"text": "Lending up 12.9%",
+                                         "claims": ["cba.loans.total_ci.yoy@2026-07-31#yoy"]},
+                               "interpretations": [], "so_what": "x"}}, "questions": []}
     v = validate_narrative(good, fp)
     assert v["ok"], v["problems"]
+
     bad = json.loads(json.dumps(good))
-    bad["findings"][0]["statement"] = "Loans grew 14.2% y/y."           # unsupported number
-    bad["findings"].append({"id": "F2", "slide_id": "M99", "classification": "forecast", "statement": "Defaults will hit 5% next year.", "metric_refs": ["made.up"], "period": "2027-01-31"})
-    bad["slides"]["M08"]["interpretations"] = ["Loans rose 9.9% because of oil."]
+    bad["findings"][0]["statement"] = {"text": "Loans grew 14.2% y/y.",
+                                       "claims": ["cba.loans.total_ci.yoy@2026-07-31#yoy"]}
+    bad["findings"].append({"id": "F2", "slide_id": "M99", "classification": "forecast",
+                            "statement": {"text": "Defaults will hit 5% next year."},
+                            "metric_refs": ["made.up"], "period": "2027-01-31"})
+    bad["slides"]["M08"]["interpretations"] = [{"text": "Loans rose 9.9% because of oil."}]
     v = validate_narrative(bad, fp)
     assert not v["ok"]
     assert set(v["rejected_findings"]) == {"F1", "F2"} and v["rejected_slides"] == ["M08"]
     issues = " ".join(p["issue"] for p in v["problems"])
-    assert "unknown slide" in issues and "bad classification" in issues and "unknown metric ref" in issues and "number not in approved" in issues
+    assert "unknown slide" in issues and "not one of" in issues and "unknown metric ref" in issues
+    assert any(p["kind"] == "unbound" for p in v["problems"])
 
 
-def test_fallback_replaces_rejected_text_with_facts_only():
+def test_a_stale_narrative_is_replaced_in_full_by_the_facts_only_text():
     fp = _fp()
     fallback = facts_only.generate(fp)
-    nar = {"fact_pack_hash": "zzz", "findings": [{"id": "F1", "slide_id": "M08", "classification": "hypothesis", "statement": "Loans grew 77% y/y.", "metric_refs": [], "period": "2026-07-31"}],
-           "slides": {"M08": {"title": "Loans up 77%", "interpretations": [], "so_what": ""}}, "questions": []}
+    nar = {"fact_pack_hash": "written-for-an-older-pack",
+           "findings": [{"id": "F1", "slide_id": "M08", "classification": "hypothesis",
+                         "statement": {"text": "Loans grew 77% y/y."}, "metric_refs": [], "period": "2026-07-31"}],
+           "slides": {"M08": {"title": {"text": "Loans up 77%"}, "interpretations": [], "so_what": ""}},
+           "questions": []}
     v = validate_narrative(nar, fp)
+    assert v["stale"] is True
     out = apply_fallback(nar, fallback, v)
-    assert out["slides"]["M08"].get("fallback") is True
-    assert out["findings"] == fallback["findings"] and out.get("stale_fact_pack") is True
+    assert out.get("stale_fact_pack") is True and out["fallback_scope"] == "whole narrative"
+    assert out["slides"]["M08"] == fallback["slides"]["M08"]
+    assert out["findings"] == fallback["findings"]
 
 
 def test_facts_only_narrative_is_grounded():

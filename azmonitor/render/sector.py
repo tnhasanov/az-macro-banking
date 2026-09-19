@@ -117,6 +117,44 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     d.add_so_what(s, 8.5, 1.5, 4.4, 2.5, "A gap between nominal credit growth and real activity growth reflects inflation, starting penetration, seasonality and mapping differences before any lending signal. Ask sector specialists which explanation applies.", heading="READING")
     d.add_text(s, 0.45, 4.3, 12.35, 0.3, "Regional pattern: CBA regional loan tables (2.10) are published by booking region without sector detail; a sector-by-region view is not available from public data.", size=10, color=C["muted"])
     d.add_footer(s, src, d.page)
+    # policy and stability conditions that bear on this sector
+    from ..publications.factpack import PublicationFacts
+
+    pf = PublicationFacts(db, as_of_d, lang)
+    pol, stab = pf.policy_block(), pf.stability_block()
+    decision = pol.get("decision") or {}
+    car = next((r for r in stab.get("dashboard") or [] if r["series_id"] == "cba.fsr.car"), None)
+    s = d.new_slide()
+    d.add_title(s, f"{label}: policy and stability conditions around this sector", "Policy and stability",
+                "Public conditions that bear on lending to this sector; none of it is sector-specific supervisory data")
+    rows = [["Refinancing rate and corridor",
+             f"{decision.get('policy_rate')}% (corridor {decision.get('corridor_floor')}%–{decision.get('corridor_ceiling')}%)",
+             f"decided {decision.get('announcement_date')}",
+             "sets the floor under manat funding costs for loans written to this sector"],
+            ["Policy stance versus the previous decision", pol["stance"].get("label") or "not established",
+             pol["stance"].get("statement", "")[:90],
+             "a change in stance reaches sector lending through pricing and credit supply"]]
+    infl = next((x for x in pol["forecasts"].get("current") or [] if x["series_id"] == "cba.forecast.inflation"), None)
+    if infl:
+        rows.append(["CBA inflation projection", f"{infl['value']}% for {infl.get('horizon')}",
+                     f"{pol['forecasts'].get('current_vintage')} round",
+                     "shapes nominal turnover in the sector and the real burden of existing debt"])
+    if car:
+        rows.append(["Sector capital adequacy (regulatory)", f"{car['value']}%",
+                     f"{car['observation_date']}, published {car['publication']['published_at']}",
+                     "system headroom conditions how much risk the sector's lenders can take on"])
+    d.add_table(s, 0.45, 1.45, 12.35, 2.8, ["Condition", "Latest", "Date", "How it bears on this sector"], rows,
+                col_widths=[3.0, 2.6, 2.6, 4.15], font_size=8.5)
+    d.add_text(s, 0.45, 4.45, 12.35, 1.9,
+               [[{"text": "What this does and does not say: ", "bold": True, "size": 10},
+                 {"text": "policy and stability publications are system-wide. They carry no breakdown by sector and no "
+                          "bank-level detail, so the rows above are conditions surrounding this sector's credit, not "
+                          "measurements of it. A sector conclusion still rests on the loan and activity data on the "
+                          "previous slides.", "size": 10}]],
+               size=10, color=C["text"], autofit=True)
+    d.add_footer(s, src, d.page)
+    d.add_notes(s, f"Policy source: decision of {decision.get('announcement_date')}; stability source: "
+                   f"{(stab.get('report') or {}).get('edition')} published {(stab.get('report') or {}).get('published_at')}.")
     # S08 questions + sources
     s = d.new_slide()
     d.add_title(s, f"{label}: banking questions and sources", "Questions", "Proportionate follow-ups: investigate, compare, monitor")

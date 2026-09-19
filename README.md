@@ -8,16 +8,18 @@ Everything numeric is computed by code from stored, unrounded observations. Narr
 
 | Area | Implementation |
 |---|---|
-| Source discovery | `azmonitor/discovery` – resolves current file links from the CBA pages (`a.download_item` anchors) and walks the SSC monthly-edition pages |
+| Source discovery | `azmonitor/discovery` – resolves current file links from the CBA pages (`a.download_item` anchors), walks the SSC monthly-edition pages, and reads the CBA policy-review, decision, policy-statement and stability-report pages in both languages (`azmonitor/publications/discovery.py`) |
 | Collection | `azmonitor/ingest/fetch.py` – bounded retries, request spacing, size caps, raw bytes + SHA-256 stored under `data/raw/<dataset>/` |
-| Parsers | `azmonitor/parsers` – CBA year/month matrices, rate blocks, bank-overview tables, regional snapshots; SSC HTML headline table (current and legacy layouts), SSC monthly PDF report (text layer), SSC open-data workbooks |
-| Storage | SQLite (`data/monitor.sqlite`): documents, append-only observation vintages, dataset state, runs, editions; Parquet snapshots per report in `data/snapshots/` |
+| Parsers | `azmonitor/parsers` – CBA year/month matrices, rate blocks, bank-overview tables, regional snapshots; SSC HTML headline table (current and legacy layouts), SSC monthly PDF report (text layer), SSC open-data workbooks; narrative publications via `azmonitor/publications` (column-aware PDF text, tables, page indices, OCR fallback) |
+| Storage | SQLite (`data/monitor.sqlite`): documents, append-only observation vintages, publications and their language editions, passages with page numbers, policy decisions, dataset state, runs, editions; Parquet snapshots per report in `data/snapshots/` |
 | Calculations | `config/metrics.yaml` + `azmonitor/calc/metrics.py` – growth, shares, contributions, spreads, ratio decompositions, YTD→monthly with January reset, annualised ROA/ROE, credit-to-GDP |
 | Fact pack | `azmonitor/facts.py` – validated values, comparables, chart data, evidence document ids, availability matrix, monitoring flags, quality checks |
-| Narrative | `azmonitor/narrative` – facts-only generator, JSON contract, grounding validator, optional Anthropic API provider (disabled without credentials) |
+| Policy analysis | `azmonitor/publications/policy.py` – decisions and the rate corridor, stance comparison with the preceding decision, projections by vintage/target/scenario with like-for-like revisions |
+| Stability analysis | `azmonitor/publications/stability.py` – regulatory capital, liquidity coverage, credit quality, profitability and stress-test results, each kept distinct from the monthly book measures |
+| Narrative | `azmonitor/narrative` – facts-only generator, JSON contract, claim-level grounding validator (`claims.py`), commentary request pack for a Claude Code session, optional Anthropic API provider (disabled without credentials) |
 | Rendering | `azmonitor/render` – python-pptx deck in the supplied ATB design (native charts/tables, speaker notes), LibreOffice PDF, PNG previews, openpyxl workbook |
-| Reports | monthly monitor (18 slides + appendices), weekly release digest, sector review |
-| Automation | `monitor run-due` (locked, idempotent) via `scripts/run_due.sh`; see `docs/operations.md` |
+| Reports | monthly monitor (22 slides + appendices), weekly release digest, sector review, and briefs published on release: Monetary Policy Review, Financial Stability Report, rate decision |
+| Automation | `monitor run-due` (locked, idempotent, restore→process→save inside one lock) via `scripts/run_due.sh`; see `docs/operations.md` |
 
 ## Requirements
 
@@ -68,14 +70,17 @@ previews/slide-NN.png slide images for inspection
 |---|---|
 | `monitor discover [--source ID] [--all]` | Resolve current document links from the entry pages and record them (no downloads) |
 | `monitor backfill --start YYYY-MM` | Download and parse all available history from the start month (CBA files contain their full history; SSC edition pages are walked back to the start year) |
-| `monitor refresh [--source ID] [--dataset ID]` | Daily check: discover, download changed files (by content hash), parse, store new vintages; unchanged files are recognised and skipped |
+| `monitor refresh [--source ID] [--dataset ID] [--recent N]` | Daily check: discover, download changed files (by content hash), parse, store new vintages; unchanged files are recognised and skipped. `--recent N` loads only the N latest editions of a multi-edition source, for staged backfill |
 | `monitor reparse [--dataset ID]` | Re-run parsers on stored documents after a parser change (new vintages only where values change) |
 | `monitor validate` | Component-sum, reconciliation, decomposition, identity, label and freshness checks |
 | `monitor status` | Dataset state and recent editions |
 | `monitor fact-pack --report monthly --as-of YYYY-MM-DD` | Build the structured fact pack only |
 | `monitor report --type monthly --as-of YYYY-MM-DD [--facts-only \| --narrative-file F] [--lang en\|az] [--force]` | Monthly edition (blocked status if anchors are missing; `unchanged` if inputs are identical to the last edition) |
 | `monitor report --type weekly --since YYYY-MM-DD` | Weekly digest of documents/observations first seen since the date (`no_update` status if nothing new) |
-| `monitor report --type sector --sector agriculture` | 8-slide sector review (`agriculture`, `construction`, `trade`, `transport`, `industry`) |
+| `monitor report --type sector --sector agriculture` | 9-slide sector review (`agriculture`, `construction`, `trade`, `transport`, `industry`) |
+| `monitor report --type mpr-brief \| fsr-brief \| decision-update [--publication ID]` | Brief for a policy review, a stability report or a rate decision; `unchanged` when that publication has already been briefed |
+| `monitor commentary-pack` | Write the commentary request a Claude Code session drafts from: claim catalogue, quotable passages, rules |
+| `monitor bind-claims --narrative F` | Propose claim ids for the numbers in a narrative and list the ambiguous and unsupported ones |
 | `monitor run-due [--dry-run]` | Scheduler entry point: refresh, validate, apply the monthly/weekly publication policy, write state |
 
 `--as-of` is an information cutoff at 23:59 Asia/Baku on the given date. The current build reports in *reconstructed* mode (current vintages); a genuine historical information set is available (`historical=True` in `FactPackBuilder`) only for periods after the dataset started recording vintages, and is labelled as such in the fact pack (`information_set_mode`).
@@ -97,11 +102,34 @@ previews/slide-NN.png slide images for inspection
 * **Metrics / slides**: add entries to `metrics.yaml`; add or reorder slide ids and scorecard rows in `reports.yaml`.
 * **Schedule**: `settings.schedule` (check time is documented for the OS scheduler; grace period and weekly weekday are applied by `run-due`).
 
+## What triggers a new edition
+
+An edition is produced when anything the report speaks about changes, not when the calendar turns.
+`azmonitor/scheduling/fingerprint.py` fingerprints the inputs: the anchor periods, every metric value
+the deck displays, the publications visible to the edition and their release dates, the policy
+decisions in force, the narrative file and the configuration. Identical inputs return `unchanged`;
+any difference produces a new version and the manifest names what changed (a revision to an
+unchanged period, a new publication, a rewritten rationale, a changed narrative).
+
+A data-quality failure on a period the edition displays is **critical** and blocks publication: the
+last successful edition stays current and `data/state/monthly_status.json` records the cause.
+Publishing anyway requires an explicit entry in `config/quality_exceptions.yaml` naming the periods,
+the reason, the evidence, who accepted it and when it is reviewed. Failures confined to history the
+edition does not show are warnings, listed in appendix A02 and in `docs/quality_exceptions.md`.
+
 ## Narrative modes
+
+Every number in narrative text is bound to a **claim** naming the metric, its dimensions, the period,
+the unit and the comparison basis (`azmonitor/narrative/claims.py`). The claim is resolved against the
+fact pack and checked on value, rounding, unit, period and the direction the sentence asserts; a
+statement attributed to the Central Bank must quote a stored passage, and the quoted words are
+checked against it. A narrative written for an earlier fact pack is rejected in full. Nothing is
+exempt for being small.
 
 1. **Facts-only** (default, no API): complete descriptive text generated from the fact pack; every slide labelled as such.
 2. **Analyst file** (`--narrative-file`): JSON following `azmonitor/narrative/contract.py` (findings with classification, slide titles/interpretations/so-what/caveats, management questions). `narratives/monthly_2026-07_analyst.json` is the narrative prepared for the first report. The validator checks every number against the fact pack's approved values, every metric ref, slide id and period; rejected items fall back to facts-only text and the validation result is stored in `narrative.json` and the manifest.
-3. **API provider** (`narrative.provider: api` in settings, `ANTHROPIC_API_KEY` and `AZMONITOR_NARRATIVE_MODEL` set, `pip install -e .[api]`): the fact pack is sent with the contract; the response is validated the same way. No paid call is required for collection, testing or facts-only reports, and no model id is hardcoded. Measured usage (input/output tokens) is written to the manifest when a call is made.
+3. **Claude Code commentary routine** (no API key): `scripts/refresh_and_draft.sh` refreshes the sources, runs the checks and writes a commentary request (claim catalogue, quotable passages, rules). A Claude Code session drafts the narrative with `/monthly-commentary` (see `.claude/commands/monthly-commentary.md`), and the same validator checks it before anything is rendered.
+4. **API provider** (`narrative.provider: api` in settings, `ANTHROPIC_API_KEY` and `AZMONITOR_NARRATIVE_MODEL` set, `pip install -e .[api]`): the fact pack is sent with the contract; the response is validated the same way. No paid call is required for collection, testing or facts-only reports, and no model id is hardcoded. Measured usage (input/output tokens) is written to the manifest when a call is made.
 
 ## Data model (short)
 
@@ -118,6 +146,7 @@ Focused tests on real extraction fixtures (CBA workbooks, SSC HTML pages in both
 ## Status and limitations of this build
 
 * Verified working end-to-end on real data: CBA monetary tables (24 datasets), CBA bank overview (balance sheet, P&L, portfolio, NPL, sectors, participants), SSC headline table (monthly editions back to 2020 via the news pages), SSC monthly report PDFs (last 41 editions), SSC price bulletin and open-data workbooks.
-* Not published in the collected tables and therefore not shown: regulatory capital adequacy, LCR/NSFR, balance of payments (90-day lag, not yet collected), CBA FX interventions, IFRS stage aggregates, official real-wage index, sector producer prices.
+* Regulatory capital adequacy, the liquidity coverage ratio and system stress-test results are now collected from the Financial Stability Report. They are half-yearly and older than the monthly banking data, so every figure carries both its reporting date and its release date.
+* Still not published in any collected source and therefore not shown: NSFR, balance of payments (90-day lag, not yet collected), CBA FX interventions, IFRS stage aggregates, the official real-wage index, sector producer prices, and any bank-level distribution.
 * Unattended automation is **not** active until a scheduler is configured on a persistent runner (see `docs/operations.md`). External delivery is disabled.
 * Rendering fonts: the `.pptx` uses Segoe UI; Linux PDF rendering substitutes Open Sans (metrics differ slightly).

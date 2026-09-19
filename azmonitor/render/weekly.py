@@ -24,6 +24,52 @@ BANK_REFS = [("cba.loans.total_ci", "Loans to the economy"), ("cba.loans.total_c
              ("cba.deposits.fx_share", "Deposit FX share"), ("cba.bank.npl.ratio", "NPL ratio (banks)"), ("cba.bank.pnl.net_profit", "Net profit, YTD"), ("cba.bank.equity_to_assets", "Capital / assets")]
 
 
+def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, src_line: str, lang: str) -> None:
+    """Newly released policy and stability publications, and what each one is about.
+
+    A publication counts as new when it was first seen in this window. A second language edition of
+    a publication already reported, or a re-download of an unchanged file, is not a new release and
+    does not appear here twice.
+    """
+    from ..publications.factpack import PublicationFacts
+
+    pf = PublicationFacts(db, dt.date.fromisoformat(fp["as_of"]), lang)
+    fresh = pf.new_since(since_iso + "T00:00:00+00:00")
+    s = d.new_slide()
+    d.add_title(s, f"Policy and stability publications released since {since_iso}",
+                "New publications",
+                "Reporting period and release date are shown separately; a translation is not a second release")
+    if fresh:
+        rows = [[p["type"], p.get("edition") or "", p.get("reporting_period_end") or "not stated",
+                 p.get("published_at") or "unknown", ", ".join(p.get("languages") or []),
+                 str(len(p.get("documents") or []))] for p in fresh[:10]]
+        d.add_table(s, 0.45, 1.45, 12.35, 2.6,
+                    ["Publication", "Edition", "Reporting period end", "Published", "Languages", "Files"],
+                    rows, col_widths=[2.8, 2.2, 2.4, 2.0, 1.6, 1.35], font_size=8.5)
+    else:
+        d.add_text(s, 0.45, 1.5, 12.35, 0.6,
+                   "No policy review, policy statement, stability report or rate decision was released in this window. "
+                   "The previous editions remain current and are listed in the monthly appendix.",
+                   size=10.5, color=C["text"])
+    pol = pf.policy_block()
+    decision = pol.get("decision") or {}
+    rows2 = [["Latest rate decision", decision.get("announcement_date") or "n/a",
+              f"{decision.get('policy_rate')}% (corridor {decision.get('corridor_floor')}%–{decision.get('corridor_ceiling')}%)",
+              pol["stance"].get("label") or ""],
+             ["Next rate decision", (pol.get("next_decision") or {}).get("date") or "not announced", "",
+              (pol.get("next_decision") or {}).get("basis") or ""]]
+    stab_report = (pf.stability_block().get("report") or {})
+    rows2.append(["Latest stability report", stab_report.get("published_at") or "n/a",
+                  f"reporting period {stab_report.get('reporting_period_end') or 'n/a'}", stab_report.get("edition") or ""])
+    d.add_text(s, 0.45, 4.3, 12.35, 0.25, "Standing position after this window", size=9, bold=True, color=C["muted"])
+    d.add_table(s, 0.45, 4.57, 12.35, 1.5, ["Item", "Date", "Detail", "Note"], rows2,
+                col_widths=[2.8, 2.0, 4.2, 3.35], font_size=8.5)
+    d.add_footer(s, src_line, d.page)
+    d.add_notes(s, "A brief is produced separately for each new policy review, stability report and rate decision "
+                   "(`monitor report --type mpr-brief|fsr-brief|decision-update`). Publications first seen during a "
+                   "historical backfill are not treated as new releases for briefing.")
+
+
 def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool = False, db: Database | None = None) -> dict[str, Any]:
     paths = config.paths()
     paths.ensure()
@@ -101,6 +147,7 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
         d.add_footer(s, src_line, d.page)
         d.add_notes(s, "Metrics shown are the standard monitor metrics (see monthly appendix A01) restricted to series updated in this window where possible.")
 
+    publications_slide(d, C, fp, db, since_iso, src_line, lang)
     evidence_slide("New macroeconomic evidence", "Macro", MACRO_REFS, [("ssc.hl.gdp_nonoil.growth", None, "Non-oil GDP, real YTD y/y"), ("ssc.cpi.all.yoy", None, "CPI y/y")])
     evidence_slide("New banking and funding evidence", "Banking", BANK_REFS, [("cba.loans.total_ci.yoy", None, "Loans y/y"), ("cba.deposits.total.yoy", None, "Deposits y/y")])
     # W04 material development from monitoring flags

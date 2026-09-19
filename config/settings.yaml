@@ -39,6 +39,9 @@ schedule:
   daily_check_time_local: "09:00"     # Asia/Baku; used by scripts/run_due.sh documentation and run-due
   companion_grace_days: 7             # wait for optional banking companion tables before a partial edition
   weekly_digest_weekday: 1            # 0=Monday ... 6=Sunday (weekly digest generated on this weekday if new evidence)
+  # A publication is briefed when it is newly released, not when it is newly stored: a backfill loads
+  # years of editions at once and none of those is a release event.
+  brief_within_days: 45
   max_runtime_minutes: 45
   lock_stale_minutes: 120
 
@@ -86,3 +89,13 @@ monitoring_flags:
     direction: any
     threshold_pp: 3.0
     min_obs: 13
+
+# Persistent storage for unattended runs. The commands run inside the job lock, so the whole
+# restore -> process -> save cycle is one protected unit. A failed restore stops the run before any
+# report is produced; a failed save leaves the outputs on the local disk and is reported as such.
+persistence:
+  backup: true              # snapshot the database with VACUUM INTO before processing
+  keep_backups: 7
+  min_documents: 50         # a restored dataset with fewer documents is treated as a failed restore
+  restore_cmd: null         # e.g. 'aws s3 sync s3://bucket/azmonitor/data "$AZMONITOR_DATA_DIR" --delete'
+  save_cmd: null            # e.g. 'aws s3 sync "$AZMONITOR_DATA_DIR" s3://bucket/azmonitor/data'

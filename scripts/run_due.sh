@@ -2,10 +2,17 @@
 # Scheduled entry point: check official sources and generate the reports that are due.
 #
 # Intended for a daily scheduler (09:00 Asia/Baku by default). Idempotent: a run with no new
-# publications only refreshes state; report editions are created only when the reporting policy
-# in azmonitor/scheduling/run_due.py says one is due. Exit codes: 0 ok / no-op, 2 partial
-# (some datasets failed, prior outputs preserved), 3 failed, 4 skipped because another run holds
-# the lock.
+# publications only refreshes state; report editions are created only when the reporting policy in
+# azmonitor/scheduling/run_due.py says one is due.
+#
+# Restore, processing and save all happen inside the job lock held by `monitor run-due`, so a second
+# run cannot restore state over a run that is mid-flight, and a failed restore stops the run before
+# it can publish from an incomplete dataset. This wrapper only sets the environment and reports the
+# outcome.
+#
+# Exit codes: 0 ok / no-op, 2 partial (some datasets failed, prior outputs preserved), 3 failed,
+# 4 skipped because another run holds the lock, 5 restore failed (nothing was processed),
+# 6 processing succeeded but saving state back to persistent storage failed.
 #
 # Environment:
 #   AZMONITOR_DATA_DIR    persistent dataset directory (default ./data)
@@ -23,11 +30,6 @@ mkdir -p "$AZMONITOR_DATA_DIR/logs"
 LOG="$AZMONITOR_DATA_DIR/logs/run_due_$(date +%Y%m%d).log"
 echo "=== run_due start $(date -Is)" | tee -a "$LOG"
 
-if [ -n "${AZMONITOR_RESTORE_CMD:-}" ]; then
-  echo "restoring persistent state" | tee -a "$LOG"
-  bash -c "$AZMONITOR_RESTORE_CMD" 2>&1 | tee -a "$LOG" || { echo "restore failed" | tee -a "$LOG"; exit 3; }
-fi
-
 PY="${PYTHON:-python3}"
 if [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 "$PY" -m azmonitor.cli run-due "$@" 2>&1 | tee -a "$LOG"
@@ -40,11 +42,13 @@ EOF
 )
 echo "run_due status: $STATUS (exit $RC)" | tee -a "$LOG"
 
-if [ -n "${AZMONITOR_SAVE_CMD:-}" ]; then
-  echo "saving persistent state" | tee -a "$LOG"
-  bash -c "$AZMONITOR_SAVE_CMD" 2>&1 | tee -a "$LOG" || { echo "save failed" | tee -a "$LOG"; exit 3; }
-fi
 echo "=== run_due end $(date -Is)" | tee -a "$LOG"
 case "$STATUS" in
-  ok) exit 0;; partial) exit 2;; skipped_locked) exit 4;; failed) exit 3;; *) exit "$RC";;
+  ok) exit 0;;
+  partial) exit 2;;
+  failed) exit 3;;
+  skipped_locked) exit 4;;
+  failed_restore) exit 5;;
+  failed_save) exit 6;;
+  *) exit "$RC";;
 esac

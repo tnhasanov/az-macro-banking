@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,15 @@ from .calc.metrics import MetricEngine, MetricResult
 from .calc.validate import validate_all
 from .storage.db import Database, utcnow
 from .util.periods import EN_MONTHS, parse_as_of, period_label, shift_months, today_baku
+
+
+def _rationale_gist(text: str | None) -> str:
+    """The substantive opening of a decision statement, past the dateline boilerplate."""
+    if not text:
+        return "not available"
+    body = re.sub(r"^.*?\b(Baku|Bakı)\s*:\s*", "", text.strip(), count=1, flags=re.IGNORECASE | re.DOTALL)
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", body) if len(x.strip()) > 30]
+    return " ".join(sentences[:2])[:260] or body[:260]
 
 
 def _f(v) -> float | None:
@@ -47,6 +57,7 @@ class FactPackBuilder:
         self.sources_used: dict[str, dict[str, Any]] = {}
         self.metric_refs: dict[str, dict[str, Any]] = {}
         self.approved_numbers: list[dict[str, Any]] = []
+        self._pubs: dict[str, Any] | None = None
         self.states = {k: dict(v) for k, v in db.dataset_states().items()}
 
     # ------------------------------------------------------------------ helpers
@@ -461,10 +472,23 @@ class FactPackBuilder:
                 nxt.append({"dataset_id": ds["id"], "title": ds.get("title_en"), "source": sid, "next_period": nxt_period.isoformat(), "expected_by": expected.isoformat(),
                             "status": ("past expected date, not yet observed" if overdue else "expected (schedule), not confirmed"),
                             "basis": "official schedule: within %d days after the reporting period (expected, not confirmed)" % lag})
-        nxt.sort(key=lambda r: (r["expected_by"] < self.as_of.isoformat(), r["expected_by"]))
-        slides["M18"] = {"next_releases": nxt[:10]}
+        # an announced date beats a cadence estimate; a publication with neither says so
+        for entry in self.publication_releases():
+            nxt.append(entry)
+        nxt.sort(key=lambda r: (r["expected_by"] is None, (r["expected_by"] or "") < self.as_of.isoformat(), r["expected_by"] or "z"))
+        slides["M18"] = {"next_releases": nxt[:12], "implications": self.management_implications()}
+        # --- policy and stability (M19-M22) and their appendices
+        pubs = self.publication_facts()
+        fp["publications"] = pubs
+        slides.update(self.policy_slides(pubs))
+        slides.update(self.stability_slides(pubs))
         # --- appendices
         slides["A02"] = {"register": self.source_register(), "freshness": self.freshness()}
+        slides["A05"] = {"decisions": pubs["policy"]["rate_path"], "forecasts": pubs["policy"]["forecasts"],
+                         "stress": pubs["stability"]["stress_tests"], "reconciliation": pubs["stability"]["source_reconciliation"]}
+        slides["A06"] = {"publications": pubs["register"], "archive_gaps": pubs["archive_gaps"],
+                         "cutoff_note": pubs["cutoff_note"], "cutoff_limitations": pubs.get("cutoff_limitations"),
+                         "held_for_review": pubs.get("held_for_review") or []}
         slides["A03"] = {"revisions": self.revisions_since_last_edition()}
         slides["A04"] = {"series": [self.chart_series(s, d, window=self.window) for s, d in [("cba.loans.total_ci", None), ("cba.deposits.total", None), ("cba.deposits.hh.total", None),
                                                                                               ("cba.bank.npl.ratio", None), ("cba.rates.new.loan", {"currency": "AZN"}), ("cba.reserves.official_usd", None)]]}
@@ -475,10 +499,237 @@ class FactPackBuilder:
         fp["sources"] = [self._doc_summary(d) for d in sorted(self.sources_used.values(), key=lambda r: (r["source_id"], r["dataset_id"], r["retrieved_at"]))]
         fp["definitions"] = self.definitions()
         fp["flags"] = self.monitoring_flags()
-        q = validate_all(self.db, write=False)
+        # a failure inside the window this edition displays is critical; older history is a warning
+        window_start = shift_months(bank_p, -self.window) if bank_p else None
+        q = validate_all(self.db, write=False, display_from=window_start)
         fp["quality"] = {"summary": q["summary"], "checks": [{k: v for k, v in c.items() if k != "datasets"} for c in q["checks"]]}
-        fp["fact_pack_hash"] = hashlib.sha256(json.dumps({k: fp[k] for k in ("slides", "metrics")}, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        fp["fact_pack_hash"] = hashlib.sha256(
+            json.dumps({k: fp[k] for k in ("slides", "metrics", "publications")}, sort_keys=True, default=str).encode()).hexdigest()[:16]
         return fp
+
+    # ------------------------------------------------- policy and stability facts
+    def publication_facts(self) -> dict[str, Any]:
+        """Policy and stability facts, and the claim-able snapshots that go with them."""
+        if getattr(self, "_pubs", None) is None:
+            from .publications.factpack import PublicationFacts
+
+            self._pubs = PublicationFacts(self.db, self.as_of, self.lang, metrics=self.metric_refs).build()
+        return self._pubs
+
+    def policy_slides(self, pubs: dict[str, Any]) -> dict[str, Any]:
+        """M19 policy stance and M20 inflation outlook.
+
+        The stance sentence describes the rate decision only. Where the rate did not move but the
+        Central Bank's reasoning did, that is what the slide says, because an unchanged rate with a
+        changed outlook is a different signal from an unchanged rate with an unchanged outlook.
+        """
+        pol = pubs["policy"]
+        decision, previous = pol["decision"], pol["previous_decision"]
+        rate = self.snap("cba.policy.rate", None, key="cba.policy.rate")
+        floor = self.snap("cba.policy.corridor_floor", None, key="cba.policy.corridor_floor")
+        ceiling = self.snap("cba.policy.corridor_ceiling", None, key="cba.policy.corridor_ceiling")
+        cpi = self.snap("ssc.cpi.all.yoy", None, key="ssc.cpi.all.yoy")
+        forecasts = []
+        for f in pol["forecasts"]["current"]:
+            key = f"{f['series_id']}|{json.dumps(f['dims'], sort_keys=True)}" if f.get("dims") else f["series_id"]
+            snap = self.snap(f["series_id"], f.get("dims"), key=key)
+            forecasts.append({**f, "snapshot": snap, "claim_ref": key})
+        m19 = {
+            "decision": decision, "previous_decision": previous, "stance": pol["stance"],
+            "corridor_now": pol["corridor_now"], "rate_path": pol["rate_path"], "corridor_path": pol["corridor_path"],
+            "rate": rate, "floor": floor, "ceiling": ceiling,
+            "review": pol["review"], "next_decision": pol["next_decision"],
+            "comparison": self._stance_comparison_table(pol),
+            "note": "Rate levels come from the decision table printed in the Monetary Policy Review; the rationale "
+                    "comes from the decision statement. Effective dates are shown only when the statement gives one.",
+        }
+        m20 = {
+            "cpi": cpi, "forecasts": forecasts, "revisions": pol["forecasts"]["revisions"],
+            "current_vintage": pol["forecasts"]["current_vintage"], "previous_vintage": pol["forecasts"]["previous_vintage"],
+            "target": {"statement": "The Central Bank publishes an inflation target range; the value shown is the "
+                                    "Bank's own published projection, not our estimate."},
+            "note": pol["forecasts"]["note"],
+            "risks": self._risk_passages(pol),
+        }
+        return {"M19": m19, "M20": m20}
+
+    def _stance_comparison_table(self, pol: dict[str, Any]) -> list[dict[str, Any]]:
+        """Previous assessment -> current assessment -> evidence -> banking implication."""
+        cur, prev = pol["decision"], pol["previous_decision"]
+        if not cur:
+            return []
+        rows = [{
+            "dimension": "Policy rate",
+            "previous": f"{prev['policy_rate']}% on {prev['announcement_date']}" if prev and prev.get("policy_rate") is not None else "not established",
+            "current": f"{cur['policy_rate']}% on {cur['announcement_date']}" if cur.get("policy_rate") is not None else "not established",
+            "evidence": "decision table in the Monetary Policy Review",
+            "implication": "funding cost floor for manat liquidity operations",
+        }, {
+            "dimension": "Corridor width",
+            "previous": (f"{round(prev['corridor_ceiling'] - prev['corridor_floor'], 2)} pp"
+                         if prev and prev.get("corridor_ceiling") is not None and prev.get("corridor_floor") is not None else "not established"),
+            "current": (f"{pol['corridor_now']['width_pp']} pp" if pol["corridor_now"]["width_pp"] is not None else "not established"),
+            "evidence": "corridor floor and ceiling as decided",
+            "implication": "range within which overnight money-market rates can move",
+        }, {
+            "dimension": "Stated rationale",
+            "previous": _rationale_gist(prev.get("rationale") if prev else None),
+            "current": _rationale_gist(cur.get("rationale")),
+            "evidence": f"decision statement, {cur.get('rationale_language') or 'az'} edition",
+            "implication": "direction of travel for deposit and lending rates over the next quarter",
+        }]
+        return rows
+
+    def _risk_passages(self, pol: dict[str, Any]) -> list[dict[str, Any]]:
+        """Risks the Central Bank itself names, quoted from the decision statement.
+
+        Each one carries the passage it came from so the narrative can cite it and the validator can
+        confirm the quotation against the stored text.
+        """
+        cur = pol.get("decision") or {}
+        pub_id = ((cur.get("publication") or {}).get("publication_id"))
+        if not pub_id:
+            return []
+        rows = self.db.passages(publication_id=pub_id, language="en") or self.db.passages(publication_id=pub_id)
+        out = []
+        for r in rows:
+            for sentence in re.split(r"(?<=[.!?])\s+", r["text"] or ""):
+                if len(sentence) > 45 and re.search(r"risk|uncertain|upside|downside", sentence, re.IGNORECASE):
+                    out.append({"text": sentence.strip()[:320], "source": "CBA decision statement",
+                                "date": cur.get("announcement_date"), "classification": "cba_assessment",
+                                "passage_id": r["passage_id"], "language": r["language"]})
+        return out[:5]
+
+    def stability_slides(self, pubs: dict[str, Any]) -> dict[str, Any]:
+        """M21 stability dashboard and M22 systemic vulnerabilities.
+
+        Every row carries its own reporting date and the date its report was published, because
+        these measures are half-yearly and are older than the banking month of the deck.
+        """
+        stab = pubs["stability"]
+        dashboard = []
+        for row in stab["dashboard"]:
+            key = row["series_id"] + (("|" + json.dumps(row["dims"], sort_keys=True)) if row["dims"] else "")
+            snap = self.snap(row["series_id"], row["dims"] or None, key=key)
+            dashboard.append({**row, "snapshot": snap, "claim_ref": key})
+        # only the most recent exercise is shown; earlier rounds stay in the appendix, since results
+        # from two different exercises are not a time series
+        exercises = sorted({(r.get("dims") or {}).get("exercise") for r in stab["stress_tests"]["results"] if (r.get("dims") or {}).get("exercise")})
+        latest_exercise = exercises[-1] if exercises else None
+        stress = []
+        for row in stab["stress_tests"]["results"]:
+            if latest_exercise and (row.get("dims") or {}).get("exercise") != latest_exercise:
+                continue
+            key = row["series_id"] + (("|" + json.dumps(row["dims"], sort_keys=True)) if row["dims"] else "")
+            stress.append({**row, "snapshot": self.snap(row["series_id"], row["dims"] or None, key=key), "claim_ref": key})
+        book = {
+            "equity_to_assets": self.snap("cba.bank.equity_to_assets", None, key="cba.bank.equity_to_assets"),
+            "liquid_assets_ratio": self.snap("cba.bank.liquid_assets_ratio", None, key="cba.bank.liquid_assets_ratio"),
+        }
+        m21 = {
+            "report": stab["report"], "previous_report": stab["previous_report"], "dashboard": dashboard,
+            "book_measures": book, "reconciliation": stab["source_reconciliation"], "as_of_note": stab["as_of_note"],
+            "distinction": "Regulatory capital adequacy and the liquidity coverage ratio come from the Financial "
+                           "Stability Report. Capital-to-assets and liquid-assets-to-assets are book ratios from the "
+                           "monthly balance sheet. They measure different things and are not comparable.",
+        }
+        m22 = {
+            "stress": stress, "scenarios": stab["stress_tests"].get("note"),
+            "concentration": self._concentration_facts(),
+            "funding": {"ldr": self.snap("cba.ldr", None, key="cba.ldr"),
+                        "deposit_fx_share": self.snap("cba.deposits.fx_share", None, key="cba.deposits.fx_share"),
+                        "corporate_deposits_yoy": self.snap("cba.deposits.nfc.total.yoy", None, key="cba.deposits.nfc.total.yoy")},
+            "exercise": latest_exercise,
+            "note": "Stress-test results are projections under the Central Bank's published scenarios from the "
+                    "exercise date shown. They are not forecasts and not outcomes.",
+        }
+        return {"M21": m21, "M22": m22}
+
+    def _concentration_facts(self) -> list[dict[str, Any]]:
+        """Published concentrations a board would ask about: region, sector and product."""
+        out = []
+        for ref, dims, label in (("cba.loans.sector.households.share", None, "Household share of real-sector loans"),
+                                 ("cba.loans.sector.trade_services.share", None, "Trade and services share of real-sector loans"),
+                                 ("cba.loans.sector.construction.share", None, "Construction share of real-sector loans"),
+                                 ("cba.deposits.time_share", None, "Time deposits as a share of total deposits")):
+            snap = self.snap(ref, dims, key=ref)
+            if snap.get("available"):
+                out.append({"label": label, "claim_ref": ref, "snapshot": snap})
+        return out
+
+    def publication_releases(self) -> list[dict[str, Any]]:
+        """Next release entries for the narrative publications.
+
+        An announced date is used as announced. Where none is announced, the entry says so; a
+        cadence-based date is only ever shown when it is labelled as an estimate.
+        """
+        pubs = self.publication_facts()
+        out: list[dict[str, Any]] = []
+        nd = pubs["policy"]["next_decision"]
+        out.append({"dataset_id": "cba_policy_decisions", "title": "Monetary policy decision", "source": "CBA_POLICY_DECISIONS",
+                    "next_period": nd.get("date"), "expected_by": nd.get("date"),
+                    "status": "announced by the Central Bank" if nd.get("status") == "announced" else "not announced",
+                    "basis": nd.get("basis")})
+        for pub_type, title, cadence_months in (("monetary_policy_review", "Monetary Policy Review", 3),
+                                                ("financial_stability_report", "Financial Stability Report", 6)):
+            latest = (pubs["policy"]["review"] if pub_type == "monetary_policy_review" else pubs["stability"]["report"])
+            if not latest:
+                continue
+            published = latest.get("published_at")
+            estimate = None
+            if published:
+                base = dt.date.fromisoformat(published)
+                estimate = shift_months(base, cadence_months).isoformat()
+            out.append({"dataset_id": pub_type, "title": title, "source": "CBA",
+                        "next_period": None, "expected_by": estimate,
+                        "status": "estimate from the publication cadence, not announced",
+                        "basis": f"previous edition {latest.get('edition')} released {published or 'date unknown'}; "
+                                 f"the Central Bank does not publish a calendar for this report"})
+        return out
+
+    def management_implications(self) -> list[dict[str, Any]]:
+        """Evidence -> transmission channel -> monitoring indicator -> question.
+
+        These are conditional analytical implications of public evidence. None of them asserts
+        anything about this bank's own exposure, which is not in any of these sources.
+        """
+        pubs = self.publication_facts()
+        pol, stab = pubs["policy"], pubs["stability"]
+        rows: list[dict[str, Any]] = []
+        decision = pol.get("decision") or {}
+        if decision.get("policy_rate") is not None:
+            rows.append({
+                "evidence": pol["stance"].get("statement"),
+                "channel": "Policy rate and corridor set the floor under manat funding costs and the return on "
+                           "placements with the Central Bank",
+                "monitor": "new-business deposit and loan rates (CBA table 3.2.1), interbank rates, own cost of funds",
+                "question": "If the corridor stays where it is into 2027, what happens to our deposit repricing "
+                            "schedule and to the margin on fixed-rate lending written this year?",
+                "function": "Treasury / ALM", "classification": "interpretation",
+            })
+        inflation = [f for f in pol["forecasts"]["current"] if f["series_id"] == "cba.forecast.inflation"]
+        if inflation:
+            rows.append({
+                "evidence": f"The Central Bank's {pol['forecasts']['current_vintage']} round projects inflation of "
+                            f"{inflation[0]['value']}% for {inflation[0].get('horizon')}",
+                "channel": "Inflation shapes nominal income growth, deposit demand and real borrowing costs",
+                "monitor": "CPI releases, the next projection round, deposit growth by segment",
+                "question": "Which assumptions in our own planning differ from the Central Bank's published "
+                            "projection, and what would make us revise them?",
+                "function": "Finance / Strategy", "classification": "interpretation",
+            })
+        car = next((d for d in stab["dashboard"] if d["series_id"] == "cba.fsr.car"), None)
+        if car:
+            rows.append({
+                "evidence": f"Sector regulatory capital adequacy was {car['value']}% at {car['observation_date']} "
+                            f"({car['publication']['label']}, published {car['publication']['published_at']})",
+                "channel": "System capital headroom conditions supervisory tolerance and peer pricing of risk",
+                "monitor": "our own capital adequacy against the requirement, and the next stability report",
+                "question": "How does our capital headroom compare with the sector figure, and what would the "
+                            "published adverse scenario do to it?",
+                "function": "CRO / Capital management", "classification": "management_question",
+            })
+        return rows
 
     # ------------------------------------------------------------------ registers
     def _doc_summary(self, d: dict[str, Any]) -> dict[str, Any]:

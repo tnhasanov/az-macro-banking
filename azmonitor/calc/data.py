@@ -27,21 +27,31 @@ class SeriesInfo:
     label_original: str | None = None
 
 
+# Observations about a future period: a projection published today legitimately carries a period
+# end after the information cutoff, so the cutoff applies to when it was published, not to what it
+# is about.
+FORWARD_LOOKING_TYPES = {"forecast", "stress_test_projection"}
+
+
 class ObservationStore:
     """In-memory view of observations with helpers to fetch aligned monthly series."""
 
     def __init__(self, db: Database, as_of_cutoff_iso: str | None = None, historical_information_set: bool = False):
         rows = db.observations_as_of(as_of_cutoff_iso) if (historical_information_set and as_of_cutoff_iso) else db.current_observations()
-        recs = [dict(r) for r in rows]
+        # readings held for review after a cross-edition check never reach a metric or a claim
+        recs = [dict(r) for r in rows if (dict(r).get("validation_status") or "verified") == "verified"]
         self.df = pd.DataFrame(recs)
         if self.df.empty:
             self.df = pd.DataFrame(columns=["series_id", "dims", "period_end", "value"])
         else:
             self.df["period_end"] = pd.to_datetime(self.df["period_end"]).dt.date
+            if "period_type" not in self.df.columns:
+                self.df["period_type"] = None
         self.registry = {k: dict(v) for k, v in db.series_registry().items()}
         self.docs = {r["doc_id"]: dict(r) for r in db.all_documents()}
         self.mode = "historical_information_set" if (historical_information_set and as_of_cutoff_iso) else "reconstructed_current_vintage"
         self._cache: dict[tuple[str, str], pd.Series] = {}
+        self._forward_cache: dict[str, bool] = {}
 
     def series(self, series_id: str, dims: dict[str, str] | None = None, cutoff: dt.date | None = None) -> pd.Series:
         key = (series_id, json.dumps(dims or {}, ensure_ascii=False, sort_keys=True))
@@ -51,9 +61,18 @@ class ObservationStore:
             s = s[~s.index.duplicated(keep="last")]
             self._cache[key] = s
         s = self._cache[key]
-        if cutoff is not None:
+        if cutoff is not None and not self._is_forward_looking(series_id):
             s = s[s.index <= cutoff]
         return s
+
+    def _is_forward_looking(self, series_id: str) -> bool:
+        if series_id in self._forward_cache:
+            return self._forward_cache[series_id]
+        sub = self.df[self.df["series_id"] == series_id]
+        types = set(sub["period_type"].dropna().unique()) if not sub.empty and "period_type" in sub else set()
+        result = bool(types) and types.issubset(FORWARD_LOOKING_TYPES)
+        self._forward_cache[series_id] = result
+        return result
 
     def info(self, series_id: str, dims: dict[str, str] | None = None) -> SeriesInfo | None:
         dj = json.dumps(dims or {}, ensure_ascii=False, sort_keys=True)

@@ -1,13 +1,14 @@
 """Parser registry: parser id -> callable(path, spec, source_id=, dataset_id=, context=)."""
 from __future__ import annotations
 
-from . import cba_bank_overview, cba_matrix, cba_rates, cba_regions, ssc_html, ssc_report, ssc_xls
+from . import cba_bank_overview, cba_matrix, cba_publication, cba_rates, cba_regions, ssc_html, ssc_report, ssc_xls
 
 PARSERS = {
     "cba_month_matrix": cba_matrix.parse,
     "cba_rates_blocks": cba_rates.parse,
     "cba_bank_overview": cba_bank_overview.parse,
     "cba_region_snapshot": cba_regions.parse,
+    "cba_publication": cba_publication.parse,
     "ssc_monthly_report_pdf": ssc_report.parse,
     "ssc_macro_html_table": ssc_html.parse,
     "ssc_price_bulletin_xls": ssc_xls.parse_price_bulletin,

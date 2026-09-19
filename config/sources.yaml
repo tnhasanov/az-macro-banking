@@ -704,12 +704,114 @@ sources:
         frequency: A
         parse: {}
 
+  CBA_POLICY:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-13/monetary-policy-review
+    role: "Monetary policy reviews and annual policy statements (narrative publications)"
+    discovery: cba_publications
+    datasets:
+      - id: cba_monetary_policy_review
+        pub_type: monetary_policy_review
+        title_en: "Monetary Policy Review"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: Q
+        # the review moved from a January-to-month cumulative format to a quarterly edition in
+        # November 2024; both title forms are resolved by azmonitor/publications/editions.py
+        expected_lag_days: 45
+        pages:
+          az: https://www.cbar.az/page-13/monetary-policy-review?language=az
+          en: https://www.cbar.az/page-13/monetary-policy-review?language=en
+        parse:
+          pub_type: monetary_policy_review
+          tables: true
+          # the Azerbaijani edition is the original; the English edition is stored and citable but
+          # is not a second source of numbers for the same facts
+          extract_language: az
+      - id: cba_policy_directions
+        pub_type: policy_directions
+        title_en: "Statement on the main directions of monetary policy"
+        parser: cba_publication
+        role: optional
+        multi_document: true
+        download: all
+        frequency: A
+        expected_lag_days: 40
+        pages:
+          az: https://www.cbar.az/page-14/main-directions-of-the-monetary-policy?language=az
+          en: https://www.cbar.az/page-14/main-directions-of-the-monetary-policy?language=en
+        parse:
+          pub_type: policy_directions
+          tables: false
+
+  CBA_POLICY_DECISIONS:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-134/monetary-policy-decisions
+    role: "Interest rate corridor decisions (press releases, eight scheduled meetings a year)"
+    discovery: cba_decisions
+    datasets:
+      - id: cba_policy_decisions
+        pub_type: policy_decision
+        title_en: "Monetary policy decision"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: E
+        expected_lag_days: 0
+        pages:
+          az: https://www.cbar.az/page-134/monetary-policy-decisions?language=az
+          en: https://www.cbar.az/page-134/monetary-policy-decisions?language=en
+        parse:
+          pub_type: policy_decision
+          tables: false
+          extract_language: az
+
+  CBA_STABILITY:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-798/financial-stability-report
+    role: "Financial Stability Report: regulatory capital, liquidity coverage, stress tests"
+    discovery: cba_publications
+    datasets:
+      - id: cba_financial_stability_report
+        pub_type: financial_stability_report
+        title_en: "Financial Stability Report"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: S
+        expected_lag_days: 150
+        pages:
+          az: https://www.cbar.az/page-798/financial-stability-report?language=az
+          en: https://www.cbar.az/page-798/financial-stability-report?language=en
+        parse:
+          pub_type: financial_stability_report
+          tables: true
+          # indicator and stress-test wording is matched against the official English edition
+          extract_language: en
+
   SSC_CALENDAR:
     institution: SSC
     entry_point: https://www.stat.gov.az/menu/4/publications/
     role: "Release calendar (interactive page; no machine-readable file discovered)"
     discovery: none
     datasets: []
+
+# Series that parsers generate row by row rather than from an explicit list above (SSC headline
+# table, price bulletin groups, GDP workbooks, publication extraction). A metric may reference any
+# series under these prefixes; anything else must be declared as a dataset series, so a typo in a
+# metric input is caught by the checks rather than silently producing an empty series.
+generated_series_prefixes:
+  - ssc.hl.
+  - ssc.cpi.
+  - ssc.gdp.
+  - ssc.wage.
+  - cba.policy.
+  - cba.forecast.
+  - cba.fsr.
 
 # CBA-to-SSC sector mapping for M09 (credit vs activity). Unmatched sectors are excluded on purpose.
 sector_mapping:

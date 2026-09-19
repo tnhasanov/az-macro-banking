@@ -3,8 +3,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contract import empty_narrative
+from . import claims as C
+from .contract import block, empty_narrative
 from .fmt import change_word, money, num, plabel
+
+
+def _claims(s: dict[str, Any] | None, *which: str) -> list[str]:
+    """Claim ids for the parts of a fact-pack entry a sentence actually uses."""
+    return [c for c in (C.claim_for(s, w) for w in which) if c]
 
 
 def _s(fp: dict[str, Any], ref: str) -> dict[str, Any] | None:
@@ -23,15 +29,26 @@ def _prior(s: dict[str, Any] | None) -> float | None:
     return s["prior"]["value"] if s and s.get("prior") else None
 
 
+def _unit_of(s: dict[str, Any] | None) -> str:
+    """The unit the fact pack publishes, normalised for display: a contribution is in pp, not %."""
+    u = (s or {}).get("unit") or "%"
+    if u.startswith("%"):
+        return "%"
+    return u
+
+
 def stmt_growth(fp, ref: str, what: str, unit_note: str = "y/y") -> str | None:
     s = _s(fp, ref)
     if not s or not s.get("latest"):
         return None
     v, p = _val(s), _prior(s)
-    txt = f"{what} was {num(v, 1, '%')} {unit_note} in {_per(s)}"
+    unit = _unit_of(s)
+    txt = f"{what} was {num(v, 1, unit)} {unit_note} in {_per(s)}".replace("  ", " ").rstrip()
+    used = ["latest"]
     if p is not None:
-        txt += f" ({num(p, 1, '%')} in {plabel(s['prior']['period'], s.get('period_type'))})"
-    return txt + "."
+        txt += f" ({num(p, 1, unit)} in {plabel(s['prior']['period'], s.get('period_type'))})"
+        used.append("prior")
+    return block(txt + ".", _claims(s, *used))
 
 
 def stmt_level(fp, ref: str, what: str) -> str | None:
@@ -40,21 +57,25 @@ def stmt_level(fp, ref: str, what: str) -> str | None:
         return None
     v = _val(s)
     txt = f"{what} stood at {money(v, s.get('unit') or 'AZN mln')} at {_per(s)}"
+    used = ["latest"]
     if s.get("change") is not None:
         ch = s["change"]
         unit = s.get("unit") or "AZN mln"
         txt += f", {change_word(ch, 'up', 'down')} {money(abs(ch), unit) if unit in ('AZN mln', 'USD mln') else num(abs(ch), 1)} on {plabel(s['prior']['period'], s.get('period_type'))}"
-    return txt + "."
+        used.append("change")
+    return block(txt + ".", _claims(s, *used))
 
 
 def stmt_share(fp, ref: str, what: str) -> str | None:
     s = _s(fp, ref)
     if not s or not s.get("latest"):
         return None
-    txt = f"{what} was {num(_val(s), 1, '%')} at {_per(s)}"
+    txt = f"{what} was {num(_val(s), 1, _unit_of(s))} at {_per(s)}"
+    used = ["latest"]
     if s.get("change") is not None:
         txt += f", {num(s['change'], 1, 'pp', sign=True)} versus {plabel(s['prior']['period'], s.get('period_type'))}"
-    return txt + "."
+        used.append("change")
+    return block(txt + ".", _claims(s, *used))
 
 
 def generate(fp: dict[str, Any]) -> dict[str, Any]:
@@ -83,7 +104,7 @@ def generate(fp: dict[str, Any]) -> dict[str, Any]:
         caveat="Trade data lag the banking anchor; reserves and trade are shown separately and no causal link is asserted.")
     put("M08", "Lending: loan stock and growth",
         [stmt_level(fp, "cba.loans.total_ci", "Loans to the economy (all credit institutions)"), stmt_growth(fp, "cba.loans.total_ci.yoy", "Loan growth", "y/y"),
-         stmt_growth(fp, "cba.loans.sector.households.contrib", "Household loans contributed", "pp to real-sector loan growth")],
+         stmt_growth(fp, "cba.loans.sector.households.contrib", "The household contribution to real-sector loan growth", "")],
         caveat="Stock changes combine originations, repayments, write-offs, reclassifications and valuation; none is inferred from the stock alone.")
     put("M09", "Sector credit versus sector activity", ["Nominal loan-stock growth (CBA, y/y) is plotted against real value-added growth (SSC, YTD) for mapped sectors; measures differ in coverage and basis."],
         caveat="A divergence is a prompt to ask sector specialists, not evidence of over-lending.")
@@ -121,10 +142,11 @@ def generate(fp: dict[str, Any]) -> dict[str, Any]:
             cands.append(r)
     cands.sort(key=lambda r: -abs(r["change"]))
     for i, r in enumerate(cands[:5], start=1):
+        statement = (f"{r['row_label']}: {num(r['latest']['value'], 1, r.get('unit'))} in {plabel(r['latest']['period'], r.get('period_type'))}, "
+                     f"{num(r['change'], 1, 'pp' if r.get('kind') == 'pp' else r.get('unit'), sign=True)} versus {plabel(r['prior']['period'], r.get('period_type'))}.")
         nar["findings"].append({"id": f"F{i}", "rank": i, "slide_id": _slide_for(r["key"]), "classification": "observed_fact",
-                                "statement": f"{r['row_label']}: {num(r['latest']['value'], 1, r.get('unit'))} in {plabel(r['latest']['period'], r.get('period_type'))}, "
-                                             f"{num(r['change'], 1, 'pp' if r.get('kind') == 'pp' else r.get('unit'), sign=True)} versus {plabel(r['prior']['period'], r.get('period_type'))}.",
-                                "metric_refs": ["scorecard." + r["key"]], "period": r["latest"]["period"], "comparison": r.get("compare"),
+                                "statement": block(statement, _claims(r, "latest", "change")),
+                                "metric_refs": [r.get("id") or ("scorecard." + r["key"])], "period": r["latest"]["period"], "comparison": r.get("compare"),
                                 "banking_relevance": "Descriptive edition: relevance to be assessed by the reader.", "caveat": "", "direction": "neutral", "status": "new"})
     nar["questions"] = [
         {"question": "Which published movements in this edition warrant a source check against internal data?", "signal": "Largest scorecard changes", "why": "Facts-only edition lists movements without interpretation",

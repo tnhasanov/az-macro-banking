@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .discovery import DiscoveredDocument, _edition_period, discover
+from .discovery import DiscoveredDocument, _edition_period, _ext, discover
 from .ingest.fetch import FetchError, Fetcher
 from .parsers.base import Observation, ParseResult, ParserError
 from .parsers.registry import get_parser
@@ -19,6 +19,17 @@ from .util.log import get_logger, setup_logging
 from .util.periods import ym
 
 log = get_logger("pipeline")
+
+_PUBLICATION_FIELDS = {"publication_id", "source_id", "pub_type", "edition_key", "edition_label", "title_original",
+                       "title_en", "reporting_period_start", "reporting_period_end", "reporting_frequency",
+                       "published_at", "published_at_basis", "announcement_date", "effective_date",
+                       "information_cutoff", "next_release_date", "next_release_basis", "status", "note"}
+_PASSAGE_FIELDS = {"passage_id", "doc_id", "publication_id", "language", "page_index", "printed_page", "section",
+                   "kind", "ord", "text", "extraction_method", "validation_status"}
+_DECISION_FIELDS = {"decision_id", "publication_id", "announcement_date", "effective_date", "effective_date_basis",
+                    "policy_rate", "corridor_floor", "corridor_ceiling", "rate_change_bp", "floor_change_bp",
+                    "ceiling_change_bp", "action", "rationale_text", "rationale_language", "next_decision_date",
+                    "next_decision_basis", "source_doc_id", "rate_source_doc_id", "validation_status"}
 
 
 class Pipeline:
@@ -81,12 +92,16 @@ class Pipeline:
     # ------------------------------------------------------------------ selection
     @staticmethod
     def _doc_year(d: DiscoveredDocument) -> int | None:
+        key = (d.extra or {}).get("edition_key")
+        if key and re.match(r"^\d{4}", str(key)):
+            return int(str(key)[:4])
         m = re.search(r"(20\d{2})", d.document_url.rsplit("/", 1)[-1]) or re.search(r"(20\d{2})", d.title)
         if m:
             return int(m.group(1))
         return d.published_at.year if d.published_at else None
 
-    def select_documents(self, docs: list[DiscoveredDocument], ds: dict[str, Any], history_start: str) -> list[DiscoveredDocument]:
+    def select_documents(self, docs: list[DiscoveredDocument], ds: dict[str, Any], history_start: str,
+                         recent: int | None = None) -> list[DiscoveredDocument]:
         cand = [d for d in docs if d.dataset_id == ds["id"]]
         if not cand:
             return []
@@ -100,7 +115,13 @@ class Pipeline:
             if y is None or y >= start_year:
                 keep.append(d)
         # oldest edition first so that the newest publication ends up as the current vintage
-        keep.sort(key=lambda d: (d.extra.get("edition_period") or "", d.published_at or dt.date.min, self._doc_year(d) or 0, d.document_url))
+        # oldest edition first so the newest publication ends up as the current vintage
+        keep.sort(key=lambda d: (str(d.extra.get("edition_key") or ""), d.extra.get("edition_period") or "",
+                                 d.published_at or dt.date.min, self._doc_year(d) or 0, d.document_url))
+        if recent:
+            editions = sorted({str(d.extra.get("edition_key") or d.extra.get("edition_period") or d.document_url) for d in keep})
+            wanted = set(editions[-recent:])
+            keep = [d for d in keep if str(d.extra.get("edition_key") or d.extra.get("edition_period") or d.document_url) in wanted]
         return keep
 
     # ------------------------------------------------------------------ fetch + parse
@@ -145,7 +166,7 @@ class Pipeline:
             self.db.set_dataset_state(dsid, source_id=sid, last_doc_id=doc_id, last_sha256=fetched.sha256, last_checked_at=utcnow(),
                                       last_changed_at=utcnow(), status="stored")
             return
-        context = self._context_for(ds, d)
+        context = self._context_for(ds, d, doc_id=doc_id)
         try:
             result: ParseResult = parser(path, ds.get("parse") or {}, source_id=sid, dataset_id=dsid, context=context)
         except Exception as exc:  # any parser crash is a parser failure; it must never abort the run or touch stored data
@@ -170,6 +191,8 @@ class Pipeline:
         failed = [c for c in checks if not c["ok"]]
         if failed:
             st["warnings"].extend(f"check {c['type']} {c['total']} {c['period_end']}: diff {c['diff']:.3f}" for c in failed[:5])
+        if result.publication or result.passages or result.decisions:
+            self._store_publication(result, d, rec, doc_id, dsid, st)
         materiality = self._materiality_for(ds)
         stats = self.db.store_observations(dsid, doc_id, result.observations, materiality=materiality, published_at=rec["published_at"])
         st["new_obs"] += stats["n_new"]
@@ -187,6 +210,85 @@ class Pipeline:
         if stats["n_revisions"]:
             log.info("%s: %d revisions detected (vintage %s)", dsid, stats["n_revisions"], stats["vintage_id"])
 
+    # ------------------------------------------------------------- publications
+    def _publication_extra(self, row, ds: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild the edition context of a stored publication document for reparsing."""
+        if not ds.get("pub_type"):
+            return {}
+        pub_id = row["publication_id"] if "publication_id" in row.keys() else None
+        extra: dict[str, Any] = {"pub_type": ds["pub_type"], "language": row["language"] if "language" in row.keys() else None,
+                                 "publication_id": pub_id}
+        if pub_id:
+            pub = self.db.get_publication(pub_id)
+            if pub is not None:
+                extra.update({"edition_key": pub["edition_key"], "edition_label": pub["edition_label"],
+                              "reporting_start": pub["reporting_period_start"], "reporting_end": pub["reporting_period_end"],
+                              "reporting_frequency": pub["reporting_frequency"], "announcement_date": pub["announcement_date"]})
+        if not extra.get("edition_key"):
+            from .publications.editions import classify_title, publication_id as make_pub_id
+
+            info = classify_title(ds["pub_type"], row["title_original"] or "")
+            if info:
+                extra.update({"edition_key": info.edition_key, "edition_label": info.label_en,
+                              "reporting_start": info.reporting_start.isoformat() if info.reporting_start else None,
+                              "reporting_end": info.reporting_end.isoformat() if info.reporting_end else None,
+                              "reporting_frequency": info.frequency,
+                              "publication_id": pub_id or make_pub_id(ds["pub_type"], info.edition_key)})
+        return extra
+
+    def _store_publication(self, result, d: DiscoveredDocument, rec: dict[str, Any], doc_id: str, dsid: str,
+                           st: dict[str, Any]) -> None:
+        """Persist the publication, its language edition, its passages and any decision it carries.
+
+        A second language edition of a publication that is already stored updates the shared record
+        without creating a second release: the release event belongs to the publication, not the file.
+        """
+        pub = dict(result.publication or {})
+        pub_id = pub.get("publication_id") or (d.extra or {}).get("publication_id")
+        if not pub_id:
+            return
+        prior = self.db.get_publication(pub_id)
+        published_at, basis = self._publication_date(pub, d, rec)
+        pub.update({"published_at": published_at, "published_at_basis": basis})
+        self.db.upsert_publication({k: v for k, v in pub.items() if k in _PUBLICATION_FIELDS})
+        versions = [v for v in self.db.document_versions(d.document_url) if v["doc_id"] != doc_id]
+        version = len(versions) + 1
+        self.db.link_publication_document(doc_id, pub_id, (d.extra or {}).get("language"), role="primary", version=version)
+        rec.update({"publication_id": pub_id, "language": (d.extra or {}).get("language"),
+                    "doc_type": pub.get("pub_type"), "version": version,
+                    "page_count": result.meta.get("pages"), "extraction_status": result.meta.get("extraction_method")})
+        if result.passages:
+            self.db.replace_passages(doc_id, [{k: v for k, v in p.items() if k in _PASSAGE_FIELDS} for p in result.passages])
+        for dec in result.decisions or []:
+            outcome = self.db.upsert_decision({k: v for k, v in dec.items() if k in _DECISION_FIELDS})
+            if outcome != "unchanged":
+                st.setdefault("decisions", []).append(f"{dec['decision_id']} {outcome}")
+        st["is_publication"] = True
+        st["publication_id"] = pub_id
+        if prior is None:
+            st.setdefault("new_publications", []).append(pub_id)
+        self.db.log_event("publication_extracted", doc_id, dsid,
+                          {"publication_id": pub_id, "language": (d.extra or {}).get("language"),
+                           "passages": len(result.passages), "new_publication": prior is None, "version": version})
+
+    @staticmethod
+    def _publication_date(pub: dict[str, Any], d: DiscoveredDocument, rec: dict[str, Any]) -> tuple[str | None, str | None]:
+        """A publication date is recorded only when it is known.
+
+        The reporting-period end and the retrieval timestamp are never substituted for it: a report
+        about 2025 can appear in 2026, and the day we downloaded a file says nothing about its release.
+        """
+        if pub.get("announcement_date"):
+            return pub["announcement_date"], "announcement date of the decision"
+        if d.published_at:
+            return d.published_at.isoformat(), d.published_at_basis or "date shown on the publication page"
+        if rec.get("http_last_modified"):
+            stamp = _http_date(rec["http_last_modified"])
+            if stamp:
+                return stamp.isoformat(), ("HTTP Last-Modified header of the file (upload date, which can be later "
+                                           "than the release)")
+        return None, "unknown: the publication page states no release date"
+
     def _latest_period(self, dataset_id: str) -> dt.date | None:
         row = self.db.conn.execute("SELECT MAX(period_end) FROM observations WHERE dataset_id=? AND status='current' AND value IS NOT NULL", (dataset_id,)).fetchone()
         return dt.date.fromisoformat(row[0]) if row and row[0] else None
@@ -203,8 +305,14 @@ class Pipeline:
             return float(m.get("count", 1))
         return float(m.get("stock_azn_mln", 1.0)) * 0.01  # values are stored unrounded; 0.01 mln = 10k AZN
 
-    def _context_for(self, ds: dict[str, Any], d: DiscoveredDocument) -> dict[str, Any]:
-        ctx: dict[str, Any] = {"title": d.title, "url": d.document_url, "published_at": d.published_at}
+    def _context_for(self, ds: dict[str, Any], d: DiscoveredDocument, doc_id: str | None = None) -> dict[str, Any]:
+        ctx: dict[str, Any] = {"title": d.title, "url": d.document_url, "published_at": d.published_at,
+                               "doc_id": doc_id, "extension": d.extension}
+        # publication discovery carries edition identity, language and reporting period in `extra`
+        for key in ("pub_type", "language", "edition_key", "edition_label", "reporting_start", "reporting_end",
+                    "reporting_frequency", "period_basis", "publication_id", "announcement_date", "forward_looking"):
+            if d.extra and key in d.extra:
+                ctx[key] = d.extra[key]
         ep = d.extra.get("edition_period") if d.extra else None
         if not ep and d.title:
             epd = _edition_period(d.title)
@@ -221,7 +329,8 @@ class Pipeline:
         return ctx
 
     # ------------------------------------------------------------------ commands
-    def refresh(self, source_ids: list[str] | None = None, dataset_ids: list[str] | None = None, history_start: str | None = None) -> dict[str, Any]:
+    def refresh(self, source_ids: list[str] | None = None, dataset_ids: list[str] | None = None,
+                history_start: str | None = None, recent: int | None = None) -> dict[str, Any]:
         run_id = f"refresh-{uuid.uuid4().hex[:8]}"
         self.db.start_run(run_id, "refresh")
         history_start = history_start or self.settings.get("history_start", "2020-01")
@@ -232,7 +341,7 @@ class Pipeline:
                 continue
             if dataset_ids and ds["id"] not in dataset_ids:
                 continue
-            selected = self.select_documents(docs, ds, history_start)
+            selected = self.select_documents(docs, ds, history_start, recent=recent)
             if not selected:
                 stats.setdefault(ds["id"], {"checked": 0, "new_docs": 0, "unchanged": 0, "new_obs": 0, "revisions": 0, "errors": [], "warnings": []})
                 stats[ds["id"]]["errors"].append("no document discovered for this dataset")
@@ -241,7 +350,10 @@ class Pipeline:
             # dependent datasets (regional snapshots) after their companions: process in config order, companions listed first
             for d in selected:
                 self.process_document(d, sid, ds, stats)
-        summary = {"run_id": run_id, "datasets": stats, "finished_at": utcnow()}
+        from .publications.review import review_publication_series
+
+        review = review_publication_series(self.db, write=True)
+        summary = {"run_id": run_id, "datasets": stats, "publication_review": review, "finished_at": utcnow()}
         ok = not any(v["errors"] for v in stats.values())
         self.db.finish_run(run_id, "ok" if ok else "partial", summary)
         (self.paths.state_dir / "last_refresh.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -270,9 +382,12 @@ class Pipeline:
                     st["errors"].append(f"missing file {r['stored_path']}")
                     continue
                 d = DiscoveredDocument(source_id=sid, dataset_id=ds["id"], discovery_url=r["discovery_url"], document_url=r["document_url"],
-                                       title=r["title_original"] or "", published_at=dt.date.fromisoformat(r["published_at"]) if r["published_at"] else None)
+                                       title=r["title_original"] or "", published_at=dt.date.fromisoformat(r["published_at"]) if r["published_at"] else None,
+                                       extension=("html" if str(path).endswith(".html") else _ext(r["document_url"])),
+                                       extra=self._publication_extra(r, ds))
                 try:
-                    result = parser(path, ds.get("parse") or {}, source_id=sid, dataset_id=ds["id"], context=self._context_for(ds, d))
+                    result = parser(path, ds.get("parse") or {}, source_id=sid, dataset_id=ds["id"],
+                                    context=self._context_for(ds, d, doc_id=r["doc_id"]))
                 except Exception as exc:
                     st["errors"].append(f"{r['doc_id']}: {type(exc).__name__}: {exc}")
                     self.db.upsert_document({"doc_id": r["doc_id"], "source_id": sid, "dataset_id": ds["id"], "document_url": r["document_url"],
@@ -282,6 +397,8 @@ class Pipeline:
                 if result.errors:
                     st["errors"].append(f"{r['doc_id']}: {'; '.join(result.errors)}")
                     continue
+                if result.publication or result.passages or result.decisions:
+                    self._store_publication(result, d, {"http_last_modified": r["http_last_modified"]}, r["doc_id"], ds["id"], st)
                 out = self.db.store_observations(ds["id"], r["doc_id"], result.observations, materiality=self._materiality_for(ds), published_at=r["published_at"])
                 st["docs"] += 1
                 st["new_obs"] += out["n_new"]
@@ -292,6 +409,16 @@ class Pipeline:
                 self.db.set_dataset_state(ds["id"], source_id=sid, latest_period_end=latest.isoformat() if latest else None, status="parsed",
                                           message=f"reparse: {out['n_new']} new, {out['n_revisions']} revised")
         return stats
+
+
+def _http_date(value: str) -> dt.date | None:
+    """Parse an RFC 1123 Last-Modified header. A partial string is never stored as a date."""
+    try:
+        from email.utils import parsedate_to_datetime
+
+        return parsedate_to_datetime(value).date()
+    except (TypeError, ValueError):
+        return None
 
 
 def html_content_fingerprint(content: bytes) -> str:

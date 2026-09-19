@@ -39,7 +39,7 @@ def cmd_refresh(args) -> int:
 
     p = Pipeline()
     summary = p.refresh(source_ids=[args.source] if args.source else None, dataset_ids=[args.dataset] if args.dataset else None,
-                        history_start=getattr(args, "start", None))
+                        history_start=getattr(args, "start", None), recent=getattr(args, "recent", None))
     _print({k: {kk: vv for kk, vv in v.items() if kk != "warnings"} | {"n_warnings": len(v["warnings"])} for k, v in summary["datasets"].items()})
     errors = sum(len(v["errors"]) for v in summary["datasets"].values())
     return 0 if errors == 0 else 2
@@ -84,10 +84,65 @@ def cmd_fact_pack(args) -> int:
 def cmd_report(args) -> int:
     from .reports import generate_report
 
+    if args.type in ("mpr-brief", "fsr-brief", "decision-update"):
+        from . import config
+        from .reports import generate_brief
+
+        kind = {"mpr-brief": "mpr_brief", "fsr-brief": "fsr_brief", "decision-update": "decision_update"}[args.type]
+        res = generate_brief(kind, as_of=args.as_of, lang=args.lang or config.settings().get("language", "en"),
+                             publication_id=getattr(args, "publication", None), force=args.force,
+                             narrative_file=args.narrative_file)
+        _print(res)
+        return 0 if res.get("status") in ("generated", "unchanged", "no_publication") else 2
     res = generate_report(report_type=args.type, as_of=args.as_of, facts_only=args.facts_only, narrative_file=args.narrative_file,
                           lang=args.lang, since=args.since, sector=args.sector, force=args.force)
     _print(res)
     return 0 if res.get("status") in ("generated", "no_update", "unchanged") else 2
+
+
+def cmd_commentary_pack(args) -> int:
+    """Write the pack a Claude Code commentary session works from (no API call involved)."""
+    import datetime as dt
+
+    from . import config
+    from .facts import build_fact_pack
+    from .narrative.commentary import write_request
+    from .reports import evidence_passages
+    from .storage.db import Database
+
+    paths = config.paths()
+    db = Database(paths.db_path)
+    fp, _ = build_fact_pack(report_type=args.type, as_of=args.as_of, db=db, write=True)
+    out = Path(args.out) if args.out else paths.state_dir / f"commentary_request_{fp['edition']['edition_month']}.json"
+    write_request(fp, evidence_passages(db, fp), out)
+    _print({"status": "ok", "request": str(out), "edition": fp["edition"], "fact_pack_hash": fp["fact_pack_hash"],
+            "claims_available": len(json.loads(out.read_text())["claim_catalogue"]),
+            "next": f"write narratives/monthly_{fp['edition']['edition_month']}_analyst.json, then "
+                    f"`monitor report --type monthly --narrative-file <path>`"})
+    db.close()
+    return 0
+
+
+def cmd_bind_claims(args) -> int:
+    """Propose claim ids for the numbers in an existing narrative and report what needs a decision."""
+    from . import config
+    from .facts import build_fact_pack
+    from .narrative.commentary import bind_claims
+    from .storage.db import Database
+
+    paths = config.paths()
+    db = Database(paths.db_path)
+    fp, _ = build_fact_pack(report_type="monthly", as_of=args.as_of, db=db, write=False)
+    nar = json.loads(Path(args.narrative).read_text(encoding="utf-8"))
+    bound, report = bind_claims(nar, fp)
+    out = Path(args.out or args.narrative)
+    if not args.dry_run:
+        out.write_text(json.dumps(bound, ensure_ascii=False, indent=1), encoding="utf-8")
+    _print({"status": "ok", "written": None if args.dry_run else str(out), "bound": report["bound"],
+            "ambiguous": report["ambiguous"][:20], "unsupported": report["unsupported"][:20],
+            "n_ambiguous": len(report["ambiguous"]), "n_unsupported": len(report["unsupported"])})
+    db.close()
+    return 0 if not report["unsupported"] else 2
 
 
 def cmd_run_due(args) -> int:
@@ -95,7 +150,9 @@ def cmd_run_due(args) -> int:
 
     res = run_due(dry_run=args.dry_run)
     _print(res)
-    return 0 if res.get("status") != "failed" else 2
+    # the exit code says what happened, so a scheduler can alert on the right thing
+    return {"ok": 0, "partial": 2, "failed": 3, "skipped_locked": 4, "failed_restore": 5, "failed_save": 6}.get(
+        res.get("status", "failed"), 3)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -116,6 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("refresh", help="Check sources, download changed files, parse and store new vintages")
     s.add_argument("--source")
     s.add_argument("--dataset")
+    s.add_argument("--recent", type=int, help="For multi-edition sources, process only the N most recent editions "
+                                              "(staged backfill: validate the latest editions before loading the archive)")
     s.set_defaults(fn=cmd_refresh)
 
     s = sub.add_parser("reparse", help="Re-run parsers on stored documents (after a parser fix); new vintages only where values change")
@@ -135,7 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_fact_pack)
 
     s = sub.add_parser("report", help="Generate a report edition (pptx, pdf, xlsx, fact pack, narrative, manifest)")
-    s.add_argument("--type", default="monthly", choices=["monthly", "weekly", "sector"])
+    s.add_argument("--type", default="monthly",
+                   choices=["monthly", "weekly", "sector", "mpr-brief", "fsr-brief", "decision-update"])
+    s.add_argument("--publication", help="Publication id for a brief (default: the most recent one of that type)")
     s.add_argument("--as-of", default=None)
     s.add_argument("--facts-only", action="store_true")
     s.add_argument("--narrative-file", default=None)
@@ -144,6 +205,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sector", default=None, help="sector review: agriculture|construction|trade|transport|industry")
     s.add_argument("--force", action="store_true", help="generate even if inputs are unchanged since the last edition")
     s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("commentary-pack", help="Write the commentary request a Claude Code session drafts from "
+                                               "(claim catalogue, quotable passages, rules); no API call is made")
+    s.add_argument("--type", default="monthly")
+    s.add_argument("--as-of", default=None)
+    s.add_argument("--out", default=None)
+    s.set_defaults(fn=cmd_commentary_pack)
+
+    s = sub.add_parser("bind-claims", help="Propose claim ids for the numbers in a narrative file and report the "
+                                           "ambiguous and unsupported ones")
+    s.add_argument("--narrative", required=True)
+    s.add_argument("--as-of", default=None)
+    s.add_argument("--out", default=None)
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_bind_claims)
 
     s = sub.add_parser("run-due", help="Scheduler entry point: check sources and generate due reports (idempotent, locked)")
     s.add_argument("--dry-run", action="store_true")

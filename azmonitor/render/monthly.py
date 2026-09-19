@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
-from ..narrative.contract import slide_text
+from ..narrative.contract import flatten, slide_text
+from .policy_slides import PolicyStabilitySlides
 from ..narrative.fmt import money, num, plabel
 from .builder import Deck, align_series, month_labels
 
@@ -58,10 +59,12 @@ def _clip(text: str, n: int = 170) -> str:
     return text if len(text) <= n else text[: n - 1].rsplit(" ", 1)[0] + "…"
 
 
-class MonthlyRenderer:
+class MonthlyRenderer(PolicyStabilitySlides):
     def __init__(self, fp: dict[str, Any], nar: dict[str, Any], theme: dict[str, Any], lang: str = "en"):
         self.fp = fp
-        self.nar = nar
+        # a narrative may arrive grounded (blocks with claims) or already flattened; rendering only
+        # ever needs the text, and flattening twice is harmless
+        self.nar = flatten(nar or {})
         self.deck = Deck(theme, lang)
         self.d = self.deck
         self.lang = lang
@@ -170,12 +173,18 @@ class MonthlyRenderer:
         self.m15()
         self.m16()
         self.m17()
+        self.m19()
+        self.m20()
+        self.m21()
+        self.m22()
         self.m18()
         self.a01()
         self.a02()
         if self.fp["slides"].get("A03", {}).get("revisions"):
             self.a03()
         self.a04()
+        self.a05()
+        self.a06()
         self.d.save(out_path)
         return {"path": str(out_path), "slides": self.slides_index, "n_slides": self.d.page}
 

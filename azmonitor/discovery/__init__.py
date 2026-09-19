@@ -174,6 +174,12 @@ def discover_ssc_topics(source_id: str, scfg: dict[str, Any], fetcher: Fetcher) 
 
 def discover(source_id: str, scfg: dict[str, Any], fetcher: Fetcher, history_start: str | None = None) -> list[DiscoveredDocument]:
     method = scfg.get("discovery", "none")
+    if method in ("cba_publications", "cba_decisions"):
+        # imported here: the publications package builds on the types defined above
+        from ..publications.discovery import discover_cba_decisions, discover_cba_publications
+
+        fn = discover_cba_publications if method == "cba_publications" else discover_cba_decisions
+        return fn(source_id, scfg, fetcher, history_start=history_start)
     if method == "cba_download_items":
         return discover_cba(source_id, scfg, fetcher)
     if method == "ssc_macro_news":
