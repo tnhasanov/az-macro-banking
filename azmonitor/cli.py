@@ -10,6 +10,9 @@
     monitor report --type weekly --since YYYY-MM-DD
     monitor report --type sector --sector agriculture
     monitor run-due
+    monitor run-task --task source-check|weekly-digest|monitor [--dry-run]
+    monitor schedule status [--check-timers]
+    monitor delivery status|resolve|send
 """
 from __future__ import annotations
 
@@ -145,6 +148,84 @@ def cmd_bind_claims(args) -> int:
     return 0 if not report["unsupported"] else 2
 
 
+def cmd_run_task(args) -> int:
+    from .scheduling.runner import run_task
+
+    res = run_task(args.task, dry_run=args.dry_run)
+    _print(res)
+    return {"ok": 0, "partial": 2, "failed": 3, "skipped_locked": 4, "failed_restore": 5,
+            "failed_save": 6}.get(res.get("status"), 3)
+
+
+def cmd_schedule(args) -> int:
+    import datetime as dt
+
+    from . import config
+    from .calc.validate import validate_all
+    from .scheduling import readiness as R
+    from .scheduling import tasks as T
+    from .storage.db import Database
+
+    if args.action == "check":
+        problems = T.schedule_drift()
+        _print({"config": "config/schedule.yaml", "timers": "deploy/systemd",
+                "in_step": not problems, "problems": problems})
+        return 0 if not problems else 2
+
+    db = Database(config.paths().db_path)
+    try:
+        quality = validate_all(db, write=False)
+        today = T.now_local().date()
+        week = T.previous_calendar_week()
+        _print({
+            "now_local": T.now_local().isoformat(timespec="seconds"),
+            "timezone": config.schedule_config().get("timezone"),
+            "source_check_times": (config.schedule_config().get("source_checks") or {}).get("times"),
+            "weekly_digest": {"weekday": (config.schedule_config().get("weekly_digest") or {}).get("weekday"),
+                              "time": (config.schedule_config().get("weekly_digest") or {}).get("time"),
+                              "next_window_would_cover": [week[0].isoformat(), week[1].isoformat()]},
+            "readiness": {k: v.as_dict() for k, v in R.evaluate_all(db, today, quality).items()},
+            "stale_sources": R.stale_sources(db, config.schedule_config().get("monitoring") or {}, today),
+            "missed_runs": T.missed_runs(),
+            "consecutive_failures": T.consecutive_failures(),
+            "quality": quality["summary"],
+        })
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_delivery(args) -> int:
+    from . import config
+    from .delivery import dispatch
+    from .delivery.records import DeliveryLedger
+
+    if args.action == "status":
+        _print(dispatch.status())
+        return 0
+    if args.action == "resolve":
+        if not args.id or not args.resolution or not args.by:
+            print("resolve needs --id, --resolution and --by", file=sys.stderr)
+            return 2
+        led = DeliveryLedger(dispatch.ledger_path())
+        try:
+            ok = led.resolve(args.id, args.resolution, args.by)
+            _print({"delivery_id": args.id, "resolved": ok, "resolution": args.resolution, "by": args.by,
+                    "note": ("recorded" if ok else "no delivery with that id is awaiting review")})
+            return 0 if ok else 2
+        finally:
+            led.close()
+    if not args.report:
+        print("send needs --report", file=sys.stderr)
+        return 2
+    path = Path(args.path) if args.path else (config.paths().output_dir / "latest" / args.report)
+    if not path.exists():
+        print(f"no edition at {path}", file=sys.stderr)
+        return 2
+    _print(dispatch.deliver_edition(args.report, path.resolve(), dry_run=args.dry_run))
+    return 0
+
+
 def cmd_run_due(args) -> int:
     from .scheduling.run_due import run_due
 
@@ -224,6 +305,27 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("run-due", help="Scheduler entry point: check sources and generate due reports (idempotent, locked)")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_run_due)
+
+    s = sub.add_parser("run-task", help="Run one scheduled task: source-check, weekly-digest or monitor")
+    s.add_argument("--task", required=True, choices=["source-check", "weekly-digest", "monitor"])
+    s.add_argument("--dry-run", action="store_true",
+                   help="do everything except produce files and transmit messages; the decisions are real")
+    s.set_defaults(fn=cmd_run_task)
+
+    s = sub.add_parser("schedule", help="What is scheduled, what is ready, and what has been missed")
+    s.add_argument("action", choices=["status", "check"], nargs="?", default="status",
+                   help="status: readiness and history; check: compare config with the installed timers")
+    s.set_defaults(fn=cmd_schedule)
+
+    s = sub.add_parser("delivery", help="The delivery ledger: what was sent, what is waiting, what needs a person")
+    s.add_argument("action", choices=["status", "resolve", "send"])
+    s.add_argument("--id", help="delivery id, for resolve")
+    s.add_argument("--resolution", choices=["delivered", "not_delivered"], help="for resolve")
+    s.add_argument("--by", help="who resolved it, for the audit trail")
+    s.add_argument("--report", help="report type, for send")
+    s.add_argument("--path", help="edition directory, for send (default: outputs/latest/<report>)")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_delivery)
     return ap
 
 
