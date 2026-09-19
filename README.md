@@ -4,6 +4,9 @@ Collects official Azerbaijani statistics (Central Bank of Azerbaijan, State Stat
 
 Everything numeric is computed by code from stored, unrounded observations. Narrative text is generated separately (facts-only fallback, an analyst-authored JSON file, or an optional API provider) and every number in it is validated against the fact pack before rendering.
 
+Running it unattended — Docker, systemd timers, persistent storage, email delivery and the exact
+account setup still needed — is in [`docs/deployment.md`](docs/deployment.md).
+
 ## What is in the box
 
 | Area | Implementation |
@@ -81,7 +84,13 @@ previews/slide-NN.png slide images for inspection
 | `monitor report --type mpr-brief \| fsr-brief \| decision-update [--publication ID]` | Brief for a policy review, a stability report or a rate decision; `unchanged` when that publication has already been briefed |
 | `monitor commentary-pack` | Write the commentary request a Claude Code session drafts from: claim catalogue, quotable passages, rules |
 | `monitor bind-claims --narrative F` | Propose claim ids for the numbers in a narrative and list the ambiguous and unsupported ones |
-| `monitor run-due [--dry-run]` | Scheduler entry point: refresh, validate, apply the monthly/weekly publication policy, write state |
+| `monitor run-due [--dry-run]` | The original scheduler entry point: refresh, validate, apply the monthly/weekly publication policy, write state |
+| `monitor run-task --task source-check\|weekly-digest\|monitor [--dry-run]` | What a timer invokes. `source-check` refreshes and produces whatever is due; `weekly-digest` covers the previous calendar week; `monitor` reports missed runs, quiet sources and deliveries awaiting a person |
+| `monitor schedule [status\|check]` | `status`: readiness of every report, stale sources, missed runs. `check`: whether the installed systemd timers still match `config/schedule.yaml` |
+| `monitor delivery status` | The ledger: what was sent, what is retryable, what needs a person to resolve |
+| `monitor delivery resolve --id ID --resolution delivered\|not_delivered --by NAME` | Record what a person decided about a delivery whose outcome was never established |
+| `monitor delivery send --report TYPE [--path DIR] [--dry-run]` | Deliver a produced edition on demand |
+| `monitor archive [index\|plan\|prune [--apply]]` | What the archive holds, and what retention would remove |
 
 `--as-of` is an information cutoff at 23:59 Asia/Baku on the given date. The current build reports in *reconstructed* mode (current vintages); a genuine historical information set is available (`historical=True` in `FactPackBuilder`) only for periods after the dataset started recording vintages, and is labelled as such in the fact pack (`information_set_mode`).
 
@@ -89,7 +98,9 @@ previews/slide-NN.png slide images for inspection
 
 | File | Purpose |
 |---|---|
-| `config/settings.yaml` | timezone, language, history start, chart window, paths, schedule (09:00 Baku, 7-day companion grace), narrative provider, delivery (disabled), materiality by series type, monitoring flags |
+| `config/settings.yaml` | timezone, language, history start, chart window, paths, narrative provider, materiality by series type, monitoring flags |
+| `config/schedule.yaml` | when runs happen (09:15 / 13:15 / 17:15 and Monday 08:30, Asia/Baku) and what must be true before each report may be produced: required and companion datasets, grace periods, source-staleness limits, release windows, archive retention |
+| `config/delivery.yaml` | channels, distribution lists, routing, retry rules and AI spending limits. Recipients are named by role; their addresses come from the environment, so this file carries no personal data and no secrets |
 | `config/sources.yaml` | source register: entry pages, datasets, title patterns, parser specs (sheet, columns, row regexes), expected lags, roles (anchor / companion / optional / reference), component-sum checks, CBA→SSC sector mapping |
 | `config/metrics.yaml` | metric dictionary: formula, inputs, units, dimension slices, allowed period types |
 | `config/reports.yaml` | slide blueprint and ids, critical anchors and companions, scorecard rows, weekly/sector definitions |
@@ -100,7 +111,8 @@ previews/slide-NN.png slide images for inspection
 * **Language**: set `language: az` in `settings.yaml` or pass `--lang az`. The same calculations, fact pack and sources are used; labels come from `glossary.yaml` (extend the `az` entries for full coverage; missing terms fall back to English).
 * **Template**: edit `config/theme.yaml`; the renderer reads colours, fonts, sizes, layout margins and the logo from it. Slide layouts are the reusable helpers in `azmonitor/render/builder.py`.
 * **Metrics / slides**: add entries to `metrics.yaml`; add or reorder slide ids and scorecard rows in `reports.yaml`.
-* **Schedule**: `settings.schedule` (check time is documented for the OS scheduler; grace period and weekly weekday are applied by `run-due`).
+* **Schedule**: `config/schedule.yaml`. The systemd timers in `deploy/systemd` carry the same times because a timer cannot read YAML; `monitor schedule check` compares them and the installer refuses units that disagree.
+* **Delivery**: `config/delivery.yaml` plus environment variables. Off until `enabled: true` and the credentials are present; until then every run composes the message, records the intent and reports that nothing was sent and why.
 
 ## What triggers a new edition
 

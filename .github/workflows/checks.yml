@@ -70,8 +70,43 @@ jobs:
           print(f"{len(metrics)} metrics, every input resolves to a configured or generated series")
           PY
 
-      - name: Grounding, publications and operations
+      - name: Grounding, publications, operations, scheduling and delivery
         run: python -m pytest -q
+
+      - name: The timers still match the schedule they are supposed to implement
+        run: |
+          python - <<'PY'
+          from azmonitor.scheduling.tasks import schedule_drift
+          problems = schedule_drift()
+          assert not problems, "config/schedule.yaml and deploy/systemd disagree:\n  " + "\n  ".join(problems)
+          print("config/schedule.yaml and the systemd timers are in step")
+          PY
+
+      - name: Delivery is off, and nothing in the committed configuration is a secret
+        run: |
+          python - <<'PY'
+          import re
+          from azmonitor import config
+
+          d = config.delivery_config()
+          assert d.get("enabled") is False, "delivery must be disabled in the committed configuration"
+          assert (d["channels"]["whatsapp"].get("enabled") is False), "WhatsApp must be disabled in the committed configuration"
+
+          # Every recipient is named by an environment variable, never by an address, and every
+          # credential is a variable name. A literal address or token here would be committed.
+          blob = str(d)
+          for pattern, what in [(r"[\w.+-]+@[\w-]+\.[\w.]+", "an email address"),
+                                (r"\+\d{7,}", "a phone number"),
+                                (r"(?i)(secret|token|password)\s*[:=]\s*['\"]?[A-Za-z0-9/_+-]{12,}", "a credential")]:
+              found = [m for m in re.findall(pattern, blob) if not m.endswith("example.az")]
+              assert not found, f"config/delivery.yaml appears to contain {what}: {found[:3]}"
+
+          for lst in d["distribution_lists"].values():
+              for r in lst.get("recipients") or []:
+                  assert r.get("email_env") or r.get("whatsapp_env"), \
+                      f"recipient {r.get('id')} has no environment variable for its address"
+          print("delivery is disabled; every recipient and credential is an environment variable name")
+          PY
 
       - name: A facts-only narrative grounds every number it writes
         run: |
