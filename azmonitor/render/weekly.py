@@ -24,7 +24,8 @@ BANK_REFS = [("cba.loans.total_ci", "Loans to the economy"), ("cba.loans.total_c
              ("cba.deposits.fx_share", "Deposit FX share"), ("cba.bank.npl.ratio", "NPL ratio (banks)"), ("cba.bank.pnl.net_profit", "Net profit, YTD"), ("cba.bank.equity_to_assets", "Capital / assets")]
 
 
-def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, src_line: str, lang: str) -> None:
+def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, src_line: str, lang: str,
+                       since_label: str | None = None) -> None:
     """Newly released policy and stability publications, and what each one is about.
 
     A publication counts as new when it was first seen in this window. A second language edition of
@@ -36,7 +37,7 @@ def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, s
     pf = PublicationFacts(db, dt.date.fromisoformat(fp["as_of"]), lang)
     fresh = pf.new_since(since_iso + "T00:00:00+00:00")
     s = d.new_slide()
-    d.add_title(s, f"Policy and stability publications released since {since_iso}",
+    d.add_title(s, f"Policy and stability publications released since {since_label or since_iso}",
                 "New publications",
                 "Reporting period and release date are shown separately; a translation is not a second release")
     if fresh:
@@ -78,9 +79,15 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
     as_of_d = parse_as_of(as_of)
     if since:
         since_iso = dt.date.fromisoformat(since).isoformat()
+        since_label = since_iso
     else:
         eds = [e for e in db.editions("weekly") if e["status"] == "generated"]
         since_iso = eds[-1]["generated_at"][:10] if eds else (as_of_d - dt.timedelta(days=7)).isoformat()
+        # a digest produced twice on the same day would otherwise read "since <today>" on a deck
+        # dated today, which tells a reader nothing about the window it covers
+        since_label = since_iso
+        if eds and since_iso == as_of_d.isoformat():
+            since_label = f"the last digest ({eds[-1]['generated_at'][11:16]} UTC today)"
     vint = [dict(v) for v in db.vintages_since(since_iso)]
     new_docs = [dict(d) for d in db.all_documents() if (d["first_seen_at"] or "") >= since_iso and d["status"] in ("parsed", "stored")]
     if not vint and not force:
@@ -102,11 +109,11 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
     version = len([e for e in db.editions("weekly") if e["edition_period"] == edition]) + 1
     out = paths.output_dir / "weekly" / edition / f"v{version}_{ts}"
     out.mkdir(parents=True, exist_ok=True)
-    src_line = f"Source: CBA and SSC documents first seen after {since_iso}; retrieved {fp['generated_at'][:10]}; cutoff {fp['as_of']} (Asia/Baku)."
+    src_line = f"Source: CBA and SSC documents first seen after {since_label}; retrieved {fp['generated_at'][:10]}; cutoff {fp['as_of']} (Asia/Baku)."
 
     # W01 cover + new releases
     s = d.new_slide()
-    d.add_title(s, f"Weekly release digest: {len(new_docs)} new official documents and {sum(v['n_new_periods'] for v in vint)} new observations since {since_iso}",
+    d.add_title(s, f"Weekly release digest: {len(new_docs)} new official documents and {sum(v['n_new_periods'] for v in vint)} new observations since {since_label}",
                 config.term("weekly_digest", lang), f"As of {as_of_d} · {config.term('draft_label', lang)} · datasets changed: {', '.join(changed_datasets)[:110]}")
     rows = []
     for doc in sorted(new_docs, key=lambda x: x["first_seen_at"])[-14:]:
@@ -147,7 +154,7 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
         d.add_footer(s, src_line, d.page)
         d.add_notes(s, "Metrics shown are the standard monitor metrics (see monthly appendix A01) restricted to series updated in this window where possible.")
 
-    publications_slide(d, C, fp, db, since_iso, src_line, lang)
+    publications_slide(d, C, fp, db, since_iso, src_line, lang, since_label)
     evidence_slide("New macroeconomic evidence", "Macro", MACRO_REFS, [("ssc.hl.gdp_nonoil.growth", None, "Non-oil GDP, real YTD y/y"), ("ssc.cpi.all.yoy", None, "CPI y/y")])
     evidence_slide("New banking and funding evidence", "Banking", BANK_REFS, [("cba.loans.total_ci.yoy", None, "Loans y/y"), ("cba.deposits.total.yoy", None, "Deposits y/y")])
     # W04 material development from monitoring flags
