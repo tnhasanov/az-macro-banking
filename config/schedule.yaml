@@ -1,0 +1,141 @@
+# When the monitor runs, and what has to be true before a report may be produced.
+#
+# Nothing here decides *whether* the content changed - the edition fingerprint does that, and an
+# unchanged input still produces no new edition. These rules decide something narrower: when to look
+# at the sources, and whether the data behind a report has arrived in a state worth reporting on.
+#
+# All times are Asia/Baku. The systemd timers in deploy/systemd must match the times below; they are
+# repeated there because a timer cannot read this file, and `monitor schedule check` compares the
+# two and complains if they drift apart.
+
+timezone: Asia/Baku
+
+# ---------------------------------------------------------------- source checks
+# Three checks a day. The CBA publishes banking tables and decisions during office hours and the
+# SSC posts the monthly release in the morning, so a single daily check can sit on a release for
+# almost a day. Times are deliberately a quarter past the hour, off the top-of-hour peak.
+source_checks:
+  times: ["09:15", "13:15", "17:15"]
+  # A check that finds nothing does no work beyond the refresh: no edition, no delivery, no noise.
+  # A check that finds a release evaluates the readiness rules below.
+  catch_up_window_minutes: 90    # a timer that fired late still counts as that scheduled run
+  max_runtime_minutes: 40
+
+# ---------------------------------------------------------------- weekly digest
+weekly_digest:
+  weekday: monday
+  time: "08:30"
+  # The digest covers the previous calendar week (Monday 00:00 to Sunday 23:59 Asia/Baku), not
+  # "the last seven days" and not "since the previous digest": a fixed, nameable window means two
+  # people reading two different editions see the same boundaries.
+  window: previous_calendar_week
+  # Produced even when the week was quiet, because "nothing was published" is itself the answer a
+  # reader wants on a Monday morning. Set to true to suppress an empty week instead.
+  skip_when_empty: false
+
+# ------------------------------------------------------------- release triggers
+# A report is produced when its trigger fires *and* its readiness rules pass. Readiness is about the
+# data being in a fit state, never about the calendar: a month-end that arrives with half its tables
+# missing is not ready, and waiting is better than publishing a deck full of gaps.
+releases:
+
+  monthly:
+    report_type: monthly
+    trigger: banking_anchor_advanced      # a new verified month on the CBA banking tables
+    readiness:
+      # Every one of these must carry the anchor month before the edition is produced.
+      required_datasets:
+        - cba_loans_by_institution
+        - cba_deposits
+        - cba_bank_balance
+      # These improve the edition but do not hold it up for ever: once the grace period passes the
+      # edition is produced and labelled partial, naming what is missing.
+      companion_datasets:
+        - cba_loans_by_sector
+        - cba_bank_pnl
+        - cba_bank_npl
+        - cba_rates_new
+      companion_grace_days: 7
+      # measured from the last time the source published, not from the period end: the July tables
+      # appear in late August, so a healthy monthly series always describes a period weeks old
+      max_days_since_source_published: 45
+      require_quality_pass: true          # a critical data-quality failure blocks the edition
+      require_narrative_validation: true  # a narrative that fails grounding falls back to facts-only
+
+  mpr_brief:
+    report_type: mpr_brief
+    trigger: publication_released
+    publication_type: monetary_policy_review
+    readiness:
+      # The brief quotes the publication, so its text must have been extracted and verified.
+      require_extraction: verified
+      min_passages: 40
+      release_within_days: 45             # older than this is archive, not news
+      require_quality_pass: false         # a brief reports one publication; sector history is not its subject
+
+  fsr_brief:
+    report_type: fsr_brief
+    trigger: publication_released
+    publication_type: financial_stability_report
+    readiness:
+      require_extraction: verified
+      min_passages: 80
+      release_within_days: 60             # stability reports are half-yearly and noticed later
+      require_quality_pass: false
+
+  decision_update:
+    report_type: decision_update
+    trigger: publication_released
+    publication_type: policy_decision
+    readiness:
+      require_extraction: verified
+      min_passages: 3                     # a press release is short; three passages is a real one
+      release_within_days: 10             # a rate decision is news for days, not weeks
+      require_decision_fields: [policy_rate, announcement_date]
+      require_quality_pass: false
+
+  sector:
+    report_type: sector
+    trigger: monthly_edition_published    # follows the monthly deck, on the same data
+    sectors: [construction]               # add sectors here; each produces its own review
+    readiness:
+      required_datasets:
+        - cba_loans_by_sector
+        - ssc_macro_headline_html
+      max_days_since_source_published: 60
+      require_quality_pass: true
+
+# ------------------------------------------------------- freshness and monitoring
+monitoring:
+  # A source that has not changed for longer than this is reported as stale. These are generous:
+  # the CBA banking tables appear monthly, the stability report twice a year.
+  stale_after_days:
+    default: 45
+    cba_financial_stability_report: 220
+    cba_policy_directions: 400
+    cba_monetary_policy_review: 120
+    cba_policy_decisions: 70
+  # If a scheduled run has not succeeded within this many minutes of its due time, the next run that
+  # does happen reports the miss. A machine that was off all day reports every run it missed.
+  missed_run_grace_minutes: 120
+  # Consecutive failures before the failure alert escalates from "informational" to "act now".
+  alert_after_consecutive_failures: 2
+  # Keep this many days of run history in the state file.
+  keep_run_history_days: 60
+
+# ---------------------------------------------------------------- report archive
+archive:
+  # Every edition is already written to its own versioned directory. These control what is kept and
+  # how a delivered link resolves to it.
+  keep_versions_per_edition: 12
+  keep_editions:
+    monthly: 24
+    weekly: 26
+    sector: 12
+    mpr_brief: 12
+    fsr_brief: 8
+    decision_update: 16
+  # Base URL that artifact links in a delivered message point at. The archive directory is served
+  # read-only behind whatever authentication the host already uses; nothing is published publicly.
+  # Empty means links are omitted from messages and only the attachment is sent.
+  base_url_env: AZMONITOR_ARCHIVE_BASE_URL

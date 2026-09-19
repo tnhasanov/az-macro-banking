@@ -88,10 +88,36 @@ def load_exceptions() -> dict[str, Any]:
     return {e["check_id"]: e for e in (data.get("exceptions") or []) if e.get("check_id")}
 
 
+def default_display_from(db: Database) -> dt.date | None:
+    """The window a monthly edition would display, so a standalone check classifies as one would.
+
+    Severity depends on whether a failure touches published figures, which depends on the window.
+    Called without one, `validate_all` used to treat every period as displayed and report five
+    warnings as five critical failures - the same dataset answering two different ways depending on
+    who asked. This derives the window the same way the fact pack does, from the banking anchor.
+    """
+    from .. import config
+    from ..util.periods import shift_months
+
+    anchors = config.reports_config()["monthly"]["anchors"]["banking"]
+    states = {k: dict(v) for k, v in db.dataset_states().items()}
+    periods = [ (states.get(d) or {}).get("latest_period_end") for d in anchors ]
+    periods = [p for p in periods if p]
+    if len(periods) != len(anchors):
+        return None
+    try:
+        anchor = dt.date.fromisoformat(min(periods))
+    except ValueError:
+        return None
+    return shift_months(anchor, -int(config.settings().get("chart_window", 36)))
+
+
 def validate_all(db: Database | None = None, write: bool = True, display_from: dt.date | None = None) -> dict[str, Any]:
     paths = config.paths()
     own = db is None
     db = db or Database(paths.db_path)
+    if display_from is None:
+        display_from = default_display_from(db)
     checks: list[dict[str, Any]] = []
     # 1. source totals vs components (per dataset config)
     for sid, scfg, ds in config.iter_datasets():

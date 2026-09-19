@@ -93,6 +93,18 @@ def reports_config() -> dict[str, Any]:
 
 
 @lru_cache(maxsize=None)
+def schedule_config() -> dict[str, Any]:
+    """When runs happen and what must be true before a report is produced."""
+    return load_yaml(CONFIG_DIR / "schedule.yaml")
+
+
+@lru_cache(maxsize=None)
+def delivery_config() -> dict[str, Any]:
+    """Channels, recipients and provider settings. Credentials are never stored here."""
+    return load_yaml(CONFIG_DIR / "delivery.yaml")
+
+
+@lru_cache(maxsize=None)
 def theme() -> dict[str, Any]:
     return load_yaml(_resolve(ROOT, settings()["report"].get("theme", "config/theme.yaml")))
 
