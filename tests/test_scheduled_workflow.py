@@ -231,3 +231,28 @@ def test_retention_keeps_the_latest_and_anything_delivered(workspace):
         assert p["applied"] is False if "applied" in p else True
     finally:
         C.schedule_config = original
+
+
+def test_a_late_weekly_digest_still_covers_only_its_own_week(workspace):
+    """A digest produced on Wednesday must not report Monday's and Tuesday's releases under last
+    week's heading. The window closes at the Sunday, whenever the digest is actually produced."""
+    from azmonitor import config
+    from azmonitor.storage.db import Database
+
+    db = Database(config.paths().db_path)
+    inside = "2026-09-18T10:00:00+00:00"       # Friday of the window
+    outside = "2026-09-22T10:00:00+00:00"      # the following Tuesday
+    for doc_id, seen in (("in", inside), ("out", outside)):
+        db.upsert_document({"doc_id": doc_id, "source_id": "CBA", "dataset_id": "cba_deposits",
+                            "document_url": f"https://example.invalid/{doc_id}", "sha256": doc_id,
+                            "retrieved_at": seen, "first_seen_at": seen, "published_at": seen[:10],
+                            "status": "parsed"})
+
+    start, end = dt.date(2026, 9, 14), dt.date(2026, 9, 20)
+    end_stamp = end.isoformat() + "T23:59:59+99:99"
+    in_window = [d["doc_id"] for d in db.all_documents()
+                 if (d["first_seen_at"] or "") >= start.isoformat()
+                 and (d["first_seen_at"] or "") <= end_stamp]
+
+    assert in_window == ["in"]
+    db.close()

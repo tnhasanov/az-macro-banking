@@ -193,7 +193,7 @@ def _task_weekly(p: Pipeline, state: dict[str, Any], summary: dict[str, Any], dr
     from ..render.weekly import generate_weekly
 
     res = generate_weekly(None, start.isoformat(), config.settings().get("language", "en"),
-                          force=not cfg.get("skip_when_empty", False), db=p.db)
+                          force=not cfg.get("skip_when_empty", False), db=p.db, until=end.isoformat())
     summary["steps"]["weekly"] = res
     summary["produced"] = [{"report_type": "weekly", "status": res.get("status"), "path": res.get("path")}]
     if res.get("status") == "generated":

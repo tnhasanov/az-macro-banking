@@ -25,7 +25,7 @@ BANK_REFS = [("cba.loans.total_ci", "Loans to the economy"), ("cba.loans.total_c
 
 
 def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, src_line: str, lang: str,
-                       since_label: str | None = None) -> None:
+                       since_label: str | None = None, until_iso: str | None = None) -> None:
     """Newly released policy and stability publications, and what each one is about.
 
     A publication counts as new when it was first seen in this window. A second language edition of
@@ -36,6 +36,8 @@ def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, s
 
     pf = PublicationFacts(db, dt.date.fromisoformat(fp["as_of"]), lang)
     fresh = pf.new_since(since_iso + "T00:00:00+00:00")
+    if until_iso:
+        fresh = [f for f in fresh if (f.get("first_seen_at") or "")[:10] <= until_iso]
     s = d.new_slide()
     d.add_title(s, f"Policy and stability publications released since {since_label or since_iso}",
                 "New publications",
@@ -71,7 +73,14 @@ def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, s
                    "historical backfill are not treated as new releases for briefing.")
 
 
-def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool = False, db: Database | None = None) -> dict[str, Any]:
+def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool = False,
+                    db: Database | None = None, until: str | None = None) -> dict[str, Any]:
+    """The digest for a window.
+
+    `until` closes the window at the end of a named day. Without it the window runs to now, which is
+    right for "since the last digest" but wrong for "the previous calendar week": a digest produced
+    late would report this week's releases under last week's heading.
+    """
     paths = config.paths()
     paths.ensure()
     own = db is None
@@ -88,8 +97,14 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
         since_label = since_iso
         if eds and since_iso == as_of_d.isoformat():
             since_label = f"the last digest ({eds[-1]['generated_at'][11:16]} UTC today)"
-    vint = [dict(v) for v in db.vintages_since(since_iso)]
-    new_docs = [dict(d) for d in db.all_documents() if (d["first_seen_at"] or "") >= since_iso and d["status"] in ("parsed", "stored")]
+    until_iso = dt.date.fromisoformat(until).isoformat() if until else None
+    # an inclusive end: everything stamped on the closing day itself belongs to the window
+    end_stamp = (until_iso + "T23:59:59+99:99") if until_iso else None
+    vint = [dict(v) for v in db.vintages_since(since_iso)
+            if not end_stamp or (v["created_at"] or "") <= end_stamp]
+    new_docs = [dict(d) for d in db.all_documents()
+                if (d["first_seen_at"] or "") >= since_iso and d["status"] in ("parsed", "stored")
+                and (not end_stamp or (d["first_seen_at"] or "") <= end_stamp)]
     if not vint and not force:
         status = {"status": "no_update", "since": since_iso, "as_of": as_of_d.isoformat(), "at": utcnow(), "note": "no new observations or revisions since the last digest; previous deck remains current"}
         (paths.state_dir / "weekly_status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
@@ -154,7 +169,7 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
         d.add_footer(s, src_line, d.page)
         d.add_notes(s, "Metrics shown are the standard monitor metrics (see monthly appendix A01) restricted to series updated in this window where possible.")
 
-    publications_slide(d, C, fp, db, since_iso, src_line, lang, since_label)
+    publications_slide(d, C, fp, db, since_iso, src_line, lang, since_label, until_iso)
     evidence_slide("New macroeconomic evidence", "Macro", MACRO_REFS, [("ssc.hl.gdp_nonoil.growth", None, "Non-oil GDP, real YTD y/y"), ("ssc.cpi.all.yoy", None, "CPI y/y")])
     evidence_slide("New banking and funding evidence", "Banking", BANK_REFS, [("cba.loans.total_ci.yoy", None, "Loans y/y"), ("cba.deposits.total.yoy", None, "Deposits y/y")])
     # W04 material development from monitoring flags
@@ -198,7 +213,8 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
             previews(pdf, out / "previews")
         except Exception as exc:
             pdf_info = {"status": "failed", "reason": str(exc)}
-    manifest = {"report_type": "weekly", "edition": edition, "version": version, "since": since_iso, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "new_documents": [x["doc_id"] for x in new_docs],
+    manifest = {"report_type": "weekly", "edition": edition, "version": version, "since": since_iso,
+                "window": {"start": since_iso, "end": until_iso}, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "new_documents": [x["doc_id"] for x in new_docs],
                 "changed_datasets": changed_datasets, "files": {"pptx": str(pptx_path), "pdf": pdf_info}, "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page}
     manifest["manifest_path"] = str(out / "manifest.json")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
