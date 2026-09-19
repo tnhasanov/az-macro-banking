@@ -99,18 +99,18 @@ def _task_source_check(p: Pipeline, state: dict[str, Any], summary: dict[str, An
     # --- monthly, and the sector reviews that follow it
     monthly = checks.get("monthly")
     if monthly and monthly.ok:
-        if dry_run:
-            produced.append({"report_type": "monthly", "status": "would_generate", "state": monthly.state})
-        else:
-            from ..reports import generate_monthly
+        from ..reports import generate_monthly
 
-            narrative_file = (settings.get("narrative") or {}).get("file") or None
-            facts_only = (settings.get("narrative") or {}).get("provider", "none") != "api"
-            res = generate_monthly(None, facts_only, narrative_file, settings.get("language", "en"),
-                                   force=False, db=p.db)
-            res["readiness"] = monthly.state
-            summary["steps"]["monthly"] = res
-            produced.append({"report_type": "monthly", "status": res.get("status"), "path": res.get("path")})
+        narrative_file = (settings.get("narrative") or {}).get("file") or None
+        facts_only = (settings.get("narrative") or {}).get("provider", "none") != "api"
+        # a dry run goes as far as the fingerprint and stops, so it reports what a real run would do
+        # rather than what readiness alone permits
+        res = generate_monthly(None, facts_only, narrative_file, settings.get("language", "en"),
+                               force=False, db=p.db, dry_run=dry_run)
+        res["readiness"] = monthly.state
+        summary["steps"]["monthly"] = res
+        produced.append({"report_type": "monthly", "status": res.get("status"), "path": res.get("path")})
+        if not dry_run:
             if res.get("status") == "generated":
                 state["last_monthly_edition"] = {"at": utcnow(), "path": res.get("path"),
                                                  "partial": monthly.state == "partial"}
@@ -121,6 +121,8 @@ def _task_source_check(p: Pipeline, state: dict[str, Any], summary: dict[str, An
                 _alert("error", "A monthly edition was blocked",
                        json.dumps({"cause": res.get("cause"), "failed_checks": res.get("failed_checks", [])[:5]},
                                   indent=2), summary, dry_run)
+        elif res.get("status") == "would_generate":
+            _sector_reviews(p, sched, summary, produced, dry_run, today)
     elif monthly and monthly.state == "stale":
         _alert("warning", "The banking tables have gone quiet",
                json.dumps(monthly.as_dict(), indent=2, default=str), summary, dry_run)

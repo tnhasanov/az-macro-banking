@@ -120,7 +120,15 @@ def blocking_quality_failures(fp: dict[str, Any], settings: dict[str, Any]) -> l
             if not c.get("ok") and c.get("severity") == "critical"]
 
 
-def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: str | None, lang: str, force: bool = False, db: Database | None = None) -> dict[str, Any]:
+def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: str | None, lang: str,
+                     force: bool = False, db: Database | None = None, dry_run: bool = False) -> dict[str, Any]:
+    """Produce the monthly edition, or say what producing it would do.
+
+    `dry_run` goes as far as the decision and stops: it builds the fact pack, compares the
+    fingerprint and reports `would_generate`, `unchanged` or `blocked` without rendering anything.
+    A dry run that reported "would generate" where a real run says "unchanged" would be worse than
+    no dry run at all, because it would be believed.
+    """
     paths = config.paths()
     paths.ensure()
     setup_logging(paths.logs_dir)
@@ -164,13 +172,21 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
         return res
     # a critical data-quality failure blocks publication of a new edition
     blocking = blocking_quality_failures(fp, config.settings())
+    if dry_run and not blocking:
+        res = {"status": "would_generate", "edition": edition, "fact_pack_hash": fp.get("fact_pack_hash"),
+               "fingerprint": current_fp["fingerprint"], "trigger": change,
+               "note": "the inputs differ from the last edition; a real run would produce a new version"}
+        if own:
+            db.close()
+        return res
     if blocking:
         status = {"status": "blocked", "cause": "critical data-quality checks failed", "as_of": as_of_d.isoformat(),
                   "at": utcnow(), "failed_checks": [{k: c.get(k) for k in ("id", "type", "series_id", "period_end", "diff", "message")}
                                                     for c in blocking[:20]],
                   "note": "the last successful edition remains current; fix the source data or record an explicit, "
                           "justified exception in config/quality_exceptions.yaml"}
-        (paths.state_dir / "monthly_status.json").write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
+        if not dry_run:
+            (paths.state_dir / "monthly_status.json").write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
         log.error("monthly report blocked by %d critical quality failure(s)", len(blocking))
         if own:
             db.close()
