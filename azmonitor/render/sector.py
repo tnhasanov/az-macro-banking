@@ -182,10 +182,14 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
             pdf_info = {"status": "failed", "reason": str(exc)}
     manifest = {"report_type": "sector", "sector": sector, "edition": edition, "version": version, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "files": {"pptx": str(pptx_path), "pdf": pdf_info},
                 "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page}
+    manifest["manifest_path"] = str(out / "manifest.json")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     (out / "fact_pack.json").write_text(json.dumps(fp, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     db.add_edition({"edition_id": f"sector:{edition}:v{version}", "report_type": "sector", "edition_period": edition, "version": version, "generated_at": manifest["generated_at"], "as_of": as_of_d.isoformat(),
                     "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"sector": sector})})
+    from ..reports import _update_latest
+
+    _update_latest(paths, "sector", out, manifest)
     if own:
         db.close()
     return {"status": "generated", "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": d.page, "sector": sector}

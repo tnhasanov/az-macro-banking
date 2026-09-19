@@ -106,7 +106,7 @@
     "cba.policy.corridor_ceiling"
    ],
    "statement": {
-    "text": "The Central Bank left the refinancing rate at 6.50% on 31 July, with the corridor at 5.50% to 7.50%, while its stated reasoning changed between the June and July decisions. It says: \\u201cRisks to the inflation outlook remain tilted to the upside\\u201d.",
+    "text": "The Central Bank left the refinancing rate at 6.50% on 31 July, with the corridor at 5.50% to 7.50%, while its stated reasoning changed between the June and July decisions. It says: “Risks to the inflation outlook remain tilted to the upside”.",
     "claims": [
      "cba.policy.rate@2026-07-31#level",
      "cba.policy.corridor_floor@2026-07-31#level",
@@ -120,7 +120,7 @@
     ]
    },
    "banking_relevance": {
-    "text": "An unchanged corridor with a changed rationale is a different signal from an unchanged corridor with an unchanged one: it says the conditions under which the next move happens have moved, not the price of money today. The Bank adds that its decisions \\u201cwill remain data-dependent\\u201d.",
+    "text": "An unchanged corridor with a changed rationale is a different signal from an unchanged corridor with an unchanged one: it says the conditions under which the next move happens have moved, not the price of money today. The Bank adds that its decisions “will remain data-dependent”.",
     "quotes": [
      {
       "passage_id": "cba_policy_decisions:f9cb9f338c310d86#p9:fd97894d8aff",
@@ -146,7 +146,7 @@
     "ssc.cpi.all.yoy"
    ],
    "statement": {
-    "text": "Actual inflation was 5.7% in August, but the Central Bank's July round projects 6.1% at end-2026 and 5.8% at end-2027, with non-oil growth of 2.4% this year. It states: \\u201cThe Central Bank forecasts that annual inflation will remain within the target range in the medium run\\u201d.",
+    "text": "Actual inflation was 5.7% in August, but the Central Bank's July round projects 6.1% at end-2026 and 5.8% at end-2027, with non-oil growth of 2.4% this year. It states: “The Central Bank forecasts that annual inflation will remain within the target range in the medium run”.",
     "claims": [
      "ssc.cpi.all.yoy@2026-08-31#yoy",
      "cba.forecast.inflation|{\"scenario\": \"baseline\", \"vintage\": \"2026-07\"}@2026-12-31#forecast",
@@ -367,7 +367,7 @@
      ]
     },
     {
-     "text": "The Bank states: \\u201cRisks to the inflation outlook remain tilted to the upside\\u201d.",
+     "text": "The Bank states: “Risks to the inflation outlook remain tilted to the upside”.",
      "quotes": [
       {
        "passage_id": "cba_policy_decisions:f9cb9f338c310d86#p8:d4acad782f38",

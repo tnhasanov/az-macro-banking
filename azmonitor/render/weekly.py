@@ -193,10 +193,14 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
             pdf_info = {"status": "failed", "reason": str(exc)}
     manifest = {"report_type": "weekly", "edition": edition, "version": version, "since": since_iso, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "new_documents": [x["doc_id"] for x in new_docs],
                 "changed_datasets": changed_datasets, "files": {"pptx": str(pptx_path), "pdf": pdf_info}, "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page}
+    manifest["manifest_path"] = str(out / "manifest.json")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     (out / "fact_pack.json").write_text(json.dumps(fp, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     db.add_edition({"edition_id": f"weekly:{edition}:v{version}", "report_type": "weekly", "edition_period": edition, "version": version, "generated_at": manifest["generated_at"], "as_of": as_of_d.isoformat(),
                     "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"since": since_iso})})
+    from ..reports import _update_latest
+
+    _update_latest(paths, "weekly", out, manifest)
     (paths.state_dir / "weekly_status.json").write_text(json.dumps({"status": "generated", "path": str(out), "at": manifest["generated_at"], "since": since_iso}, indent=2), encoding="utf-8")
     if own:
         db.close()
