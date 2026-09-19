@@ -365,15 +365,24 @@ class PolicyStabilitySlides:
         s = d.new_slide()
         d.add_title(s, "A06 · Publication register and extraction provenance", "Appendix",
                     "Every narrative publication behind this edition, with its languages, dates and file hashes")
+        all_pubs = f.get("publications") or []
+        # the register is grouped by type in the fact pack; on one slide the useful sixteen are the
+        # most recent across all four series, so the reader sees what has just been published
+        recent = sorted(all_pubs, key=lambda x: (x.get("published_at") or "", x.get("edition") or ""), reverse=True)
         rows = []
-        for p in (f.get("publications") or [])[:16]:
+        for p in recent[:16]:
             docs = p.get("documents") or []
-            rows.append([p.get("type", "")[:26], p.get("edition") or "", p.get("reporting_period_end") or "not stated",
+            rows.append([p.get("type", ""), p.get("edition") or "", p.get("reporting_period_end") or "not stated",
                          p.get("published_at") or "unknown", ", ".join(p.get("languages") or []),
                          (docs[0].get("sha256") or "")[:12] if docs else ""])
         d.add_table(s, 0.45, 1.45, 12.35, 4.0, ["Publication", "Edition", "Reporting period end", "Published", "Languages", "sha256 (first file)"],
-                    rows, col_widths=[2.6, 2.0, 2.2, 1.9, 1.6, 2.05], font_size=8)
-        notes = [[{"text": "Archive gaps: ", "bold": True, "size": 9},
+                    rows, col_widths=[3.1, 1.8, 2.05, 1.8, 1.5, 2.1], font_size=8)
+        notes = []
+        if len(all_pubs) > len(rows):
+            notes.append([{"text": "Register: ", "bold": True, "size": 9},
+                          {"text": f"the {len(rows)} most recent of {len(all_pubs)} publications are listed here; "
+                                   f"the workbook sheet 'Publications' holds all of them", "size": 9}])
+        notes += [[{"text": "Archive gaps: ", "bold": True, "size": 9},
                   {"text": "; ".join(f"{g['pub_type']} — {g['gap']} (expected {g['expected']})" for g in (f.get("archive_gaps") or []))
                            or "none recorded", "size": 9}],
                  [{"text": "Information cutoff: ", "bold": True, "size": 9}, {"text": f.get("cutoff_note", ""), "size": 9}]]
