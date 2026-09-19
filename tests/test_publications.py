@@ -299,3 +299,26 @@ def test_an_indicator_the_monthly_tables_lack_is_not_still_called_unavailable(tm
     nsfr = next(u for u in av["unverified"] if u["item"].startswith("NSFR"))
     assert nsfr["status"] == "unverified" and nsfr["note"]
     db.close()
+
+
+def test_the_rationale_comparison_shows_what_differs_not_the_shared_formula():
+    """Two decision statements open with the same sentence. Showing the opening of each would put
+    identical text under a heading that says the reasoning changed."""
+    from azmonitor.facts import _rationale_difference
+
+    shared = "The Management Board of the Central Bank decided to keep the interest rate corridor unchanged."
+    prev = shared + " The decision reflects heightened geopolitical tensions and global financial conditions."
+    cur = shared + " The decision reflects the upward revision to the inflation forecast."
+
+    a, b = _rationale_difference(prev, cur)
+    assert "Management Board" not in a and "Management Board" not in b
+    assert "geopolitical" in a and "inflation forecast" in b
+
+    # identical statements are reported as identical rather than as a difference
+    same_a, same_b = _rationale_difference(prev, prev)
+    assert same_a == same_b == "same wording as the other statement"
+
+    # and a statement that only adds a sentence says so on the side that has nothing of its own
+    only_a, only_b = _rationale_difference(shared, cur)
+    assert only_a == "nothing the current statement does not also say"
+    assert "inflation forecast" in only_b

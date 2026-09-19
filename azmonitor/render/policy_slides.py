@@ -68,7 +68,7 @@ class PolicyStabilitySlides:
                 {"name": "Corridor floor", "values": [floor.get(p["date"]) for p in path], "color": self.SC.get("deposits", "#00897B")},
             ]
             d.add_line_chart(s, x, y + 0.25, w, h * 0.55, cats, series, number_format="0.00", skip=max(1, len(cats) // 8))
-            rows = [[r["dimension"], str(r["previous"])[:150], str(r["current"])[:150], str(r.get("evidence") or "")[:60],
+            rows = [[r["dimension"], str(r["previous"])[:230], str(r["current"])[:230], str(r.get("evidence") or "")[:60],
                      str(r.get("implication") or "")[:70]] for r in (f.get("comparison") or [])]
             self._caption(s, x, y + h * 0.55 + 0.35, w,
                           "Previous assessment → current assessment → evidence → what it bears on for a bank")
@@ -205,7 +205,7 @@ class PolicyStabilitySlides:
                                   f"{num((rec['primary'] or {}).get('value'), 1, '%')} at {(rec['primary'] or {}).get('period')}; "
                                   f"{(rec['secondary'] or {}).get('series_id')} = "
                                   f"{num((rec['secondary'] or {}).get('value'), 1, '%')} at {(rec['secondary'] or {}).get('period')}. "
-                                  f"{rec['note']}", "size": 8.5}]
+                                  f"{rec['note'][:1].upper()}{rec['note'][1:]}.", "size": 8.5}]
                         for rec in (f.get("reconciliation") or [])],
                        size=9, color=self.C["text"], space_after=3, autofit=True)
 

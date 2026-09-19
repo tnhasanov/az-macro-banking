@@ -22,13 +22,50 @@ from .storage.db import Database, utcnow
 from .util.periods import EN_MONTHS, parse_as_of, period_label, shift_months, today_baku
 
 
+def _rationale_sentences(text: str | None) -> list[str]:
+    """Substantive sentences of a decision statement, past the dateline boilerplate."""
+    if not text:
+        return []
+    body = re.sub(r"^.*?\b(Baku|Bakı)\s*:\s*", "", text.strip(), count=1, flags=re.IGNORECASE | re.DOTALL)
+    return [x.strip() for x in re.split(r"(?<=[.!?])\s+", body) if len(x.strip()) > 30]
+
+
 def _rationale_gist(text: str | None) -> str:
     """The substantive opening of a decision statement, past the dateline boilerplate."""
     if not text:
         return "not available"
-    body = re.sub(r"^.*?\b(Baku|Bakı)\s*:\s*", "", text.strip(), count=1, flags=re.IGNORECASE | re.DOTALL)
-    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", body) if len(x.strip()) > 30]
+    sentences = _rationale_sentences(text)
+    body = re.sub(r"^.*?\b(Baku|Bakı)\s*:\s*", "", (text or "").strip(), count=1, flags=re.IGNORECASE | re.DOTALL)
     return " ".join(sentences[:2])[:260] or body[:260]
+
+
+def _rationale_difference(previous: str | None, current: str | None) -> tuple[str, str]:
+    """What each statement says that the other does not.
+
+    Two decision statements open with the same formula, so quoting the first sentences of each
+    would show the reader two identical cells under a heading that claims the reasoning changed.
+    The sentences they share are dropped and what is left is what actually differs.
+    """
+    prev_s, cur_s = _rationale_sentences(previous), _rationale_sentences(current)
+    if not prev_s and not cur_s:
+        return "not available", "not available"
+    norm = lambda s: re.sub(r"[^a-zçəğıöşü0-9 ]", "", s.lower()).strip()
+    shared = {norm(s) for s in prev_s} & {norm(s) for s in cur_s}
+    only_prev = [s for s in prev_s if norm(s) not in shared]
+    only_cur = [s for s in cur_s if norm(s) not in shared]
+    if not only_prev and not only_cur:
+        same = "same wording as the other statement"
+        return same, same
+    def fmt(xs: list[str], other: str) -> str:
+        if not xs:
+            return f"nothing the {other} statement does not also say"
+        out = ""
+        for s in xs:                                  # whole sentences only, so nothing is cut mid-clause
+            if len(out) + len(s) + 1 > 175:
+                break
+            out = f"{out} {s}".strip()
+        return out or (xs[0][:172].rsplit(" ", 1)[0] + " …")
+    return fmt(only_prev, "current"), fmt(only_cur, "previous")
 
 
 def _f(v) -> float | None:
@@ -595,6 +632,7 @@ class FactPackBuilder:
         cur, prev = pol["decision"], pol["previous_decision"]
         if not cur:
             return []
+        prev_only, cur_only = _rationale_difference((prev or {}).get("rationale"), cur.get("rationale"))
         rows = [{
             "dimension": "Policy rate",
             "previous": f"{prev['policy_rate']}% on {prev['announcement_date']}" if prev and prev.get("policy_rate") is not None else "not established",
@@ -609,9 +647,9 @@ class FactPackBuilder:
             "evidence": "corridor floor and ceiling as decided",
             "implication": "range within which overnight money-market rates can move",
         }, {
-            "dimension": "Stated rationale",
-            "previous": _rationale_gist(prev.get("rationale") if prev else None),
-            "current": _rationale_gist(cur.get("rationale")),
+            "dimension": "Stated rationale (only what differs)",
+            "previous": prev_only,
+            "current": cur_only,
             "evidence": f"decision statement, {cur.get('rationale_language') or 'az'} edition",
             "implication": "direction of travel for deposit and lending rates over the next quarter",
         }]
