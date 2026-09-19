@@ -124,6 +124,7 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     pol, stab = pf.policy_block(), pf.stability_block()
     decision = pol.get("decision") or {}
     car = next((r for r in stab.get("dashboard") or [] if r["series_id"] == "cba.fsr.car"), None)
+    previous = pol.get("previous_decision") or {}
     s = d.new_slide()
     d.add_title(s, f"{label}: policy and stability conditions around this sector", "Policy and stability",
                 "Public conditions that bear on lending to this sector; none of it is sector-specific supervisory data")
@@ -131,8 +132,11 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
              f"{decision.get('policy_rate')}% (corridor {decision.get('corridor_floor')}%–{decision.get('corridor_ceiling')}%)",
              f"decided {decision.get('announcement_date')}",
              "sets the floor under manat funding costs for loans written to this sector"],
+            # the column holds dates: the stance row gives the two decisions it compares, and the
+            # statement behind the label sits in the speaker notes rather than truncated in a cell
             ["Policy stance versus the previous decision", pol["stance"].get("label") or "not established",
-             pol["stance"].get("statement", "")[:90],
+             (f"{decision.get('announcement_date')} vs {previous.get('announcement_date')}"
+              if previous and previous.get("announcement_date") else f"{decision.get('announcement_date')}, no earlier decision held"),
              "a change in stance reaches sector lending through pricing and credit supply"]]
     infl = next((x for x in pol["forecasts"].get("current") or [] if x["series_id"] == "cba.forecast.inflation"), None)
     if infl:
@@ -154,7 +158,8 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
                size=10, color=C["text"], autofit=True)
     d.add_footer(s, src, d.page)
     d.add_notes(s, f"Policy source: decision of {decision.get('announcement_date')}; stability source: "
-                   f"{(stab.get('report') or {}).get('edition')} published {(stab.get('report') or {}).get('published_at')}.")
+                   f"{(stab.get('report') or {}).get('edition')} published {(stab.get('report') or {}).get('published_at')}.\n\n"
+                   f"Stance in full: {pol['stance'].get('statement', '')}")
     # S08 questions + sources
     s = d.new_slide()
     d.add_title(s, f"{label}: banking questions and sources", "Questions", "Proportionate follow-ups: investigate, compare, monitor")
