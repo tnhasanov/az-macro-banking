@@ -372,3 +372,40 @@ def test_a_decision_dated_series_compares_with_the_previous_decision(tmp_path):
     assert snap["prior"]["period"] == "2026-06-24"
     assert snap["change"] == 0.0        # unchanged is a finding; "no comparable value" is not
     db.close()
+
+
+def test_release_translation_and_download_dates_are_three_separate_things(tmp_path):
+    """A backfill downloads years of archive at once and an English edition appears weeks after the
+    Azerbaijani one. Neither is a release, and neither may overwrite the release date."""
+    db = Database(tmp_path / "t.sqlite")
+    db.upsert_publication({"publication_id": "financial_stability_report:2025-A", "source_id": "CBA_STABILITY",
+                           "pub_type": "financial_stability_report", "edition_key": "2025-A",
+                           "original_language": "az", "published_at": "2026-04-13",
+                           "published_at_basis": "HTTP Last-Modified header of the file"})
+    # the translated edition arrives sixteen days later
+    db.upsert_publication({"publication_id": "financial_stability_report:2025-A",
+                           "translation_available_at": "2026-04-29",
+                           "translation_available_basis": "HTTP Last-Modified header of the translated file"})
+    row = db.get_publication("financial_stability_report:2025-A")
+
+    assert row["published_at"] == "2026-04-13"           # the release, unmoved by the translation
+    assert row["translation_available_at"] == "2026-04-29"
+    assert row["first_seen_at"][:4] >= "2026"            # our download, later than both
+    assert row["published_at"] < row["translation_available_at"] <= row["first_seen_at"]
+    db.close()
+
+
+def test_a_backfilled_publication_is_not_briefed_as_a_release(tmp_path):
+    """Recency is judged on the release date, so loading a 2021 edition today briefs nothing."""
+    from azmonitor.scheduling.run_due import _publication_briefs
+
+    db = Database(tmp_path / "t.sqlite")
+    db.upsert_publication({"publication_id": "financial_stability_report:2021-A", "source_id": "CBA_STABILITY",
+                           "pub_type": "financial_stability_report", "edition_key": "2021-A",
+                           "original_language": "az", "published_at": "2022-09-16"})
+    state: dict = {}
+    out = _publication_briefs(db, {"schedule": {"brief_within_days": 45}}, state, dry_run=True)
+
+    assert out["generated"] == []
+    assert any("outside the 45-day briefing window" in s["reason"] for s in out["skipped_old"])
+    db.close()

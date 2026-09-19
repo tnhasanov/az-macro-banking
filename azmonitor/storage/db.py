@@ -246,6 +246,13 @@ class Database:
         "documents": [("language", "TEXT"), ("doc_type", "TEXT"), ("publication_id", "TEXT"), ("version", "INTEGER"),
                       ("extraction_status", "TEXT"), ("page_count", "INTEGER")],
         "report_editions": [("fingerprint", "TEXT"), ("trigger", "TEXT"), ("narrative_mode", "TEXT")],
+        # Three different dates that are easy to confuse and must not be. `published_at` is when the
+        # Central Bank released the publication; `translation_available_at` is when the English
+        # edition of that same publication appeared, which can be weeks later; `first_seen_at` is
+        # when this system first downloaded it, which for a backfill is years later still. Only the
+        # first of the three may be read as a release event.
+        "publications": [("translation_available_at", "TEXT"), ("translation_available_basis", "TEXT"),
+                         ("original_language", "TEXT")],
     }
 
     def _migrate(self) -> None:

@@ -23,7 +23,8 @@ log = get_logger("pipeline")
 _PUBLICATION_FIELDS = {"publication_id", "source_id", "pub_type", "edition_key", "edition_label", "title_original",
                        "title_en", "reporting_period_start", "reporting_period_end", "reporting_frequency",
                        "published_at", "published_at_basis", "announcement_date", "effective_date",
-                       "information_cutoff", "next_release_date", "next_release_basis", "status", "note"}
+                       "information_cutoff", "next_release_date", "next_release_basis", "status", "note",
+                       "translation_available_at", "translation_available_basis", "original_language"}
 _PASSAGE_FIELDS = {"passage_id", "doc_id", "publication_id", "language", "page_index", "printed_page", "section",
                    "kind", "ord", "text", "extraction_method", "validation_status"}
 _DECISION_FIELDS = {"decision_id", "publication_id", "announcement_date", "effective_date", "effective_date_basis",
@@ -248,8 +249,19 @@ class Pipeline:
         if not pub_id:
             return
         prior = self.db.get_publication(pub_id)
+        # Which of the three dates this file establishes depends on whether it is the original or a
+        # translation of it. A translation appearing later is not a release: recording its date as
+        # the publication date would turn every English upload into a new event.
+        original = ((config.dataset(dsid)[2].get("parse") or {}).get("original_language")) or "az"
+        language = (d.extra or {}).get("language")
         published_at, basis = self._publication_date(pub, d, rec)
-        pub.update({"published_at": published_at, "published_at_basis": basis})
+        pub["original_language"] = original
+        if language and language != original:
+            stamp, stamp_basis = self._translation_date(d, rec)
+            pub.update({"published_at": None, "published_at_basis": None,
+                        "translation_available_at": stamp, "translation_available_basis": stamp_basis})
+        else:
+            pub.update({"published_at": published_at, "published_at_basis": basis})
         self.db.upsert_publication({k: v for k, v in pub.items() if k in _PUBLICATION_FIELDS})
         versions = [v for v in self.db.document_versions(d.document_url) if v["doc_id"] != doc_id]
         version = len(versions) + 1
@@ -288,6 +300,22 @@ class Pipeline:
                 return stamp.isoformat(), ("HTTP Last-Modified header of the file (upload date, which can be later "
                                            "than the release)")
         return None, "unknown: the publication page states no release date"
+
+    @staticmethod
+    def _translation_date(d: DiscoveredDocument, rec: dict[str, Any]) -> tuple[str | None, str | None]:
+        """When a translated edition became available, from the translated file itself.
+
+        The announcement date is deliberately not used here: it belongs to the decision, and both
+        language editions carry it, so reading it as the translation date would claim the English
+        version existed on the day of the meeting.
+        """
+        if d.published_at:
+            return d.published_at.isoformat(), d.published_at_basis or "date shown on the publication page"
+        if rec.get("http_last_modified"):
+            stamp = _http_date(rec["http_last_modified"])
+            if stamp:
+                return stamp.isoformat(), "HTTP Last-Modified header of the translated file (upload date)"
+        return None, "unknown: the page states no date for the translated edition"
 
     def _latest_period(self, dataset_id: str) -> dt.date | None:
         """Latest period the dataset reports *on*.

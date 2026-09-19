@@ -392,6 +392,10 @@ class PublicationFacts:
             "reporting_period_start": p.get("reporting_period_start"), "reporting_period_end": p.get("reporting_period_end"),
             "reporting_frequency": p.get("reporting_frequency"),
             "published_at": p.get("published_at"), "published_at_basis": p.get("published_at_basis"),
+            # kept apart on purpose: the release, the translation and our download are three dates
+            "translation_available_at": p.get("translation_available_at"),
+            "translation_available_basis": p.get("translation_available_basis"),
+            "original_language": p.get("original_language"), "first_seen_at": p.get("first_seen_at"),
             "note": p.get("note"),
             "languages": sorted({d.get("language") for d in docs if d.get("language")}),
             "documents": [{"doc_id": d["doc_id"], "language": d.get("language"), "url": d.get("document_url"),

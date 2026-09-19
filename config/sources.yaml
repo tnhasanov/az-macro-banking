@@ -727,6 +727,9 @@ sources:
         parse:
           pub_type: monetary_policy_review
           tables: true
+          # the release event belongs to the Azerbaijani edition; the English edition is a
+          # translation whose appearance is recorded separately and never as a new release
+          original_language: az
           # the Azerbaijani edition is the original; the English edition is stored and citable but
           # is not a second source of numbers for the same facts
           extract_language: az
@@ -745,6 +748,7 @@ sources:
         parse:
           pub_type: policy_directions
           tables: false
+          original_language: az
 
   CBA_POLICY_DECISIONS:
     institution: CBA
@@ -768,6 +772,7 @@ sources:
           pub_type: policy_decision
           tables: false
           extract_language: az
+          original_language: az
 
   CBA_STABILITY:
     institution: CBA
@@ -790,6 +795,9 @@ sources:
         parse:
           pub_type: financial_stability_report
           tables: true
+          # numbers are read from the official English edition, but the Azerbaijani edition is
+          # still the original release: the two questions are separate
+          original_language: az
           # indicator and stress-test wording is matched against the official English edition
           extract_language: en
 

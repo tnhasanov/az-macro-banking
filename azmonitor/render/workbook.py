@@ -173,16 +173,18 @@ def build_workbook(fp: dict[str, Any], nar: dict[str, Any], db: Database, out_pa
         for doc in (p_.get("documents") or [{}]):
             rows.append([p_.get("type"), p_.get("edition"), p_.get("reporting_period_start"), p_.get("reporting_period_end"),
                          p_.get("reporting_frequency"), p_.get("published_at"), p_.get("published_at_basis"),
+                         p_.get("original_language"), p_.get("translation_available_at"), p_.get("first_seen_at"),
                          doc.get("language"), doc.get("version"), doc.get("pages"), doc.get("sha256"),
                          doc.get("retrieved_at"), doc.get("url"), p_.get("publication_id")])
     if not rows:                                            # older fact packs carry only the slim list
         rows = [[p_["pub_type"], p_.get("edition_label"), None, p_.get("reporting_period_end"), None,
-                 p_.get("published_at"), None, None, None, None, None, None, None, p_.get("publication_id")]
-                for p_ in (pubs.get("all") or [])]
+                 p_.get("published_at"), None, None, None, None, None, None, None, None, None, None,
+                 p_.get("publication_id")] for p_ in (pubs.get("all") or [])]
     _sheet(wb, "Publications", ["publication", "edition", "reporting_period_start", "reporting_period_end",
-                                "frequency", "published_at", "published_at_basis", "language", "file_version",
+                                "frequency", "published_at", "published_at_basis", "original_language",
+                                "translation_available_at", "first_seen_at", "file_language", "file_version",
                                 "pages", "sha256", "retrieved_at", "url", "publication_id"],
-           rows, [26, 22, 20, 20, 10, 13, 52, 9, 11, 7, 20, 22, 62, 34])
+           rows, [26, 22, 20, 20, 10, 13, 52, 10, 22, 22, 9, 11, 7, 20, 22, 62, 34])
 
     rows = []
     for r in (stab.get("source_reconciliation") or []):
