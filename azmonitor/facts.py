@@ -22,6 +22,11 @@ from .storage.db import Database, utcnow
 from .util.periods import EN_MONTHS, parse_as_of, period_label, shift_months, today_baku
 
 
+# Series dated by the event that set them rather than by a calendar period. A lag of twelve months
+# lands on no observation, so these compare against the preceding entry in the series.
+EVENT_DATED_TYPES = {"policy_rate_effective"}
+
+
 def _rationale_sentences(text: str | None) -> list[str]:
     """Substantive sentences of a decision statement, past the dateline boilerplate."""
     if not text:
@@ -170,6 +175,11 @@ class FactPackBuilder:
         d = s.index[-1]
         out["latest"] = {"period": d.isoformat(), "value": _f(s.iloc[-1]), "period_label": period_label(d, meta.get("period_type") or "", self.lang)}
         out["available"] = True
+        # a decision-dated series has no month twelve months back to compare with: meetings are
+        # irregular, so the comparison a reader wants is the decision before this one
+        if (meta.get("period_type") or "") in EVENT_DATED_TYPES and compare in ("lag12", "lag1", "prior_edition"):
+            compare = "previous_observation"
+            out["compare"] = compare
         if compare == "lag12":
             pd_ = shift_months(d, -12)
         elif compare == "lag1":
@@ -182,7 +192,7 @@ class FactPackBuilder:
             out["prior"] = {"period": pd_.isoformat(), "value": _f(s[pd_]), "period_label": period_label(pd_, meta.get("period_type") or "", self.lang)}
             if out["latest"]["value"] is not None and out["prior"]["value"] is not None:
                 out["change"] = out["latest"]["value"] - out["prior"]["value"]
-        elif compare == "prior_edition" and len(s) >= 2:
+        elif compare in ("prior_edition", "previous_observation") and len(s) >= 2:
             pd_ = s.index[-2]
             out["prior"] = {"period": pd_.isoformat(), "value": _f(s.iloc[-2]), "period_label": period_label(pd_, meta.get("period_type") or "", self.lang)}
             out["change"] = out["latest"]["value"] - out["prior"]["value"] if out["latest"]["value"] is not None else None

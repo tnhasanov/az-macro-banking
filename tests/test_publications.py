@@ -349,3 +349,26 @@ def test_a_stability_brief_charts_one_exercise_not_three():
     # where the rows do not name this publication, the newest exercise is used rather than all of them
     brief.pub = {"publication_id": "financial_stability_report:2099-A"}
     assert {r["value"] for r in brief._this_exercise(stab)} == {19.4, 14.8}
+
+
+def test_a_decision_dated_series_compares_with_the_previous_decision(tmp_path):
+    """Meetings are irregular, so a twelve-month lag lands on nothing and the rate is reported as
+    having no comparable prior value - when the comparison a reader wants is the meeting before."""
+    from azmonitor.parsers.base import Observation
+    from azmonitor.facts import FactPackBuilder
+
+    db = Database(tmp_path / "t.sqlite")
+    _seed_publication(db, "monetary_policy_review:2026-08", "monetary_policy_review", "2026-08",
+                      "2026-07-31", "2026-08-26")
+    db.store_observations("cba_monetary_policy_review", "monetary_policy_review:2026-08:az", [
+        Observation(series_id="cba.policy.rate", period_end=dt.date(2026, 6, 24), value=6.5, unit="%", freq="D",
+                    period_type="policy_rate_effective", publication_id="monetary_policy_review:2026-08"),
+        Observation(series_id="cba.policy.rate", period_end=dt.date(2026, 7, 31), value=6.5, unit="%", freq="D",
+                    period_type="policy_rate_effective", publication_id="monetary_policy_review:2026-08"),
+    ])
+    snap = FactPackBuilder(db, dt.date(2026, 9, 19)).snap("cba.policy.rate")
+
+    assert snap["compare"] == "previous_observation"
+    assert snap["prior"]["period"] == "2026-06-24"
+    assert snap["change"] == 0.0        # unchanged is a finding; "no comparable value" is not
+    db.close()
