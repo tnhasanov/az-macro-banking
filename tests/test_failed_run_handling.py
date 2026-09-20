@@ -154,3 +154,88 @@ def test_the_worker_carries_its_fence_token_forward(steps):
     lease = steps["Take the run lease"]["run"]
     assert "AZMONITOR_LEASE_HOLDER" in lease and "AZMONITOR_LEASE_FENCE" in lease
     assert "GITHUB_ENV" in lease, "the fence must reach later steps, not just this one"
+
+
+# ------------------------------------------------- running by hand without starting the schedule
+
+MANUAL = pathlib.Path(".github/workflows/manual-run.yml")
+
+
+@pytest.fixture(scope="module")
+def manual() -> dict:
+    return yaml.safe_load(MANUAL.read_text(encoding="utf-8"))
+
+
+def _triggers(doc: dict) -> dict:
+    # PyYAML reads the bare key `on:` as the boolean True, which is a YAML 1.1 quirk, not a typo.
+    return doc[True] if True in doc else doc["on"]
+
+
+def test_the_manual_workflow_can_never_start_the_schedule(manual):
+    """The whole reason this file exists.
+
+    A workflow only becomes dispatchable once it is on the default branch — confirmed against this
+    repository, where the Actions API lists `checks.yml` alone while `scheduled.yml` sits on a side
+    branch and is invisible. But putting `scheduled.yml` on the default branch to get the button
+    would also arm its cron, because `schedule:` fires from the default branch and nowhere else.
+    This workflow is the way out only for as long as it has no schedule of its own.
+    """
+    triggers = _triggers(manual)
+    assert "schedule" not in triggers, (
+        "a schedule trigger here would arm unattended operation the moment this file reaches the "
+        "default branch, which is exactly what it exists to avoid")
+    assert list(triggers) == ["workflow_dispatch"]
+
+
+def test_the_manual_workflow_runs_the_branch_you_name(manual):
+    """It lives on the default branch, where there is no engine; the code comes from elsewhere."""
+    steps = {s.get("name", s.get("uses", "")): s for s in manual["jobs"]["run"]["steps"]}
+    checkout = steps["actions/checkout@v4"]
+    assert checkout["with"]["ref"] == "${{ inputs.ref }}"
+    assert _triggers(manual)["workflow_dispatch"]["inputs"]["ref"]["default"] == \
+        "claude/vercel-deployment"
+
+
+def test_a_manual_run_is_a_dry_run_unless_asked_otherwise(manual):
+    assert _triggers(manual)["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
+
+
+def test_the_manual_workflow_refuses_to_run_if_delivery_is_on(manual):
+    steps = {s.get("name", s.get("uses", "")): s for s in manual["jobs"]["run"]["steps"]}
+    guard = steps["Refuse to run if anything would leave the building"]["run"]
+    assert "config/delivery.yaml" in guard
+    assert "channels" in guard, "a disabled ledger with an enabled channel is still a way out"
+    assert "sys.exit(1)" in guard, "this must stop the run, not warn"
+
+
+def test_the_manual_workflow_uses_the_neutral_profile(manual):
+    assert manual["jobs"]["run"]["env"]["AZMONITOR_PROFILE"] == "neutral"
+    steps = {s.get("name", s.get("uses", "")): s for s in manual["jobs"]["run"]["steps"]}
+    assert "external_upload" in steps["Confirm the distribution profile"]["run"]
+
+
+def test_both_workflows_share_one_concurrency_group(manual):
+    scheduled = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert manual["concurrency"]["group"] == scheduled["concurrency"]["group"], (
+        "a manual run must not be able to overlap a scheduled one")
+    assert manual["concurrency"]["cancel-in-progress"] is False
+
+
+def test_the_manual_workflow_applies_the_same_publish_gate(manual):
+    """A failed manual run must be as incapable of publishing as a failed scheduled one."""
+    steps = {s.get("name", s.get("uses", "")): s for s in manual["jobs"]["run"]["steps"]}
+    decision = steps["Run the task"]["run"]
+    assert "0|2) echo \"publish=yes\"" in decision
+    assert "*)   echo \"publish=no\"" in decision
+    assert "steps.run.outputs.publish == 'yes'" in steps["Publish what the dashboard reads"]["if"]
+
+
+def test_the_scheduled_workflow_is_still_the_only_one_with_a_schedule():
+    """If a second scheduled trigger appears, two of them will fire and race."""
+    scheduled = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert "schedule" in _triggers(scheduled)
+    for path in pathlib.Path(".github/workflows").glob("*.yml"):
+        if path == WORKFLOW:
+            continue
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "schedule" not in _triggers(doc), f"{path.name} also has a schedule trigger"

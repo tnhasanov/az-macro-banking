@@ -41,9 +41,21 @@ def _edition_on_disk(root: Path, report_type: str, edition: str, version: int,
     }), encoding="utf-8")
     (d / "narrative.json").write_text(json.dumps({"mode": "analyst", "slides": {}}), encoding="utf-8")
     (d / f"report_{edition}_v{version}.pdf").write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
-    (d / f"report_{edition}_v{version}.pptx").write_bytes(b"PK\x03\x04" + b"y" * 1024)
-    (d / f"report_{edition}_v{version}.xlsx").write_bytes(b"PK\x03\x04" + b"z" * 512)
+    # Real zips, not `PK\x03\x04` stubs. Artefacts are opened and read before upload, and a file
+    # that cannot be opened is a finding rather than a pass — so a stub would be refused on its way
+    # past the thing these tests are actually about.
+    _office(d / f"report_{edition}_v{version}.pptx", "ppt/slides/slide1.xml",
+            '<?xml version="1.0"?><p:sld xmlns:p="x" xmlns:a="y"><a:t>Loans</a:t></p:sld>')
+    _office(d / f"report_{edition}_v{version}.xlsx", "xl/sharedStrings.xml",
+            '<?xml version="1.0"?><sst><si><t>Loans</t></si></sst>')
     return d
+
+
+def _office(path: Path, member: str, body: str) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(member, body)
 
 
 def _publish(store, version_dir: Path, report_type: str, edition: str, version: int) -> dict:

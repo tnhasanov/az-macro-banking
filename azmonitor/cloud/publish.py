@@ -75,6 +75,26 @@ UPLOAD_OVERRIDE = "AZMONITOR_ALLOW_RESTRICTED_UPLOAD"
 UPLOAD_OVERRIDE_VALUE = "i-own-this-content"
 
 
+class RestrictedArtefact(RuntimeError):
+    """A file about to be uploaded carries the organisation's identity.
+
+    Raised rather than logged, because the alternative is a partial upload: some editions in the
+    store and the rest refused, with no record of which. Stopping the whole publish keeps the
+    archive in a state someone can reason about.
+    """
+
+    def __init__(self, report_type: str, edition: str, version: int, findings: dict):
+        self.report_type, self.edition, self.version = report_type, edition, version
+        self.findings = findings
+        listed = "; ".join(f"{Path(f).name}: {', '.join(w)}" for f, w in list(findings.items())[:3])
+        super().__init__(
+            f"{report_type} {edition} v{version} would upload material that identifies the "
+            f"organisation ({listed}). These files were rendered under a branded profile; the "
+            f"neutral profile only affects what is rendered from now on. Re-render them with "
+            f"AZMONITOR_PROFILE=neutral, or set {UPLOAD_OVERRIDE}={UPLOAD_OVERRIDE_VALUE} if you "
+            f"own this content and intend to publish it.")
+
+
 def _refuse_restricted_upload() -> dict[str, Any] | None:
     """Stop before uploading anything the active profile is not allowed to distribute.
 
@@ -121,19 +141,34 @@ def cmd_save(args) -> int:
     result: dict[str, Any] = {"profile": config.profile()["name"],
                               "dataset": OS.save_dataset(paths.data_dir, store, fence=fence)}
 
-    uploaded = _publish_local_editions(paths.output_dir, store, fence=fence)
+    allow = os.environ.get(UPLOAD_OVERRIDE) == UPLOAD_OVERRIDE_VALUE
+    try:
+        uploaded = _publish_local_editions(paths.output_dir, store, fence=fence,
+                                           allow_restricted=allow)
+    except RestrictedArtefact as exc:
+        log.error("%s", exc)
+        return _out({**result, "error": str(exc), "restricted": exc.findings,
+                     "editions_published": []}, 3)
     result["editions_published"] = uploaded["published"]
     result["catalogue_entries"] = len(store.list(OS.CATALOG_PREFIX))
     return _out(result)
 
 
-def _publish_local_editions(out_dir: Path, store, *, fence) -> dict[str, Any]:
+def _publish_local_editions(out_dir: Path, store, *, fence,
+                            allow_restricted: bool = False) -> dict[str, Any]:
     """Upload every report version on disk that the store does not already hold.
 
     An edition is immutable, so this is an upload of what is new rather than a synchronisation of
     what has changed. The catalogue entry for each version goes up after its files, so an entry
     never describes an edition whose files are not there yet.
+
+    Every artefact is opened and read before it is uploaded. The distribution profile governs how
+    the engine renders; it says nothing about files rendered earlier under a different one, and an
+    archive of those is exactly what a first seed uploads. Checking the profile alone let 95 branded
+    decks, 36 branded workbooks and 78 branded PDFs through under the neutral profile.
     """
+    from . import artifacts
+
     published: list[dict[str, Any]] = []
     if not out_dir.exists():
         return {"published": published, "note": "no output directory on this worker"}
@@ -158,6 +193,14 @@ def _publish_local_editions(out_dir: Path, store, *, fence) -> dict[str, Any]:
             for version, version_dir in sorted(newest.items()):
                 if fence:
                     fence.check(f"before publishing {type_dir.name} {edition_dir.name} v{version}")
+
+                if not allow_restricted:
+                    uploadable = [f for f in sorted(version_dir.iterdir())
+                                  if f.is_file() and not f.name.startswith(".")]
+                    findings = artifacts.screen(uploadable)
+                    if findings:
+                        raise RestrictedArtefact(type_dir.name, edition_dir.name, version, findings)
+
                 res = OS.publish_edition(version_dir, type_dir.name, edition_dir.name, version, store)
                 OS.write_catalog_entry(
                     _catalog_entry(version_dir, type_dir.name, edition_dir.name, version), store)
@@ -431,7 +474,15 @@ def cmd_seed(args) -> int:
     # catalogue. Seeding only the dataset leaves a dashboard with every indicator and no reports,
     # which is a confusing first impression of a working system.
     if args.with_reports:
-        result["reports"] = _publish_local_editions(paths.output_dir, store, fence=None)
+        allow = os.environ.get(UPLOAD_OVERRIDE) == UPLOAD_OVERRIDE_VALUE
+        try:
+            result["reports"] = _publish_local_editions(paths.output_dir, store, fence=None,
+                                                        allow_restricted=allow)
+        except RestrictedArtefact as exc:
+            log.error("%s", exc)
+            return _out({**result, "seeded": True, "reports_uploaded": False,
+                         "error": str(exc), "restricted": exc.findings,
+                         "note": "the dataset is in the store; the report archive is not"}, 3)
 
     result["next"] = ["python -m azmonitor.cloud.publish restore   # on a fresh worker",
                       "python -m azmonitor.cloud.publish readmodel",
