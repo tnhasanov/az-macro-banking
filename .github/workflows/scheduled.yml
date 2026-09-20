@@ -1,0 +1,231 @@
+name: scheduled
+
+# The reporting engine, run on a schedule.
+#
+# It lives here rather than in a Vercel Function because of two hard limits, measured rather than
+# assumed (see docs/vercel-architecture.md): the PowerPoint-to-PDF step needs LibreOffice, which is
+# 243 MB on top of 419 MB of Python dependencies, against a 500 MB Python bundle limit; and a full
+# source refresh takes about twelve minutes, which only fits inside Vercel's beta 1800-second
+# duration. A GitHub Actions runner has six hours, apt, and — for a public repository — no cost.
+#
+# Times are UTC because cron is always UTC. Asia/Baku is UTC+4 all year, with no daylight saving, so
+# the conversion is a fixed four hours and the local times in config/schedule.yaml are exact:
+#
+#   09:15 Baku = 05:15 UTC     13:15 Baku = 09:15 UTC     17:15 Baku = 13:15 UTC
+#   Mon 08:30 Baku = Mon 04:30 UTC
+#   07:45 Baku = 03:45 UTC     18:45 Baku = 14:45 UTC
+#
+# `monitor schedule check` compares these against config/schedule.yaml and CI fails if they drift.
+
+on:
+  schedule:
+    - cron: "15 5 * * *"      # source check  - 09:15 Asia/Baku
+    - cron: "15 9 * * *"      # source check  - 13:15 Asia/Baku
+    - cron: "15 13 * * *"     # source check  - 17:15 Asia/Baku
+    - cron: "30 4 * * 1"      # weekly digest - Monday 08:30 Asia/Baku
+    - cron: "45 3 * * *"      # monitor       - 07:45 Asia/Baku
+    - cron: "45 14 * * *"     # monitor       - 18:45 Asia/Baku
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Which task to run"
+        required: true
+        type: choice
+        options: [source-check, weekly-digest, monitor]
+        default: source-check
+      dry_run:
+        description: "Decide everything, produce and send nothing"
+        type: boolean
+        default: false
+      trigger:
+        description: "Who asked (recorded in the run history)"
+        required: false
+        default: manual
+
+# One run at a time, across every trigger. The engine's lease would catch an overlap anyway and
+# refuse the second run, but refusing it here costs nothing and keeps the history readable.
+# Deliberately not cancel-in-progress: a run half way through publishing must finish, not be killed.
+concurrency:
+  group: azmonitor-engine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Baku
+      AZMONITOR_DATA_DIR: ${{ github.workspace }}/.state/data
+      AZMONITOR_OUTPUT_DIR: ${{ github.workspace }}/.state/outputs
+      # Persistence goes through the engine's own hooks, inside its lock.
+      AZMONITOR_RESTORE_CMD: python -m azmonitor.cloud.publish restore
+      AZMONITOR_SAVE_CMD: python -m azmonitor.cloud.publish save
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
+      AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
+      AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
+      AZMONITOR_GRAPH_TENANT_ID: ${{ secrets.AZMONITOR_GRAPH_TENANT_ID }}
+      AZMONITOR_GRAPH_CLIENT_ID: ${{ secrets.AZMONITOR_GRAPH_CLIENT_ID }}
+      AZMONITOR_GRAPH_CLIENT_SECRET: ${{ secrets.AZMONITOR_GRAPH_CLIENT_SECRET }}
+      AZMONITOR_GRAPH_SENDER: ${{ secrets.AZMONITOR_GRAPH_SENDER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          # libreoffice-impress: the PPTX -> PDF step. poppler: slide previews.
+          # fonts-dejavu-core: full Azerbaijani coverage, so ə ğ ı ö ş ü are not boxes.
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-impress poppler-utils fonts-open-sans fonts-dejavu-core
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cloud]"
+
+      - name: Which task
+        id: task
+        run: |
+          # A scheduled run knows which task it is from the cron line that fired. A dispatched run
+          # is told. Anything else is a bug worth failing on rather than guessing about.
+          case "${{ github.event.schedule }}" in
+            "15 5 * * *"|"15 9 * * *"|"15 13 * * *") TASK=source-check ;;
+            "30 4 * * 1")                            TASK=weekly-digest ;;
+            "45 3 * * *"|"45 14 * * *")              TASK=monitor ;;
+            "")                                      TASK="${{ inputs.task }}" ;;
+            *) echo "::error::unrecognised cron schedule '${{ github.event.schedule }}'"; exit 1 ;;
+          esac
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "trigger=${{ inputs.trigger || 'schedule' }}" >> "$GITHUB_OUTPUT"
+          echo "Running $TASK (local time now: $(date -Is))"
+
+      - name: Configuration and timers agree with the schedule
+        run: python -m azmonitor.cli schedule check
+
+      - name: Take the run lease
+        id: lease
+        run: |
+          # A second worker must not process the same dataset. The lease is held for the length of
+          # the job and released at the end, whatever happened.
+          python - <<'PY'
+          import os, sys
+          from azmonitor.cloud import lock as L, readmodel as RM
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              print("no database configured; relying on the workflow concurrency group alone")
+              sys.exit(0)
+          conn = RM.connect()
+          RM.ensure_schema(conn)
+          lease = L.DatabaseLease(conn, "azmonitor-run", minutes=55,
+                                  detail={"task": os.environ.get("TASK", "")})
+          try:
+              info = lease.try_acquire()
+              print(f"lease held by {info['holder']} until {info['expires_at']}")
+          except L.LeaseNotAcquired as exc:
+              print(f"::notice::{exc}")
+              sys.exit(75)          # EX_TEMPFAIL: another run is doing the work, this is not a failure
+          finally:
+              conn.close()
+          PY
+        env:
+          TASK: ${{ steps.task.outputs.task }}
+        continue-on-error: true
+
+      - name: Run the task
+        if: steps.lease.outcome == 'success'
+        id: run
+        run: |
+          set +e
+          python -m azmonitor.cli run-task --task "${{ steps.task.outputs.task }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Publish what the dashboard reads
+        if: steps.lease.outcome == 'success' && !inputs.dry_run
+        run: |
+          if [ -n "$AZMONITOR_DATABASE_URL" ]; then
+            python -m azmonitor.cloud.publish readmodel
+            python -m azmonitor.cloud.publish record-run \
+              --task "${{ steps.task.outputs.task }}" \
+              --trigger "${{ steps.task.outputs.trigger }}" \
+              --run-id "${{ github.run_id }}.${{ github.run_attempt }}"
+          else
+            echo "no database configured; the read model was not published"
+          fi
+
+      - name: Release the lease
+        if: always() && steps.lease.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import os
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              raise SystemExit(0)
+          from azmonitor.cloud import lock as L, readmodel as RM
+          conn = RM.connect()
+          try:
+              L.DatabaseLease(conn, "azmonitor-run", holder=L.holder_id()).release()
+          finally:
+              conn.close()
+          PY
+
+      - name: Run summary
+        if: always()
+        run: |
+          # The job summary is what an operator reads first, so it says what happened rather than
+          # making them open the log.
+          {
+            echo "## ${{ steps.task.outputs.task }}"
+            if [ "${{ steps.lease.outcome }}" != "success" ]; then
+              echo "Skipped: another run held the lease."
+            elif [ -f "$AZMONITOR_DATA_DIR/state/last_${{ steps.task.outputs.task }}.json" ]; then
+              python - <<'PY'
+          import json, os, pathlib
+          task = os.environ["TASK"].replace("-", "_")
+          p = pathlib.Path(os.environ["AZMONITOR_DATA_DIR"]) / "state" / f"last_{task}.json"
+          s = json.loads(p.read_text())
+          print(f"Status: **{s.get('status')}** at {s.get('local_time')} (Asia/Baku)\n")
+          steps = s.get("steps") or {}
+          if steps.get("refresh"):
+              changed = steps["refresh"].get("changed_datasets") or []
+              print(f"- Sources refreshed; {len(changed)} dataset(s) changed"
+                    + (f": {', '.join(changed[:6])}" if changed else ""))
+          if steps.get("validate"):
+              v = steps["validate"]
+              print(f"- Quality: {v.get('checks')} checks, {v.get('failed')} failed "
+                    f"({v.get('critical')} critical, {v.get('warning')} warning)")
+          for item in s.get("produced") or []:
+              print(f"- {item.get('report_type')}: **{item.get('status')}**")
+          if steps.get("readiness"):
+              print("\n<details><summary>Readiness</summary>\n")
+              for name, r in steps["readiness"].items():
+                  print(f"- `{name}`: {r.get('state')} — {r.get('note', 'all rules met')}")
+              print("\n</details>")
+          if s.get("error"):
+              print(f"\n**Error:** {s['error']}")
+          PY
+            else
+              echo "No run summary was written."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TASK: ${{ steps.task.outputs.task }}
+
+      - name: Fail the job if the run failed
+        if: steps.lease.outcome == 'success'
+        run: |
+          # 0 ok, 2 partial, 4 lock held: all acceptable. 3, 5 and 6 are real failures and the job
+          # must go red so the monitoring task and GitHub's own notifications both see it.
+          case "${{ steps.run.outputs.exit_code }}" in
+            0|2|4) exit 0 ;;
+            *) echo "::error::run-task exited ${{ steps.run.outputs.exit_code }}"; exit 1 ;;
+          esac

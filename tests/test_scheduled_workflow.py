@@ -256,3 +256,32 @@ def test_a_late_weekly_digest_still_covers_only_its_own_week(workspace):
 
     assert in_window == ["in"]
     db.close()
+
+
+# ------------------------------------------------- the schedule, written three times
+
+def test_the_baku_to_utc_conversion_holds_all_year(workspace):
+    """GitHub cron is UTC only, so the workflow holds converted times. Asia/Baku has had no
+    daylight saving since 2016, but that is a fact about the world rather than an assumption worth
+    making, so it is checked against the timezone database in both winter and summer."""
+    from zoneinfo import ZoneInfo
+
+    from azmonitor.scheduling.tasks import BAKU_UTC_OFFSET_HOURS
+
+    baku = ZoneInfo("Asia/Baku")
+    for month in (1, 4, 7, 10):
+        for hour in (3, 9, 15, 21):
+            utc = dt.datetime(2026, month, 15, hour, 15, tzinfo=dt.timezone.utc)
+            offset = utc.astimezone(baku).utcoffset().total_seconds() / 3600
+            assert offset == BAKU_UTC_OFFSET_HOURS, (
+                f"Asia/Baku is UTC+{offset} on {utc:%d %b}, not the UTC+{BAKU_UTC_OFFSET_HOURS} the "
+                f"workflow crons assume")
+
+
+def test_the_three_copies_of_the_schedule_agree(workspace):
+    """config/schedule.yaml, the systemd timers and the GitHub crons. A report that silently stops
+    arriving is how this drift is otherwise discovered."""
+    from azmonitor.scheduling.tasks import schedule_drift, workflow_drift
+
+    assert workflow_drift() == []
+    assert schedule_drift() == []

@@ -172,18 +172,62 @@ def consecutive_failures(task: str | None = None) -> int:
     return n
 
 
-def schedule_drift() -> list[str]:
-    """Where config/schedule.yaml and the systemd timers disagree.
+# Asia/Baku is UTC+4 all year with no daylight saving, so the conversion to a UTC cron line is a
+# fixed four hours. Asserted in the tests against the real timezone database rather than assumed.
+BAKU_UTC_OFFSET_HOURS = 4
 
-    The timers cannot read the YAML, so the times are written twice. Two copies of one fact drift
-    apart eventually, and the drift is invisible until a report does not arrive; this makes it
-    visible on demand instead.
+
+def _utc_cron_times(text: str) -> set[str]:
+    """The `HH:MM` a cron expression fires at, read out of a workflow file."""
+    import re
+
+    out = set()
+    for m in re.finditer(r'cron:\s*"(\d+)\s+(\d+)\s', text):
+        out.add(f"{int(m.group(2)):02d}:{int(m.group(1)):02d}")
+    return out
+
+
+def _to_utc(local: dt.time) -> str:
+    hour = (local.hour - BAKU_UTC_OFFSET_HOURS) % 24
+    return f"{hour:02d}:{local.minute:02d}"
+
+
+def workflow_drift() -> list[str]:
+    """Where config/schedule.yaml and the GitHub Actions crons disagree.
+
+    GitHub cron is UTC only, so the workflow holds the times converted. A conversion is exactly the
+    kind of thing that is right when written and wrong after the next edit, so it is checked rather
+    than trusted.
+    """
+    root = Path(__file__).resolve().parents[2]
+    workflow = root / ".github" / "workflows" / "scheduled.yml"
+    if not workflow.exists():
+        return []                       # no worker deployment in this checkout; nothing to compare
+    text = workflow.read_text(encoding="utf-8")
+    have = _utc_cron_times(text)
+    want = {_to_utc(t) for t in _scheduled_times("source-check")} | \
+           {_to_utc(t) for t in _scheduled_times("weekly-digest")}
+    problems = []
+    for t in sorted(want - have):
+        problems.append(f".github/workflows/scheduled.yml has no cron at {t} UTC, which is "
+                        f"{(int(t[:2]) + BAKU_UTC_OFFSET_HOURS) % 24:02d}:{t[3:]} Asia/Baku in "
+                        f"config/schedule.yaml")
+    # the monitor task has no entry in config/schedule.yaml's own times, so it is not compared here
+    return problems
+
+
+def schedule_drift() -> list[str]:
+    """Where config/schedule.yaml, the systemd timers and the GitHub crons disagree.
+
+    The schedule is written in three places because neither a systemd timer nor a GitHub workflow
+    can read YAML. Three copies of one fact drift apart eventually, and the drift is invisible until
+    a report stops arriving, so it is compared on demand and in CI.
     """
     root = Path(__file__).resolve().parents[2]
     units = root / "deploy" / "systemd"
-    problems: list[str] = []
+    problems: list[str] = workflow_drift()
     if not units.exists():
-        return ["deploy/systemd is missing: the schedule cannot be checked against the timers"]
+        return problems + ["deploy/systemd is missing: the schedule cannot be checked against the timers"]
     wanted = {
         "azmonitor-source-check.timer": [t.strftime("%H:%M") for t in _scheduled_times("source-check")],
         "azmonitor-weekly.timer": [t.strftime("%H:%M") for t in _scheduled_times("weekly-digest")],
