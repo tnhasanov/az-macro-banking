@@ -6,5 +6,8 @@
   "description": "Private Vercel Blob access for the Python engine, through the official SDK",
   "dependencies": {
     "@vercel/blob": "2.8.0"
+  },
+  "scripts": {
+    "test": "VERCEL_BLOB_RETRIES=0 node --test conformance.test.mjs"
   }
 }

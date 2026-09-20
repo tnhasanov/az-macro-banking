@@ -5,9 +5,14 @@
  * The engine is Python and Vercel publishes no Python SDK, so the alternative to this was
  * re-implementing the REST protocol by hand. That is a bad trade for one specific reason: the
  * dataset is about 260 MB, and a single PUT of 260 MB is not how the API expects to receive it.
- * `@vercel/blob` splits large bodies into a multipart upload, retries the parts that fail and
- * raises a typed error for the ones that cannot be retried. Re-deriving that from observed
+ * `@vercel/blob` can split a large body into a multipart upload, retry the parts that fail and
+ * raise a typed error for the ones that cannot be retried. Re-deriving that from observed
  * behaviour is exactly the guesswork worth avoiding, so this delegates to the SDK Vercel maintains.
+ *
+ * Note that multipart is opt-in, not automatic. `put()` streams a single request unless
+ * `multipart: true` is passed, so a 260 MB upload that failed at 95% would restart from nothing.
+ * MULTIPART_THRESHOLD below is what turns it on, and it is the whole reason the SDK is worth the
+ * detour — without it this would be a slower way to make the same single request.
  *
  * Every object is written with `access: 'private'`. A private blob has no publicly readable URL:
  * reads carry the token in an Authorization header, and the token stays in this process — it is
@@ -27,11 +32,22 @@ import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { put, get, head, list, del } from "@vercel/blob";
+import { put, get, head, list, del, BlobNotFoundError } from "@vercel/blob";
 
 const ACCESS = "private";
 const NOT_FOUND = 3;
 const REFUSED = 4;
+
+/**
+ * Above this, upload in parts.
+ *
+ * The SDK's part size is 8 MB, so 8 MB is the smallest body that can become more than one part.
+ * Below it multipart would add round trips for nothing; above it each part is retried on its own
+ * and a failure late in a long upload costs one part rather than the whole transfer. The dataset's
+ * static half (~254 MB) is the case this exists for; its mutable half (~6 MB) and every report file
+ * stay single-request.
+ */
+const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
 
 function token() {
   const t = process.env.BLOB_READ_WRITE_TOKEN;
@@ -64,12 +80,20 @@ function args(argv) {
   return out;
 }
 
-/** `head` is the existence check: it is one request and returns metadata rather than a body. */
+/**
+ * `head` is the existence check: one request, metadata rather than a body.
+ *
+ * Matched with `instanceof`, not by name. `BlobNotFoundError` does not set `.name` — an instance
+ * reports `"Error"`, and only `constructor.name` says otherwise — so a check on `error.name` is
+ * always false. That turned every "is this key already there?" into a thrown storage failure, which
+ * would have broken the first upload of every edition: `publish_edition` asks exactly this question
+ * before writing anything.
+ */
 async function exists(key) {
   try {
     return await head(key, { token: token() });
   } catch (error) {
-    if (error?.name === "BlobNotFoundError") return null;
+    if (error instanceof BlobNotFoundError) return null;
     throw error;
   }
 }
@@ -87,17 +111,19 @@ async function cmdPut(o) {
     }
   }
 
+  const multipart = size > MULTIPART_THRESHOLD;
   const result = await put(o.key, createReadStream(o.file), {
     access: ACCESS,
     token: token(),
     contentType: o.contentType || "application/octet-stream",
     addRandomSuffix: false,
     allowOverwrite: Boolean(o.overwrite),
+    multipart,
     // The dataset is replaced wholesale and reports are immutable, so nothing benefits from a
     // long CDN life; a private blob is fetched through the dashboard anyway.
     cacheControlMaxAge: 0,
   });
-  emit({ key: result.pathname, size, contentType: result.contentType ?? null });
+  emit({ key: result.pathname, size, multipart, contentType: result.contentType ?? null });
 }
 
 async function cmdGet(o) {

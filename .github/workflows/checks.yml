@@ -156,3 +156,21 @@ jobs:
           assert pdf.exists() and pdf.stat().st_size > 50_000
           print(f"rendered {info['n_slides']} slides and converted to PDF")
           PY
+
+  blob-client:
+    # Conformance, not integration: undici's MockAgent answers the requests, so only the transport
+    # is substituted and every request is still built by the real @vercel/blob. It exists because
+    # reading the SDK found two defects no test against our own abstraction could have — multipart
+    # is opt-in and we were not passing it, and BlobNotFoundError does not set `.name`, so the
+    # existence check never matched and the first upload of every edition would have failed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tools/blob/package-lock.json
+      - run: npm ci --prefix tools/blob
+      - run: npm test --prefix tools/blob
