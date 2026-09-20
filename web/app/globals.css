@@ -214,8 +214,14 @@ h3 { font-size: 15px; }
 .card-note { font-size: 11.5px; color: var(--ink-muted); }
 
 .grid { display: grid; gap: 16px; }
-.grid-4 { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
-.grid-2 { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+/*
+ * `min(Npx, 100%)` rather than a bare `Npx`: a bare minimum is a floor the track cannot go below,
+ * so on a phone the column stays 380px wide inside a 358px container and pushes the whole page
+ * sideways. The `min()` lets the track collapse to the container when the container is the smaller
+ * of the two, which is exactly what "minimum 380 unless there isn't room" should mean.
+ */
+.grid-4 { grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
+.grid-2 { grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
 
 /* --------------------------------------------------------------- stat tile */
 
@@ -266,7 +272,17 @@ table.data td { padding: 9px 10px; border-bottom: 1px solid var(--border); verti
 table.data tr:last-child td { border-bottom: none; }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.data .sub { display: block; font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
-.table-scroll { overflow-x: auto; margin: 0 -18px; padding: 0 18px; }
+/*
+ * A wide table scrolls inside its card rather than widening the page. The negative margin lets it
+ * bleed to the card's edge; `max-width: 100%` keeps that bleed from becoming page overflow when
+ * the card is already as narrow as the screen.
+ */
+.table-scroll {
+  overflow-x: auto;
+  margin: 0 -18px;
+  padding: 0 18px;
+  max-width: calc(100% + 36px);
+}
 
 /* ------------------------------------------------------------------ charts */
 
@@ -281,7 +297,10 @@ table.data .sub { display: block; font-size: 11.5px; color: var(--ink-muted); ma
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow);
-  padding: 8px 10px; font-size: 12.5px; min-width: 150px;
+  padding: 8px 10px; font-size: 12.5px;
+  /* Bounded at both ends: wide enough to read, never wider than the screen it floats over. */
+  min-width: min(150px, 60vw);
+  max-width: min(260px, 72vw);
 }
 .tooltip-head { font-weight: 650; margin-bottom: 5px; font-size: 12px; color: var(--ink); }
 .tooltip-row { display: flex; align-items: center; gap: 7px; justify-content: space-between; }

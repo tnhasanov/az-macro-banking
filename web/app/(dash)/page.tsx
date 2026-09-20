@@ -63,9 +63,10 @@ export default async function OverviewPage() {
                 The worker writes these on its first successful run.
               </Empty>
             )}
-            {cards.map(({ row, current, previous }) => (
+            {cards.map(({ row, current, previous, unavailable }) => (
               <ScoreTile key={row.key} label={row.label} current={current} previous={previous}
-                good={row.good} changeKind={row.change_kind} change={row.change} />
+                good={row.good} changeKind={row.change_kind} change={row.change}
+                unavailable={unavailable} />
             ))}
           </div>
         </section>
@@ -182,7 +183,7 @@ export default async function OverviewPage() {
 }
 
 function ScoreTile({
-  label, current, previous, good, changeKind, change,
+  label, current, previous, good, changeKind, change, unavailable,
 }: {
   label: string;
   current: Awaited<ReturnType<typeof scorecard>>[number]["current"];
@@ -190,6 +191,7 @@ function ScoreTile({
   good: "up" | "down" | "neutral";
   changeKind: string | null;
   change: string | null;
+  unavailable?: string;
 }) {
   if (!current) {
     return (
@@ -198,7 +200,8 @@ function ScoreTile({
           <span className="stat-label">{label}</span>
           <span className="stat-value muted">—</span>
           <div className="stat-prov">
-            Not in the current dataset. No figure is shown rather than an out-of-date one.
+            {unavailable
+              ?? "Not in the current dataset. No figure is shown rather than an out-of-date one."}
           </div>
         </div>
       </Card>
@@ -209,7 +212,10 @@ function ScoreTile({
     ? ((current.value / previous.value) - 1) * 100
     : null;
   const shown = pct ?? delta;
-  const tone = shown === null || good === "neutral" ? "muted"
+  // A change that rounds to zero at the precision shown reads as "−0.0", which looks like a
+  // decline that is not there. Say what it is instead.
+  const negligible = shown !== null && Math.abs(shown) < 0.05;
+  const tone = shown === null || negligible || good === "neutral" ? "muted"
     : (shown > 0) === (good === "up") ? "good" : "serious";
   const windowLabel = change === "lag12" ? "y/y" : change === "lag1" ? "m/m" : "";
 
@@ -220,8 +226,14 @@ function ScoreTile({
         <span className="stat-value">{withUnit(current.value, current.unit)}</span>
         {shown !== null && (
           <span className="stat-delta" style={{ color: `var(--${tone === "muted" ? "ink-muted" : tone})` }}>
-            {shown > 0 ? "▲" : shown < 0 ? "▼" : "▪"} {signed(shown, 1)}
-            {pct !== null ? "%" : changeKind === "pp" ? " pp" : ""} {windowLabel}
+            {negligible ? (
+              <>▪ little changed {windowLabel}</>
+            ) : (
+              <>
+                {shown > 0 ? "▲" : "▼"} {signed(shown, 1)}
+                {pct !== null ? "%" : changeKind === "pp" ? " pp" : ""} {windowLabel}
+              </>
+            )}
           </span>
         )}
         <div className="stat-prov">

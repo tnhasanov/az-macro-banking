@@ -378,36 +378,67 @@ export async function definitions(): Promise<Definitions | null> {
   return meta<Definitions>("definitions");
 }
 
-/** The newest reading of each scorecard series, with the change the deck reports beside it. */
-export async function scorecard(): Promise<
-  { row: ScorecardRow; current: (SeriesMeta & Point) | null; previous: Point | null }[]
-> {
+/**
+ * The newest reading of each scorecard series, with the change the deck reports beside it.
+ *
+ * Each row is fetched on its own terms, because the scorecard's dimensions are per-row: the pricing
+ * spread is published for AZN and for FX and the deck asks for the AZN leg specifically. An earlier
+ * version ignored `dims` and took whichever slice the database returned first, so the tile labelled
+ * "AZN" showed the FX spread — the right number under the wrong label, which is the failure this
+ * system exists to prevent and the hardest kind to notice.
+ *
+ * A series that has several slices and no `dims` to choose between them returns no figure at all,
+ * with the reason, rather than one of them picked arbitrarily.
+ */
+export interface ScorecardCell {
+  row: ScorecardRow;
+  current: (SeriesMeta & Point) | null;
+  previous: Point | null;
+  /** Set when no figure could be shown honestly; displayed instead of a number. */
+  unavailable?: string;
+}
+
+export async function scorecard(): Promise<ScorecardCell[]> {
   const defs = await definitions();
   if (!defs?.scorecard?.length) return [];
-  const ids = defs.scorecard.map((r) => r.series_id);
-  const rows = await sql()<(SeriesMeta & Point & { rn: number })[]>`
+  return Promise.all(defs.scorecard.map((row) => scorecardCell(row)));
+}
+
+async function scorecardCell(row: ScorecardRow): Promise<ScorecardCell> {
+  const client = sql();
+  const hasDims = row.dims && Object.keys(row.dims).length > 0;
+
+  if (!hasDims) {
+    const slices = await client<{ n: number }[]>`
+      SELECT count(DISTINCT dims)::int AS n FROM indicators
+      WHERE series_id = ${row.series_id} AND kind IN ('observation', 'policy')`;
+    if ((slices[0]?.n ?? 0) > 1) {
+      return {
+        row, current: null, previous: null,
+        unavailable:
+          "This series is published for more than one dimension and the scorecard does not say "
+          + "which. No figure is shown rather than an arbitrary slice.",
+      };
+    }
+  }
+
+  const rows = await client<(SeriesMeta & Point & { rn: number })[]>`
     SELECT * FROM (
       SELECT series_id, label, unit, kind, origin, period_type, formula, source_id,
              period_end, value, published_at, period_end AS latest_period,
              -- ::int matters: a bigint comes back from the driver as a string, and every
              -- comparison against a number below would then silently be false.
-             row_number() OVER (PARTITION BY series_id ORDER BY period_end DESC)::int AS rn
+             row_number() OVER (ORDER BY period_end DESC)::int AS rn
       FROM indicators
-      WHERE series_id = ANY(${ids}) AND kind IN ('observation', 'policy')
+      WHERE series_id = ${row.series_id} AND kind IN ('observation', 'policy')
+        ${hasDims ? client`AND dims @> ${client.json(row.dims)}::jsonb` : client``}
     ) t WHERE rn <= 13`;
-  const byId = new Map<string, (SeriesMeta & Point & { rn: number })[]>();
-  for (const r of rows) {
-    if (!byId.has(r.series_id)) byId.set(r.series_id, []);
-    byId.get(r.series_id)!.push(r);
-  }
-  return defs.scorecard.map((row) => {
-    const history = byId.get(row.series_id) ?? [];
-    const current = history.find((h) => h.rn === 1) ?? null;
-    // `lag12` compares with a year earlier, `lag1` with the previous period. Anything else — a
-    // comparison against the prior edition — needs the edition record, so no change is shown
-    // rather than a different comparison presented under the same label.
-    const wanted = row.change === "lag12" ? 13 : row.change === "lag1" ? 2 : null;
-    const previous = wanted ? history.find((h) => h.rn === wanted) ?? null : null;
-    return { row, current, previous };
-  });
+
+  const current = rows.find((r) => r.rn === 1) ?? null;
+  // `lag12` compares with a year earlier, `lag1` with the previous period. Anything else — a
+  // comparison against the prior edition — needs the edition record, so no change is shown rather
+  // than a different comparison presented under the same label.
+  const wanted = row.change === "lag12" ? 13 : row.change === "lag1" ? 2 : null;
+  const previous = wanted ? rows.find((r) => r.rn === wanted) ?? null : null;
+  return { row, current, previous };
 }

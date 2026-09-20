@@ -23,25 +23,10 @@
 import { NextResponse } from "next/server";
 import { authorizeScheduler } from "@/lib/auth";
 import { lastRunPerTask, locks } from "@/lib/db";
+import { decide, OVERDUE_MINUTES } from "@/lib/schedule";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/**
- * How long after its scheduled time a task is considered missed.
- *
- * Measured from the last successful run, in minutes, and set to just over the longest gap between
- * two scheduled runs of that task plus the time one takes. A shorter window would dispatch a
- * duplicate every time a run was merely slow.
- */
-const OVERDUE_MINUTES: Record<string, number> = {
-  // 09:15, 13:15, 17:15 Baku — longest gap is the overnight one, sixteen hours.
-  "source-check": 16 * 60 + 90,
-  // Monday 08:30 Baku.
-  "weekly-digest": 7 * 24 * 60 + 120,
-  // 07:45 and 18:45 Baku — longest gap thirteen hours.
-  monitor: 13 * 60 + 90,
-};
 
 export async function GET(
   request: Request,
@@ -54,35 +39,40 @@ export async function GET(
   }
 
   const { task } = await params;
-  const overdueAfter = OVERDUE_MINUTES[task];
-  if (!overdueAfter) {
+  if (!OVERDUE_MINUTES[task]) {
     return NextResponse.json({ error: `unknown task '${task}'` }, { status: 404 });
   }
 
   const now = new Date();
-  const result: Record<string, unknown> = { task, checked_at: now.toISOString() };
-
-  // A run in progress owns the dataset. Nothing is dispatched while the lease is held.
-  const held = await locks().catch(() => []);
-  const active = held.filter((l) => !l.expired);
-  if (active.length > 0) {
-    return NextResponse.json({
-      ...result, dispatched: false,
-      reason: "a run holds the lease", holder: active[0].holder, expires_at: active[0].expires_at,
-    });
-  }
-
-  const runs = await lastRunPerTask().catch(() => []);
+  const [held, runs] = await Promise.all([
+    locks().catch(() => []),
+    lastRunPerTask().catch(() => []),
+  ]);
   const last = runs.find((r) => r.task === task);
   const lastAt = last?.started_at ? new Date(last.started_at) : null;
-  const minutesSince = lastAt ? (now.getTime() - lastAt.getTime()) / 60000 : Infinity;
-  result.last_run_at = lastAt?.toISOString() ?? null;
-  result.last_run_status = last?.status ?? null;
-  result.minutes_since_last_run = Number.isFinite(minutesSince) ? Math.round(minutesSince) : null;
-  result.overdue_after_minutes = overdueAfter;
+  const decision = decide({ task, now, lastRunAt: lastAt, locks: held });
 
-  if (minutesSince < overdueAfter) {
-    return NextResponse.json({ ...result, dispatched: false, reason: "the scheduled run is on time" });
+  const result: Record<string, unknown> = {
+    task,
+    checked_at: now.toISOString(),
+    last_run_at: lastAt?.toISOString() ?? null,
+    last_run_status: last?.status ?? null,
+    minutes_since_last_run:
+      decision.minutesSince === null ? null : Math.round(decision.minutesSince),
+    overdue_after_minutes: OVERDUE_MINUTES[task],
+  };
+
+  if (decision.act !== "dispatch") {
+    // `unknown-task` cannot reach here — the table was checked above — but handling it in the same
+    // place as `wait` means a task added to the schedule with no threshold declines rather than
+    // falling through into a dispatch.
+    return NextResponse.json({
+      ...result, dispatched: false,
+      reason: decision.act === "wait" ? decision.reason : "no threshold is defined for this task",
+      ...(decision.act === "wait" && decision.holder
+        ? { holder: decision.holder, expires_at: decision.expiresAt }
+        : {}),
+    });
   }
 
   // Disabled by default. The brief is explicit that a preview must not run the engine or send
@@ -90,7 +80,7 @@ export async function GET(
   if (process.env.AZMONITOR_CRON_ENABLED !== "true") {
     return NextResponse.json({
       ...result, dispatched: false,
-      reason: "the run is overdue, but dispatch is disabled in this deployment "
+      reason: `${decision.reason}, but dispatch is disabled in this deployment `
         + "(set AZMONITOR_CRON_ENABLED=true to allow it)",
     });
   }
