@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -338,3 +339,61 @@ def test_the_credential_is_proved_before_the_lease_is_taken(name):
     assert body.index("Mint a short-lived Blob credential") \
         < body.index("Prove the Blob credential before anything writes") \
         < body.index("Take the run lease")
+
+
+# ------------------------------------- the workflow file that ran vs the branch it ran against
+
+def _dispatch_guard_script() -> str:
+    """The `run:` body of the revision check, as bash, with the one Actions expression stubbed."""
+    import yaml
+
+    steps = yaml.safe_load(_workflow("manual-run.yml"))["jobs"]["run"]["steps"]
+    step = next(s for s in steps if s.get("name", "").startswith("The workflow that ran"))
+    return step["run"].replace("${{ inputs.ref }}", "the-branch")
+
+
+def _run_guard(tmp_path, *, branch_revision: str | None, running_revision: str):
+    """Run the guard for real, against a checkout whose workflow declares `branch_revision`."""
+    import subprocess
+
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    line = f'      WORKFLOW_REVISION: "{branch_revision}"\n' if branch_revision else ""
+    (workflows / "manual-run.yml").write_text(f"env:\n      TZ: Asia/Baku\n{line}", encoding="utf-8")
+    return subprocess.run(["bash", "-c", _dispatch_guard_script()], cwd=tmp_path,
+                          capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], "WORKFLOW_REVISION": running_revision})
+
+
+def test_the_running_workflow_matching_the_branch_is_allowed(tmp_path):
+    result = _run_guard(tmp_path, branch_revision="1", running_revision="1")
+    assert result.returncode == 0, result.stderr
+    assert "matches" in result.stdout
+
+
+def test_an_older_workflow_file_stops_the_run_and_names_the_fix(tmp_path):
+    """The failure this exists for: `workflow_dispatch` runs the file from the branch chosen in the
+    dropdown while the engine comes from the `ref` input, so dispatching from a default branch
+    holding an older copy ran an older workflow against newer code — green, and having skipped the
+    steps that authenticate."""
+    result = _run_guard(tmp_path, branch_revision="2", running_revision="1")
+    assert result.returncode == 1
+    assert "::error::" in result.stdout
+    assert "revision 1" in result.stdout and "revision 2" in result.stdout
+    assert "Use workflow from" in result.stdout, "the message has to say how to fix it"
+
+
+def test_a_branch_with_no_revision_marker_is_refused(tmp_path):
+    result = _run_guard(tmp_path, branch_revision=None, running_revision="1")
+    assert result.returncode == 1
+    assert "no WORKFLOW_REVISION" in result.stdout
+
+
+def test_the_check_runs_before_anything_expensive(tmp_path):
+    """Two seconds of checkout, not forty minutes of run, before the mismatch is reported."""
+    import yaml
+
+    names = [s.get("name") or s.get("uses") for s in
+             yaml.safe_load(_workflow("manual-run.yml"))["jobs"]["run"]["steps"]]
+    assert names[0] == "actions/checkout@v4", "the guard needs the checkout to compare against"
+    assert names[1].startswith("The workflow that ran"), "and nothing should precede it after that"

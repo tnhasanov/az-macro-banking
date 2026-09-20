@@ -69,6 +69,8 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_CLI_VERSION: "59.23.2"
+      # Bumped whenever this file changes in a way a run depends on. See the revision check below.
+      WORKFLOW_REVISION: "1"
       AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
       AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
       AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
@@ -77,6 +79,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+
+      - name: The workflow that ran is the one this branch expects
+        # This has already gone wrong once, silently and for the length of a whole run.
+        #
+        # `workflow_dispatch` runs the workflow file from the ref chosen in the dropdown, while the
+        # engine comes from the `ref` input. Those are usually different: the file is registered on
+        # the default branch, the code lives on a feature branch. So dispatching with an older copy
+        # of this file on the default branch runs an older workflow against newer code, and the
+        # only symptom was a run that finished green having skipped the steps that authenticate.
+        #
+        # Comparing the revision the running file declares against the one the checked-out branch
+        # declares turns that into a failure in two seconds, naming the fix.
+        run: |
+          want=$(grep -m1 -E '^ *WORKFLOW_REVISION:' .github/workflows/manual-run.yml | tr -dc '0-9')
+          if [ -z "$want" ]; then
+            echo "::error::${{ inputs.ref }} has no WORKFLOW_REVISION in .github/workflows/manual-run.yml"
+            exit 1
+          fi
+          if [ "$want" != "$WORKFLOW_REVISION" ]; then
+            echo "::error::this run used revision $WORKFLOW_REVISION of manual-run.yml, but ${{ inputs.ref }} has revision $want. Re-dispatch with 'Use workflow from' set to ${{ inputs.ref }}, or update the copy on the default branch."
+            exit 1
+          fi
+          echo "manual-run.yml revision $WORKFLOW_REVISION matches ${{ inputs.ref }}"
 
       - uses: actions/setup-python@v5
         with:
