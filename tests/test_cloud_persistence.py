@@ -520,3 +520,134 @@ def test_a_pointer_written_before_the_split_still_restores(tmp_path):
     assert result["restored"] is True
     assert result["objects"] == 1
     assert (fresh / "monitor.sqlite").exists() and (fresh / "raw" / "cba_loans.xlsx").exists()
+
+
+# ------------------------------------------------------- what a failed run must not do
+
+def test_a_failed_save_leaves_the_last_good_dataset_current(tmp_path):
+    """The worker produced something, could not store it, and must change nothing.
+
+    The pointer is the only thing that decides which dataset is current, and it moves last. A run
+    that dies during the upload leaves an orphaned object behind it, which is the failure everyone
+    would choose over a pointer naming half a dataset.
+    """
+    class DiesOnRawUpload(OS.LocalObjectStore):
+        def put_file(self, key, path, *, content_type="application/octet-stream", overwrite=False):
+            if "raw-" in key:
+                raise OS.StorageError("the connection dropped during the upload")
+            return super().put_file(key, path, content_type=content_type, overwrite=overwrite)
+
+    bucket = tmp_path / "bucket"
+    data = _dataset_on_disk(tmp_path / "data")
+    good = OS.save_dataset(data, OS.LocalObjectStore(bucket), stamp="20260920T000000Z")
+
+    # A later cycle downloads a new document and then fails to store it.
+    (data / "raw" / "new.pdf").write_bytes(b"%PDF-1.7\n" + b"n" * 400)
+    (data / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"newer" * 800)
+    with pytest.raises(OS.StorageError):
+        OS.save_dataset(data, DiesOnRawUpload(bucket), stamp="20260920T010000Z")
+
+    store = OS.LocalObjectStore(bucket)
+    current = json.loads(store.get(OS.POINTER_KEY))
+    assert current["mutable"]["key"] == good["mutable"]["key"], "the pointer must not have moved"
+
+    # And the last good dataset still restores, byte for byte.
+    fresh = tmp_path / "fresh"
+    assert OS.restore_dataset(fresh, store)["restored"] is True
+    assert not (fresh / "raw" / "new.pdf").exists(), "the failed run's work is simply absent"
+
+
+def test_a_failed_restore_never_becomes_an_empty_dataset(tmp_path):
+    """The engine's exit code 5 exists so this can never be mistaken for a first run."""
+    class DiesOnDownload(OS.LocalObjectStore):
+        def get_file(self, key, dest):
+            if key.endswith(".tar.gz"):
+                raise OS.StorageError("the store timed out")
+            return super().get_file(key, dest)
+
+    bucket = tmp_path / "bucket"
+    OS.save_dataset(_dataset_on_disk(tmp_path / "data"), OS.LocalObjectStore(bucket))
+
+    with pytest.raises(OS.StorageError):
+        OS.restore_dataset(tmp_path / "fresh", DiesOnDownload(bucket))
+    # Nothing was unpacked, so nothing downstream can mistake a partial directory for a dataset.
+    assert not (tmp_path / "fresh" / "monitor.sqlite").exists()
+
+
+def test_an_interrupted_edition_upload_publishes_no_catalogue_entry(tmp_path):
+    """Files first, entry last. An edition is only visible once all of it is there."""
+    class DiesOnWorkbook(OS.LocalObjectStore):
+        def put(self, key, data, *, content_type="application/octet-stream", overwrite=False):
+            if key.endswith(".xlsx"):
+                raise OS.StorageError("interrupted")
+            return super().put(key, data, content_type=content_type, overwrite=overwrite)
+
+    from azmonitor.cloud.publish import _publish_local_editions
+
+    bucket = tmp_path / "bucket"
+    outputs = tmp_path / "outputs"
+    _edition_on_disk(outputs, "monthly", "2026-07", 9)
+
+    with pytest.raises(OS.StorageError):
+        _publish_local_editions(outputs, DiesOnWorkbook(bucket), fence=None)
+
+    store = OS.LocalObjectStore(bucket)
+    assert OS.read_catalog(store) == [], "a half-uploaded edition must not be listed"
+
+    # The retry completes it, and the catalogue then accounts for every file.
+    _publish_local_editions(outputs, store, fence=None)
+    catalogue = OS.read_catalog(store)
+    assert len(catalogue) == 1
+    assert catalogue[0]["files_missing"] == []
+
+
+def test_a_worker_that_lost_its_lease_cannot_move_the_pointer(tmp_path):
+    """The check immediately before the pointer moves, tested without a database.
+
+    A worker whose lease lapsed mid-upload has been replaced, and the replacement may already have
+    written a newer dataset. Letting the slow worker move the pointer afterwards would roll the
+    dataset back to its older copy without anything looking wrong.
+    """
+    class LostAfterUpload:
+        """Passes the first check, fails the one before the pointer moves."""
+
+        def __init__(self):
+            self.checks = []
+
+        def check(self, what):
+            self.checks.append(what)
+            if "pointer" in what:
+                from azmonitor.cloud.lock import LeaseLost
+
+                raise LeaseLost("another run has taken the lease")
+
+    bucket = tmp_path / "bucket"
+    data = _dataset_on_disk(tmp_path / "data")
+    good = OS.save_dataset(data, OS.LocalObjectStore(bucket), stamp="20260920T000000Z")
+
+    (data / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"stale" * 900)
+    fence = LostAfterUpload()
+    from azmonitor.cloud.lock import LeaseLost
+
+    with pytest.raises(LeaseLost):
+        OS.save_dataset(data, OS.LocalObjectStore(bucket), stamp="20260920T020000Z", fence=fence)
+
+    assert any("pointer" in c for c in fence.checks), "ownership must be re-checked before the move"
+    current = json.loads(OS.LocalObjectStore(bucket).get(OS.POINTER_KEY))
+    assert current["mutable"]["key"] == good["mutable"]["key"], "the stale worker moved the pointer"
+
+
+def test_the_second_run_on_unchanged_inputs_adds_no_duplicate_edition(tmp_path):
+    """Runner B restores, finds nothing new, and must not republish what Runner A produced."""
+    from azmonitor.cloud.publish import _publish_local_editions
+
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    outputs = tmp_path / "outputs"
+    _edition_on_disk(outputs, "monthly", "2026-07", 9)
+
+    first = _publish_local_editions(outputs, store, fence=None)
+    assert first["editions_uploaded"] == 1
+
+    second = _publish_local_editions(outputs, store, fence=None)
+    assert second["editions_uploaded"] == 0, "nothing new to upload"
+    assert len(OS.read_catalog(store)) == 1, "and nothing duplicated in the catalogue"

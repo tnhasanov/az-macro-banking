@@ -71,16 +71,40 @@ renders without the bank's logo, brand colours or name, and `publish save` **ref
 all** under a profile that does not permit external distribution. Removing that line does not
 publish branded reports; it stops every run.
 
-### Two GitHub rules that decide when this can work
+### The GitHub rule that decides the order of everything else
 
-**A `schedule:` trigger only fires from the default branch.** A workflow sitting on
-`claude/vercel-deployment` will never run on its own, however correct its cron lines are. Until the
-branch is merged, every run has to be started by hand with **Run workflow** — which is the right
-posture for the testing stages below anyway.
+**A workflow is registered from the default branch.** Until `scheduled.yml` is on `main` it has no
+workflow id, does not appear in the Actions list, and cannot be dispatched — not from the UI, not
+from the API. Confirmed against this repository: the Actions API lists `checks.yml` and nothing
+else, while `scheduled.yml` sits on `claude/vercel-deployment` and is invisible.
 
-**Scheduled workflows are disabled after 60 days without repository activity.** That is one of the
-two failure modes the Vercel watchdog exists to catch; the other is GitHub's cron being
-best-effort under load.
+That rules out the obvious sequence. You cannot "run the scheduled workflow by hand before merging",
+because there is nothing to run. And merging it to get the button would also arm its `schedule:`
+triggers, because those fire from the default branch and nowhere else — so the merge that gives you
+a test button is the same merge that starts unattended operation.
+
+Three ways out were considered:
+
+| Option | Why not |
+|---|---|
+| Merge `scheduled.yml` with the cron lines commented out | Works, but the file that is reviewed is not the file that runs, and uncommenting is a second merge with no review of its own. |
+| Run the engine locally against the cloud services | Tests the engine, not the runner: no Actions environment, no repository secrets, none of the packaging that a real run depends on. |
+| **A separate, manual-only workflow on the default branch** | **Chosen.** |
+
+`.github/workflows/manual-run.yml` has `workflow_dispatch` and nothing else, so its presence on the
+default branch cannot start anything. It checks out whichever branch you name — which it must,
+since `main` holds no engine — and runs that branch's code with repository secrets. It defaults to
+a dry run, shares the scheduled workflow's concurrency group so the two can never overlap, and
+refuses to start at all if delivery has been switched on.
+
+**This is the one thing that needs you before anything else can proceed**, because it is a commit to
+the default branch and I do not push there. It is a single new file and touches nothing else.
+
+Delete it once `scheduled.yml` is merged and running. It is scaffolding, not architecture.
+
+**Also worth knowing:** scheduled workflows are disabled after 60 days without repository activity.
+That is one of the two failure modes the Vercel watchdog exists to catch; the other is GitHub's cron
+being best-effort under load.
 
 ## 4. The dashboard, on Vercel
 
@@ -125,85 +149,112 @@ watchdog reports what it would have done and dispatches nothing.
 
 ## The staged sequence
 
-Each stage adds exactly one capability. Nothing skips ahead.
+Seven stages. Each adds exactly one capability, each has something you can look at to know it
+worked, and nothing skips ahead. **Stages A to E send nothing to anybody and create no paid
+resource.**
 
-### Stage 1 — code integration (no data, no runs)
+Throughout: ☐ = needs you, ☑ = already done and in the branch.
 
-Merge, or don't: the dashboard can be deployed as a preview from the branch. What matters is that
-merging the workflow to the default branch is what makes the schedule live, so treat that merge as
-the moment scheduling begins — not as a code-review formality.
+### Stage A — infrastructure
 
-Before merging, confirm the safety switches are where you expect:
+☐ Create a Neon project and copy the **pooled** connection string (it contains `-pooler`).
+☐ Create a Vercel Blob store. It must be a **private** store; do not make it public to make
+downloads work.
+☐ Add both, plus `AZMONITOR_OWNER_EMAIL`, as repository secrets in GitHub → Settings → Secrets.
+☐ Commit `.github/workflows/manual-run.yml` to `main`. One file, nothing else; see above for why.
+
+**Verified when:** the Actions tab lists a *manual run* workflow with a **Run workflow** button.
+
+☑ Everything that has to exist in the repository for this to work is on the branch already.
+
+### Stage B — seed the data
+
+From the machine that holds the validated dataset, with `BLOB_READ_WRITE_TOKEN` set:
 
 ```bash
-grep -n "enabled:" config/delivery.yaml          # expect: enabled: false
-grep -n "AZMONITOR_PROFILE" .github/workflows/scheduled.yml   # expect: neutral
-```
-
-A merge cannot start sending email. Delivery is off in configuration, and the four Graph secrets are
-unset. It *can* start the cron schedule, which is why stage 5 is where it belongs.
-
-### Stage 2 — seed the dataset
-
-The validated dataset is 374 MB of SQLite and downloaded documents and is not in git, so it has to
-come from the machine that holds it. From that machine:
-
-```bash
-export BLOB_READ_WRITE_TOKEN=…            # the private store
 export AZMONITOR_PROFILE=neutral
-
-python -m azmonitor.cloud.publish seed --check           # verifies, uploads nothing
-python -m azmonitor.cloud.publish seed --with-reports    # dataset + the existing report archive
+python -m azmonitor.cloud.publish seed --check      # verifies; uploads nothing
+python -m azmonitor.cloud.publish seed              # the dataset only
 ```
 
-`seed` refuses a store that already holds a dataset, refuses a directory with no `monitor.sqlite`,
-refuses to sweep up files that are not part of the dataset, and verifies the upload by reading back
-what the store now holds. `--with-reports` also uploads the existing editions and their catalogue,
-so the dashboard has history from the first run rather than an empty archive.
-
-Then confirm it round-trips onto a machine that has never seen it:
+**Verified when:** `seed` reports `"seeded": true` and both halves show
+`bytes_in_store == bytes_expected`. Then, on any machine:
 
 ```bash
-AZMONITOR_DATA_DIR=/tmp/fresh/data python -m azmonitor.cloud.publish restore
+AZMONITOR_DATA_DIR=/tmp/fresh python -m azmonitor.cloud.publish restore
 python -m azmonitor.cloud.publish readmodel
-python -m azmonitor.cloud.publish verify        # every catalogued file must be in the store
+python -m azmonitor.cloud.publish verify
 ```
 
-### Stage 3 — a dry run
+**Verified when:** `verify` reports `"ok": true`, no missing files and no orphans.
 
-**Actions → scheduled → Run workflow**, task `source-check`, **dry run ticked**. A dry run decides
-everything and produces and sends nothing, so it exercises discovery, readiness, the lease and the
-fence without touching the store.
+**About the report archive.** `seed --with-reports` will refuse the archive as it stands, and it is
+right to: every deck, workbook and PDF in `outputs/` was rendered under the branded profile and
+carries the bank's logo or palette. Three options, and this one is yours:
 
-Read the job summary. It names the outcome and says in plain words whether the dashboard was
-updated.
+1. **Seed no reports.** The dashboard starts with an empty archive and fills as the engine runs.
+   Nothing branded leaves your machine. Simplest, and the default.
+2. **Re-render neutrally first**, then seed. Produces new versions of the current editions with no
+   bank identity, at the cost of new version numbers.
+3. **Override** with `AZMONITOR_ALLOW_RESTRICTED_UPLOAD=i-own-this-content`, if you have the
+   standing to publish the bank's branded material to personal infrastructure. I have not assumed
+   you do.
 
-### Stage 4 — real processing, still no delivery
+### Stage C — one controlled worker run
 
-Run it again without dry run. This is the first run that writes to Blob and Postgres.
+☐ Actions → **manual run** → Run workflow, ref `claude/vercel-deployment`, task `source-check`,
+**dry run ticked**.
 
-Then open the dashboard and check its figures against the reports the engine already produced. If
-the dashboard says the read model is empty, this step did not complete — read the workflow log, not
-the dashboard.
+**Verified when:** the job is green and the summary shows discovery, readiness and the lease. A dry
+run decides everything and writes nothing.
 
-Leave the schedule off and watch a few manual runs. Nothing is sent to anyone in this state.
+☐ Run it again with dry run **unticked**.
 
-### Stage 5 — production scheduling
+**Verified when:** the job is green; `publish status` in the log shows a dataset and a read model;
+`publish verify` reports no missing files. Delivery is off in configuration, so nothing was sent.
 
-Merge to the default branch, which makes the `schedule:` triggers live. Optionally also enable the
-Vercel watchdog as a second opinion: set `AZMONITOR_CRON_ENABLED=true` in production only, and give
-the deployment a `GITHUB_DISPATCH_TOKEN` with *Actions: write* on this repository and nothing else.
+### Stage D — the dashboard
 
-### Stage 6 — controlled email delivery
+☐ Create a Vercel project with root directory `web/`, framework preset Next.js.
+☐ Set the environment variables in the table above. **Leave `AZMONITOR_CRON_ENABLED` unset and do
+not create a dispatch token yet.**
+☐ Deploy as a **preview**, not production.
 
-Two separate switches, deliberately: `enabled: true` in `config/delivery.yaml`, and the four Graph
-secrets. Send one edition to the single authorised recipient, confirm the ledger recorded `sent`,
-and leave it there until you are satisfied.
+**Verified when:** signing out and requesting any page redirects to `/login`; the overview shows
+figures that match the reports the engine produced; a PDF, a PPTX and a workbook each download; and
+the network tab shows no storage URL and no token.
 
-WhatsApp stays disabled throughout. Its implementation is preserved in `config/delivery.yaml` for
-later activation.
+### Stage E — recovery
 
----
+☐ Run the manual workflow a second time without dry run.
+
+**Verified when:** the second run reports `unchanged` and produces no new edition, every report from
+the first run is still listed and still downloadable, and `verify` still reports no missing files.
+This is the scenario that used to erase the archive.
+
+### Stage F — scheduling (prepared, not activated)
+
+Everything needed is in the branch. Activating it is two deliberate acts, in this order:
+
+☐ Merge PR #2, which puts `scheduled.yml` on the default branch and **starts the cron schedule**.
+☐ Optionally add the Vercel watchdog as a second opinion: `AZMONITOR_CRON_ENABLED=true` in
+production only, plus a fine-grained PAT with *Actions: write* on this repository and nothing else.
+☐ Delete `manual-run.yml`.
+
+**Not yet done, and not to be done without your say-so.**
+
+### Stage G — email (prepared, not sent)
+
+Two separate switches, deliberately:
+
+☐ Add the four `AZMONITOR_GRAPH_*` secrets.
+☐ Set `enabled: true` in `config/delivery.yaml`.
+
+Then send one edition to the single authorised recipient and confirm the ledger recorded `sent`
+before widening the distribution list. WhatsApp stays disabled throughout; its implementation is
+preserved for later.
+
+**Not yet done. No email can be sent while either switch is off, and both are off.**
 
 ## Operating it
 

@@ -102,6 +102,21 @@ a send path that already records three distinct outcomes.
 Monitoring is the engine's own `monitor` task plus GitHub's notification on a failed workflow and
 Vercel's function logs. No external service is needed at this scale.
 
+## What is measured, what is allowance, what is estimate
+
+The brief asks for these to be kept apart, and they are different kinds of number:
+
+| | |
+|---|---|
+| **Measured here** | dataset 260.0 MB compressed, split 5.9 / 254.2 MB; upload after an unchanged run 5.9 MB in 0.6 s; refresh 645.8 s; read model 27 MB; 226 report files over 95 editions; 6 runs a day |
+| **Covered by an existing subscription** | Vercel Pro at $20/month, already paid, unchanged by this |
+| **Inside a free allowance** | Neon (27 MB of 0.5 GB; scale-to-zero against 100 CU-hours), GitHub Actions (free and unmetered for public repositories) |
+| **Estimated** | Blob transfer at 55.5 GB/month, from 6 runs × 30 days × measured object sizes — the run count and sizes are measured, the monthly total is arithmetic over them |
+| **Not measured at all** | anything requiring the real services: actual Blob egress billing, Neon compute-hours under real load, Vercel function invocations. None has been observed. |
+
+Private storage does not change any rate: Blob is priced on storage, transfer and operations
+regardless of access level.
+
 ## Total
 
 | | Monthly |

@@ -1,18 +1,108 @@
 # Production readiness
 
-**Verdict: not production-ready, and the reason is unchanged — nothing has been run against the
-real services.** Vercel, Neon and Vercel Blob have never been contacted from the environment this
-was built in: there are no credentials for them, and `vercel.com` is unreachable through its egress
-proxy. Everything below is either verified against a real PostgreSQL and the real 374 MB dataset, or
-honestly marked as not verified.
+**Verdict: the code is materially better than it was, and still nothing has run against the real
+services.** This attempt tried to change that and could not. The reason is worth stating precisely,
+because it is not the one from last time.
 
-What has changed since the last report is the quality of what is waiting to be deployed. An
-independent review found four critical defects; all four were real, all four are fixed, and testing
-them turned up four more.
+## Why cloud integration testing did not happen
+
+Not missing credentials. **The environment's network policy denies the connection.**
+
+```
+$ curl https://vercel.com/api/blob                → 000
+$ curl https://api.vercel.com/v2/user             → 000
+$ curl https://blob.vercel-storage.com            → 000
+$ curl https://console.neon.tech                  → 000
+$ curl https://api.github.com                     → 200
+
+$ curl "$HTTPS_PROXY/__agentproxy/status"
+  "recentRelayFailures": [
+    { "kind": "connect_rejected",
+      "detail": "gateway answered 403 to CONNECT (policy denial or upstream failure)",
+      "host": "vercel.com:443" },
+    ... api.vercel.com:443, blob.vercel-storage.com:443, console.neon.tech:443
+  ]
+```
+
+The allowed set is GitHub, npm, PyPI and Anthropic. Handing over credentials would not help, and
+you should not: there is nothing for them to authenticate against from here.
+
+**What would unblock it:** the remote environment's network egress policy has to allow
+`vercel.com`, `api.vercel.com`, `*.blob.vercel-storage.com` and the Neon endpoints, with the
+credentials supplied through the environment's own secret configuration rather than pasted into a
+conversation. That is a setting on the Claude Code environment, not something the code can change.
+
+Connectors available in this session: Gmail and Google Calendar. There is no Vercel connector and
+no Neon connector, so there is no second route to those services either.
+
+## What was done instead
+
+Everything that does not require reaching Vercel or Neon — which turned out to include finding four
+more defects, two of which would have broken the first real run.
+
+| | |
+|---|---|
+| Blob client checked against the installed SDK | **2 defects found and fixed** |
+| What seeding actually uploads, audited byte by byte | **1 defect found and fixed** |
+| The deployment sequence, checked against GitHub's real behaviour | **1 defect found and fixed** |
+| Failure and recovery scenarios | 5 more added, all passing |
+| Python tests | **250 passed** |
+| Dashboard tests | **59 passed** |
+| Blob conformance tests | **7 passed** |
 
 ---
 
-## What the review found, and what was true
+## What this round found
+
+### A. The seeding procedure uploaded branded material, and the profile guard approved it
+
+The distribution profile governs how the engine *renders*. It says nothing about files rendered
+earlier under a different profile — and an archive of those is exactly what a first seed uploads.
+
+`publish seed --with-reports` under the neutral profile, against the archive this repository
+actually holds, uploaded **95 branded decks, 36 branded workbooks and 78 branded PDFs** to personal
+object storage. Every one carried the bank's logo or its palette. The guard passed each time,
+correctly, because the profile was neutral. The files were not.
+
+**Fixed** by inspecting the artefacts themselves. Every file is opened and read before upload, and
+the question asked is "does this file carry the organisation's identity?" — matched against markers
+declared in `config/distribution.yaml`: the name in extracted text, the palette as Office XML spells
+it, and any embedded image at all. A file that cannot be opened is a finding, not a pass. A refusal
+stops the whole publish rather than skipping one edition, because a half-uploaded archive with no
+record of which half is worse than none.
+
+Verified on the real archive: the same seed now uploads zero report files and refuses with the
+reason, while still seeding the dataset. A neutral edition passes cleanly.
+
+### B. `multipart` is opt-in, and the client was not passing it
+
+The SDK streams a single request unless told otherwise. A 260 MB dataset upload was therefore one
+request with no per-part retry, and a failure at 95% would have restarted from nothing — the
+opposite of the reason given for adopting the SDK. **Fixed** with a threshold at 8 MB, the SDK's own
+part size.
+
+### C. `BlobNotFoundError` does not set `.name`
+
+An instance reports `"Error"`; only `constructor.name` says otherwise. The existence check tested
+`error?.name === "BlobNotFoundError"`, which is always false, so a missing object raised a storage
+failure instead of answering "not there". `publish_edition` asks exactly that question before
+writing anything, **so the first upload of every edition would have failed.** Matched by `instanceof`
+now, and pinned by a test.
+
+### D. The documented deployment sequence was not executable
+
+It said to run the scheduled workflow by hand before merging. GitHub registers a workflow from the
+default branch: until `scheduled.yml` is on `main` it has no id and cannot be dispatched at all.
+Confirmed against this repository — the Actions API lists `checks.yml` and nothing else.
+
+Merging it to get the button would also arm its cron, because `schedule:` fires from the default
+branch and nowhere else. **Fixed** with `manual-run.yml`: `workflow_dispatch` only, no schedule
+trigger and never one, checks out whichever branch you name, defaults to a dry run, shares the
+scheduled workflow's concurrency group, and refuses to start if delivery has been switched on.
+
+---
+
+## What the previous review found
 
 ### 1. Private Blob access — confirmed, and worse than reported
 
@@ -155,19 +245,17 @@ The dataset splits 5.9 MB mutable / 254.2 MB static. A run that downloaded nothi
 
 ## Not verified — and what each one needs
 
-| # | Gap | Why it matters | To close it |
+| # | Gap | Blocked by | To close it |
 |---|---|---|---|
-| 1 | **Vercel Blob has never been contacted.** The SDK is exercised only against a local directory implementing the same interface. | The protocol is now the SDK's problem rather than ours, which is the point of using it — but "the SDK is correct" is a reasonable belief, not evidence. | `publish seed --check`, then `seed`, with a real token. |
-| 2 | **Neon has never been contacted.** PostgreSQL 16 locally is not Neon. | Neon's pooled endpoint runs pgbouncer in transaction mode. `prepare: false` is set for that reason and the lease uses a plain conditional insert, which is transaction-pooling-safe — but that is reasoning, not evidence. | Point `AZMONITOR_DATABASE_URL` at the pooled endpoint and run `publish readmodel`. |
-| 3 | **Nothing has been deployed to Vercel.** `next build` succeeds; that is a build, not a deployment. | Middleware behaves differently on the Edge than under `next start`; environment variables, regions and the cron schedule are deployment-time. | Deploy a preview with `AZMONITOR_CRON_ENABLED` unset. |
-| 4 | **The workflow has never run.** Its YAML is parsed and its gating asserted by 24 tests; no run has executed it. | Runner package availability, the pip and npm caches, the exit-75 lease path and the job summary are unexercised. | Run it once with dry run ticked, then once without. |
-| 5 | **The dispatch path is unexercised.** No `GITHUB_DISPATCH_TOKEN` has been issued. | A token with wrong scopes fails silently from the dashboard's point of view. | Issue a fine-grained PAT with *Actions: write*, then force a dispatch. |
-| 6 | **No email has been sent.** Deliberate. | The Graph send path was tested against a fake provider, not Microsoft. | Authorise a controlled test to one recipient. |
-| 7 | **Login rate limiting is per-instance and therefore weak.** Serverless instances do not share memory. | An attacker distributing attempts across instances gets more tries than the limit suggests. The real brake is 600,000 PBKDF2 iterations plus a long passphrase. | Accept it with a long passphrase, or move the counter into Postgres — which would give the dashboard its first write path, so it is a deliberate trade. |
-| 8 | **The raw archive is still downloaded in full on every run** (46.8 GB/month). | Skipping it would mean the worker cannot see documents it may need to re-parse. The upload side was the safe half to optimise. | Would need a behavioural change validated against live sources. |
-| 9 | **The dashboard has one reader and has not been load-tested.** | Not a risk at this scale; stated so it is not mistaken for a tested property. | — |
-
----
+| 1 | **Vercel Blob has never been contacted.** | Network policy denies `blob.vercel-storage.com` and `vercel.com`. | Allow those hosts, then `publish seed --check` with a real token. |
+| 2 | **Neon has never been contacted.** PostgreSQL 16 locally is not Neon. | Network policy denies `console.neon.tech`. | Allow it, point `AZMONITOR_DATABASE_URL` at the pooled endpoint, run `publish readmodel`. |
+| 3 | **Nothing has been deployed to Vercel.** | No Vercel connector; `api.vercel.com` denied. | Allow it and connect a Vercel integration, or deploy from your own machine. |
+| 4 | **The workflow has never run.** | `scheduled.yml` is not on the default branch, so GitHub cannot dispatch it. | Commit `manual-run.yml` to `main` — one file. Everything else is ready. |
+| 5 | **The dispatch path is unexercised.** | No `GITHUB_DISPATCH_TOKEN`. | Issue a fine-grained PAT with *Actions: write*, at stage F. |
+| 6 | **No email has been sent.** | Deliberate; both switches off. | Stage G, on your authorisation. |
+| 7 | **Login rate limiting is per-instance.** | Serverless instances share no memory. | Accept with a long passphrase, or move the counter into Postgres — which would give the dashboard its first write path, so it is a trade rather than a fix. |
+| 8 | **The multipart wire path is asserted indirectly.** | It does not route through the dispatcher MockAgent installs. | A real store. The decision and threshold are pinned; the transfer itself is not. |
+| 9 | **The raw archive is still downloaded in full each run** (46.8 GB/month). | Skipping it would change what the engine can see. | Would need validation against live sources. |
 
 ## What is deliberately switched off
 
@@ -181,35 +269,45 @@ The dataset splits 5.9 MB mutable / 254.2 MB static. A run that downloaded nothi
 
 ---
 
-## Confidentiality: what the repository holds
+## Confidentiality: what the repository holds, and what seeding sends
 
-Re-scanned across all 193 tracked files.
+### The repository
 
-**No credentials.** The only credential-shaped string is a test fixture in `web/tests/auth.test.ts`.
+Re-scanned across all tracked files. **No credentials** — the only credential-shaped string is a
+test fixture. **Three binary fixtures** (`tests/fixtures/*.xlsx`) are Central Bank published tables
+(Cədvəl 2.6, 3.2.1, 5.6), public source data. **One proprietary asset**:
+`theme/assets/atb_logo.png`, tracked in this **public** repository since the first commit, with the
+brand colours and organisation name in `config/theme.yaml`.
 
-**Three binary fixtures** (`tests/fixtures/*.xlsx`) are Central Bank published tables — Cədvəl 2.6,
-3.2.1 and 5.6 — which are public source data, not bank-internal material.
+### What seeding actually sends
 
-**One proprietary asset**, unchanged from the last report and still needing your decision:
-`theme/assets/atb_logo.png` has been tracked in this **public** repository since its first commit,
-alongside the bank's brand colours and organisation name in `config/theme.yaml`.
+Audited by reading the artefacts rather than trusting the profile:
 
-The neutral profile keeps all of it out of anything rendered or uploaded by the cloud deployment —
-verified on real output: the neutral deck, workbook and PDF contain no embedded image, no brand
-colour and no mention of the bank, while the branded ones contain all three, and all 207 fact-pack
-metrics are identical between the two profiles. What the profile cannot do is remove the logo from
-the repository's history.
+| What travels | Finding |
+|---|---|
+| 383 raw source documents | All from `www.cbar.az`, `uploads.cbar.az`, `www.stat.gov.az`. Public government sources, no bank documents. |
+| `monitor.sqlite` (14 tables) | Observations, publications, passages, policy decisions — all derived from those sources. |
+| `deliveries.sqlite` | **Empty.** No recipients, no send history. |
+| State files | No credential-shaped keys in any of them. |
+| Email addresses in the dataset | One: `mail@cbar.az`, printed in the footer of the Central Bank's own bulletins. |
+| `report_editions.path` | Absolute local paths. Discloses a directory layout, nothing of the bank's. |
+| The report archive | **Refused.** Every existing edition carries the bank's identity; see finding A. |
 
-Three options, none of which I have taken:
+So the dataset is safe to seed and the archive is not, which is now enforced rather than assumed.
 
-1. **Leave it.** The logo is already public and has been since the first commit.
-2. **Make the repository private.** This costs roughly **$18.72/month** in Actions minutes, which
-   are free only for public repositories (see `costs.md`) — a change since 1 January 2026.
-3. **Rewrite history.** Removes it properly, breaks every existing clone and commit reference.
+### The decision that is yours
 
-This needs an ownership decision from you, not a default from me.
+The logo. The neutral profile keeps it out of everything rendered, and the artefact guard now keeps
+it out of everything uploaded. Neither can remove it from the repository's history.
 
----
+1. **Leave it.** Already public since the first commit.
+2. **Make the repository private.** Costs roughly **$18.72/month** in Actions minutes — free only
+   for public repositories, and since 1 January 2026 there is an additional $0.002/minute platform
+   charge that also excludes public repositories. See `costs.md`.
+3. **Rewrite history.** Removes it properly; breaks every existing clone and commit reference.
+
+Cost should not decide this. Whether the asset is yours to publish should, and that is not a
+question I can answer for you.
 
 ## Recommended order to reach production
 
