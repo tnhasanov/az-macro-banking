@@ -1,0 +1,81 @@
+# Presentation theme. Adapted from the user-supplied ATB reference deck
+# (ATB_2027_State_Budget_Analysis_v2_1.pptx). Colours and fonts were extracted from
+# that file; the logo image is the asset embedded in it. Replace `logo` with an
+# approved brand asset or set it to null to render without a logo.
+
+name: atb-reference
+slide_size: [13.333, 7.5]      # inches, 16:9
+
+fonts:
+  title: "Segoe UI Semibold"
+  body: "Segoe UI"
+  # Fonts used when the deck is rendered to PDF on Linux (fontconfig alias is
+  # installed by scripts/setup_env.sh). The .pptx keeps the fonts above.
+  pdf_fallback: "Open Sans"
+
+sizes:                # points
+  title: 20
+  subtitle: 13
+  body: 11
+  small: 10
+  source: 8.5
+  kpi_number: 26
+  kpi_label: 10
+  table: 10
+  table_small: 9
+  chart_label: 9
+
+colors:
+  primary: "6F00B6"     # ATB purple
+  primary_dark: "4E0080"
+  text: "393A3F"
+  muted: "5F6470"
+  muted_light: "8A8490"
+  panel: "F5ECFA"
+  panel_border: "E6DAF1"
+  table_border: "DDD0EA"
+  table_header: "6F00B6"
+  table_stripe: "F6F3F8"
+  highlight: "FFF7D6"
+  white: "FFFFFF"
+  # Semantic series colours (stable across every report)
+  series_primary: "6F00B6"
+  series_secondary: "9B59D0"
+  series_tertiary: "DDD0EA"
+  positive: "14806F"    # teal: favourable / increase where increase is good
+  negative: "C62828"    # red: adverse
+  neutral: "1F4E79"     # navy: comparison series
+  gold: "C7A34C"
+  grey: "8A8490"
+
+# Stable mapping of report series to colours so that a series keeps its colour on every slide.
+series_colors:
+  total: "6F00B6"
+  non_oil: "14806F"
+  oil: "C62828"
+  households: "6F00B6"
+  corporates: "9B59D0"
+  financial: "DDD0EA"
+  azn: "6F00B6"
+  fx: "C7A34C"
+  loans: "6F00B6"
+  deposits: "14806F"
+  cpi: "C62828"
+  wages_nominal: "6F00B6"
+  wages_real: "14806F"
+  overdue: "C62828"
+  npl: "C62828"
+  prior: "DDD0EA"
+  current: "6F00B6"
+
+logo: theme/assets/atb_logo.png
+logo_size_in: [0.52, 0.34]
+
+layout:
+  margin_x: 0.45
+  title_top: 0.22
+  title_height: 0.76
+  subtitle_top: 1.0
+  content_top: 1.45
+  content_bottom: 6.75
+  footer_top: 6.95

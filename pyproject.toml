@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azmonitor"
+version = "0.1.0"
+description = "Azerbaijan Macro & Banking Monitor: official-statistics collection, indicator calculation and recurring PowerPoint/PDF/Excel reporting"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "PyYAML>=6.0",
+    "pandas>=2.1",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "pdfplumber>=0.10",
+    "python-pptx>=0.6.23",
+    "Pillow>=10.0",
+    "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+api = ["anthropic>=0.30"]
+
+[project.scripts]
+monitor = "azmonitor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["azmonitor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
