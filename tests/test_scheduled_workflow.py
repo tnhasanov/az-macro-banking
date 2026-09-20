@@ -285,3 +285,56 @@ def test_the_three_copies_of_the_schedule_agree(workspace):
 
     assert workflow_drift() == []
     assert schedule_drift() == []
+
+
+# ------------------------------------------------- how a run gets a Blob credential
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+
+def _workflow(name: str) -> str:
+    return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_a_run_mints_its_own_blob_credential(name):
+    """The read-write token cannot be a GitHub secret, because it cannot be read.
+
+    Opting it into a project connection stores it as a *sensitive* Vercel variable, which is
+    write-only by design: no reveal, no API, and `vercel env pull` returns it empty. So each run
+    pulls a short-lived OIDC token instead, and the step that does it must be there in both
+    workflows or the scheduled one fails at the point of saving while the manual one works.
+    """
+    body = _workflow(name)
+    assert "Mint a short-lived Blob credential" in body
+    assert "env pull" in body and "oidc-from-env-file.mjs" in body
+    assert "VERCEL_CLI_VERSION" in body, "the CLI version is pinned, not floating"
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_minting_is_skipped_when_a_read_write_token_exists(name):
+    """If a readable store-scoped token ever becomes available it is the better credential, and
+    configuring it must not require editing a workflow."""
+    body = _workflow(name)
+    assert "if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}" in body
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_the_pulled_file_does_not_outlive_the_step(name):
+    """It holds every non-sensitive variable in that environment, the database URL among them."""
+    body = _workflow(name)
+    step = body[body.index("Mint a short-lived Blob credential"):]
+    step = step[:step.index("- name:", 10)]
+    assert "trap 'rm -f" in step, "the pulled file is removed however the step ends"
+    assert "$RUNNER_TEMP" in step, "and it is written outside the checkout, never into it"
+    assert "cat " not in step, "nothing prints the pulled file"
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_the_credential_is_proved_before_the_lease_is_taken(name):
+    """Order matters: a run that takes the lease and then fails to authenticate has blocked the
+    next one for the length of the lease for nothing."""
+    body = _workflow(name)
+    assert body.index("Mint a short-lived Blob credential") \
+        < body.index("Prove the Blob credential before anything writes") \
+        < body.index("Take the run lease")

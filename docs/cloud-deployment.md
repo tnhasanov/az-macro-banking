@@ -43,43 +43,81 @@ out of the network tab is worth nothing to anyone who is not signed in.
 
 ### Which credential, and where
 
-A private store takes either of two, and which one is available is decided by *where the code runs*
-rather than by preference.
+A private store takes either of two, and which one is available is decided by *where the code runs*.
 
-| | credential | lifetime | scope | who uses it |
-|---|---|---|---|---|
-| On Vercel | `VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID` | minutes, rotated by Vercel | the project | the dashboard |
-| Anywhere else | `BLOB_READ_WRITE_TOKEN` | until revoked | one store | the GitHub Actions worker |
+| | credential | lifetime | scope |
+|---|---|---|---|
+| OIDC | `VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID` | ~12 hours, reissued on demand | one store |
+| Read-write token | `BLOB_READ_WRITE_TOKEN` | until revoked | one store |
 
-Connecting a store to a Vercel project gives that project OIDC: Vercel injects a short-lived,
-auto-rotating token and `BLOB_STORE_ID` naming the store, and the SDK pairs them without being
-asked. No static token is involved, which is the better arrangement and the one the dashboard uses.
+Connecting a store to a Vercel project gives that project OIDC: Vercel injects the token and
+`BLOB_STORE_ID`, and the SDK pairs them without being asked. That is what the **dashboard** uses,
+and it needs no configuration.
 
-**The worker cannot use it.** A Vercel-issued OIDC token is issued to Vercel's own runtimes, and to
-the Vercel CLI on a linked project where it is refreshed from a stored login. There is no third way
-to obtain one, so a GitHub Actions runner has none — which is why Vercel's own documentation points
-to the read-write token for code running outside Vercel, a CI job included.
+### Why the read-write token cannot be put in a GitHub secret
 
-It is worth being clear about the trade, because "static" sounds worse than it is here. The
-alternative for CI would be a **Vercel account token**, used to mint short-lived credentials on each
-run. That does give a shorter-lived credential at the point of use, but the secret sitting in CI is
-then one that can deploy, read every environment variable and delete projects. The read-write token
-reaches exactly one Blob store and nothing else. Narrow and static beats broad and short-lived for
-this worker.
+Opting the read-write token into a project connection adds it to that project's environment as a
+**sensitive** variable. A sensitive variable is write-only by design: there is no reveal in the
+dashboard, the copy button is disabled, and no API returns the plaintext. `vercel env pull`
+accordingly hands back `BLOB_READ_WRITE_TOKEN` with an **empty value**.
 
-Either way the credential belongs in GitHub Actions secrets and Vercel environment variables and
-nowhere else — in particular never in a URL, where it would end up in a log.
+That is the feature working, not a fault to debug — and it is load-bearing for everything below.
+The token exists and the deployment can use it; nobody, including the account owner, can read it
+back to paste somewhere else. There is no supported way to recover it, and creating a second store
+to get a readable one is not an option because the dataset lives in this store.
 
-### Getting a read-write token for a store that is already connected with OIDC
+### What the worker uses instead
 
-A store connected to a project with OIDC shows `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` in the
-project's environment variables and **no** `BLOB_READ_WRITE_TOKEN`, because nothing on Vercel needs
-one. The token is added to a project's environment when the store is connected with the read-write
-token opted in, for the environments you select; connect the store to the project again from the
-store's **Projects** tab and include it.
+An OIDC token is *issued* by Vercel but not *confined* to it. `vercel env pull` writes a fresh one,
+which is exactly how local development reaches a private store — and a GitHub Actions runner is the
+same case. The pull runs non-interactively with a Vercel access token plus `VERCEL_ORG_ID` and
+`VERCEL_PROJECT_ID`.
 
-Do not create a second store to get a token: a new store is a different store, and the dataset and
-the report archive live in this one.
+So each run mints its own credential:
+
+```
+vercel env pull  ──>  VERCEL_OIDC_TOKEN (~12h) + BLOB_STORE_ID  ──>  the SDK, unchanged
+```
+
+`tools/blob/oidc-from-env-file.mjs` takes only those two out of the pulled file, masks the token
+before anything is printed, and deletes the file. `BLOB_READ_WRITE_TOKEN` is never taken from it,
+empty or not.
+
+**Read this part carefully, because it is the real cost.** What sits in CI permanently is the
+access token used to mint the short-lived one, and it is a *Vercel access token*, not a Blob
+credential:
+
+| | a Blob read-write token | a project-scoped Vercel access token |
+|---|---|---|
+| reaches | one Blob store | everything belonging to one project |
+| can it deploy code? | no | **yes** |
+| can it read env vars? | no | non-sensitive ones, **yes** |
+| can it read sensitive env vars? | no | no — write-only for everyone |
+| other projects, team or user resources | no | no — denied |
+| expiry | none | **set one**, from 1 day to 1 year |
+| revocable | by rotating the store connection | yes, from the tokens page |
+
+A project-scoped token is *not* account-wide — Vercel denies its requests to any other project, to
+team-level resources and to user-level resources. But it is broader than a store credential, and
+the honest comparison is that it can reach the store **and** the deployment, because code it
+deploys would itself hold OIDC. Choosing **All Projects** instead of this one project creates a
+team-scoped token; do not.
+
+This is a deliberate trade, made because the narrower credential is unobtainable, not because it is
+better. It is mitigated by scope (one project), by expiry (set one) and by the run credential
+actually used for storage being a token that dies in hours.
+
+If a readable store-scoped token ever becomes available, nothing needs rewriting: set
+`BLOB_READ_WRITE_TOKEN` as a repository secret and the minting step skips itself.
+
+### What was considered and rejected
+
+| Option | Why not |
+|---|---|
+| Read the existing read-write token from the dashboard, `env pull`, or the API | Impossible by design — sensitive variables are write-only. |
+| Have the dashboard expose the token to its signed-in owner | An endpoint whose purpose is to disclose a secret, defeating the storage that is designed never to reveal it. One weak session and the store is gone. |
+| Signed delegation tokens (`issueSignedToken` / `presignUrl`) | Shaped for browser uploads, not an external worker: the server SDK's `put`/`get`/`head`/`list`/`del` take only `token`/`oidcToken`/`storeId`, `presignedUrlPayload` appears only in the client flow, and `list` is not a delegable operation at all — so `publish verify` and pruning could not work. It would also mean hand-driving presigned multipart for the 254 MB dataset, which is the protocol guesswork adopting the SDK was meant to avoid. |
+| A team-scoped or account-scoped Vercel token | Strictly broader than the project-scoped one for no benefit. |
 
 ### Proving it before anything writes
 
@@ -88,8 +126,18 @@ python -m azmonitor.cloud.publish check
 ```
 
 One listing, no writes. It reports which credential resolved and whether it opens the store, and
-exits non-zero when it does not. Both workflows run it before taking the lease, so a run cannot
-spend an hour refreshing and rendering only to fail at the point of saving.
+exits non-zero when it does not. Both workflows run it after minting and before taking the lease, so
+a run cannot spend an hour refreshing and rendering only to fail at the point of saving.
+
+In a Codespace, where `vercel link` and `vercel env pull` have already run, the same check works
+against the real store with no secrets at all:
+
+```bash
+set -a; . .env.local; set +a      # BLOB_READ_WRITE_TOKEN="" is ignored; empty counts as absent
+python -m azmonitor.cloud.publish check
+```
+
+That is the cheapest way to confirm the credential before any of this reaches Actions.
 
 ## 3. The engine, on GitHub Actions
 
@@ -98,13 +146,19 @@ Set these as **repository secrets** (Settings → Secrets and variables → Acti
 | Secret | What it is | Needed for |
 |---|---|---|
 | `AZMONITOR_DATABASE_URL` | Neon pooled connection string | the read model and the run lease |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob read-write token | the dataset and the report archive |
+| `VERCEL_TOKEN` | **project-scoped** Vercel access token, with an expiry | minting the Blob credential each run |
+| `VERCEL_ORG_ID` | team id from the project's settings | so the pull knows which project |
+| `VERCEL_PROJECT_ID` | project id from the project's settings | so the pull knows which project |
+| `BLOB_READ_WRITE_TOKEN` | **leave unset** | unreadable by design; see above. Set it only if a readable one ever exists, and the minting step will skip itself |
 | `AZMONITOR_ARCHIVE_BASE_URL` | public base of the dashboard | links in emails |
 | `AZMONITOR_OWNER_EMAIL` | the one authorised test recipient | delivery routing |
 | `AZMONITOR_GRAPH_TENANT_ID` | Entra tenant | Microsoft Graph email |
 | `AZMONITOR_GRAPH_CLIENT_ID` | app registration | Microsoft Graph email |
 | `AZMONITOR_GRAPH_CLIENT_SECRET` | client secret | Microsoft Graph email |
 | `AZMONITOR_GRAPH_SENDER` | mailbox to send as | Microsoft Graph email |
+
+`VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` are identifiers rather than secrets, but they are kept as
+secrets so a fork or a log cannot casually name the project the credential belongs to.
 
 The four Graph secrets can stay unset until you authorise a live email test. Delivery is disabled in
 `config/delivery.yaml` (`enabled: false`) regardless, so an unset credential is not what is stopping
@@ -208,19 +262,58 @@ Throughout: ☐ = needs you, ☑ = already done and in the branch.
 
 ### Stage A — infrastructure
 
-☐ Create a Neon project and copy the **pooled** connection string (it contains `-pooler`).
-☐ Create a Vercel Blob store. It must be a **private** store; do not make it public to make
-downloads work.
-☐ Add both, plus `AZMONITOR_OWNER_EMAIL`, as repository secrets in GitHub → Settings → Secrets.
-☐ Commit `.github/workflows/manual-run.yml` to `main`. One file, nothing else; see above for why.
+☑ Neon project created, **pooled** connection string in hand (it contains `-pooler`).
+☑ Private Vercel Blob store created and connected to the project.
+☑ `.github/workflows/manual-run.yml` committed to `main`, so it can be dispatched at all.
 
-**Verified when:** the Actions tab lists a *manual run* workflow with a **Run workflow** button.
+☐ **Create the Vercel access token the worker mints its credential with.**
+
+In the Vercel dashboard:
+
+1. Avatar (top right) → **Account Settings** → **Tokens** → **Create**.
+2. **Scope:** select the single project `az-macro-banking`. Do **not** select *All Projects* —
+   that makes a team-scoped token, which is broader for no benefit.
+3. **Expiration:** pick the shortest span you are willing to renew. 90 days is a reasonable start;
+   put the renewal in a calendar.
+4. Copy the token **now** — this is the one screen that shows it.
+
+Then, for the two identifiers the pull needs:
+
+5. Project → **Settings** → **General**, and scroll to the bottom for **Project ID**.
+6. **Team ID** is on the team's own Settings → General page. (It is also `VERCEL_ORG_ID` in
+   `.vercel/project.json` if you have run `vercel link` in a Codespace.)
+
+☐ **Add the repository secrets** — GitHub → Settings → Secrets and variables → Actions → New
+repository secret, one each:
+
+| Name | Value |
+|---|---|
+| `VERCEL_TOKEN` | the token from step 4 |
+| `VERCEL_ORG_ID` | the team id |
+| `VERCEL_PROJECT_ID` | the project id |
+| `AZMONITOR_DATABASE_URL` | the Neon pooled string |
+| `AZMONITOR_OWNER_EMAIL` | your address |
+
+Leave `BLOB_READ_WRITE_TOKEN` unset. It cannot be read, and the run does not need it.
+
+**Verified when:** the Actions tab lists a *manual run* workflow with a **Run workflow** button, and
+a dry run reaches "credential minted from the … environment" followed by a green credential check.
 
 ☑ Everything that has to exist in the repository for this to work is on the branch already.
 
 ### Stage B — seed the data
 
-From the machine that holds the validated dataset, with `BLOB_READ_WRITE_TOKEN` set:
+**This stage is optional, and probably skip it.** Seeding uploads an *existing* validated dataset
+so the first run does not have to collect one. That dataset is not in version control (`data/` is
+ignored, and it is 379 MB), so it exists only where it was built. A fresh runner handles an empty
+store as a first run and collects from the public sources in about eleven minutes, which is the
+cheaper path unless you already have the files somewhere durable.
+
+The report archive is refused by the artefact guard in any case: all 95 decks, 36 workbooks and 95
+PDFs in it were rendered under the branded profile.
+
+If you do have the dataset on a machine with a credential (a Codespace after `vercel env pull`
+counts):
 
 ```bash
 export AZMONITOR_PROFILE=neutral
