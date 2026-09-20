@@ -73,12 +73,13 @@ def cmd_save(args) -> int:
     return _out(result)
 
 
-def _archive_editions(store: OS.ObjectStore) -> list[dict[str, Any]]:
+def _archive_editions() -> list[dict[str, Any]]:
     """The archive as the dashboard should list it, read from what is actually on disk.
 
     Built from the local archive index rather than from the store listing, because the manifest is
     what carries the fingerprint, the quality summary and the validated findings, and the store only
-    knows about bytes.
+    knows about bytes. It therefore needs no object store, which is why rebuilding the projection
+    works against a dataset alone.
     """
     from ..scheduling import archive
 
@@ -142,7 +143,6 @@ def cmd_readmodel(args) -> int:
     from . import readmodel as RM
 
     paths = config.paths()
-    store = OS.store_from_env()
     conn = RM.connect()
     db = Database(paths.db_path)
     try:
@@ -150,8 +150,9 @@ def cmd_readmodel(args) -> int:
         result = {
             "indicators": RM.publish_indicators(conn, db),
             "publications": RM.publish_publications(conn, db),
-            "editions": RM.publish_editions(conn, _archive_editions(store)),
+            "editions": RM.publish_editions(conn, _archive_editions()),
             "deliveries": RM.publish_deliveries(conn, paths.data_dir / "deliveries.sqlite"),
+            "definitions": RM.publish_definitions(conn),
         }
         quality = validate_all(db, write=False)
         result["quality_checks"] = RM.publish_quality(conn, quality)

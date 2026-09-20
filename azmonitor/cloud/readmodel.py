@@ -465,3 +465,48 @@ def get_meta(conn, key: str) -> Any:
     with conn.cursor() as cur:
         row = cur.execute("SELECT value FROM meta WHERE key = %s", (key,)).fetchone()
     return row[0] if row else None
+
+
+def publish_definitions(conn) -> int:
+    """Publish the metric definitions the dashboard is allowed to show.
+
+    The dashboard does not get to choose which figures are headline figures. That choice is already
+    made, and validated, in ``config/reports.yaml``: the scorecard the monthly deck renders and the
+    sector map the sector review uses. Publishing them here means the screen and the deck answer to
+    one definition, so a metric renamed in config cannot leave the dashboard quietly showing the old
+    one under the old label.
+
+    Only labels and series ids travel — no values. The numbers still come from ``indicators``, with
+    their own periods and provenance attached.
+    """
+    from .. import config
+
+    reports = config.reports_config()
+    scorecard = [
+        {"key": row.get("key"), "label": row.get("label"), "series_id": row.get("metric"),
+         "dims": row.get("dims") or {}, "change": row.get("change"), "change_kind": row.get("kind"),
+         "good": row.get("good", "neutral")}
+        for row in (reports.get("monthly", {}).get("scorecard") or [])
+        if row.get("metric")
+    ]
+    sectors = [
+        {"key": key, "label": spec.get("label", key),
+         "credit_series": spec.get("cba_credit"),
+         "activity_series": list(spec.get("ssc_activity") or []),
+         "bank_business_series": spec.get("cba_bank_business")}
+        for key, spec in (reports.get("sector", {}).get("sectors") or {}).items()
+    ]
+    # The report names the delivery layer already uses, so a subject line, an archive listing and
+    # the dashboard cannot end up calling the same report three different things.
+    from ..delivery.dispatch import _report_name
+
+    report_types = ("monthly", "weekly", "sector", "mpr_brief", "fsr_brief", "decision_update")
+    set_meta(conn, "definitions", {
+        "scorecard": scorecard,
+        "sectors": sectors,
+        "chart_window_months": (reports.get("rules") or {}).get("chart_window", 36),
+        "report_titles": {rt: _report_name(rt) for rt in report_types},
+        "status_label": config.settings()["report"].get("status_label"),
+    })
+    log.info("published %d scorecard rows and %d sectors", len(scorecard), len(sectors))
+    return len(scorecard)
