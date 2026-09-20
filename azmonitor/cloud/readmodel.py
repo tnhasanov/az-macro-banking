@@ -177,7 +177,11 @@ CREATE TABLE IF NOT EXISTS job_locks (
   holder        TEXT NOT NULL,
   acquired_at   TIMESTAMPTZ NOT NULL,
   expires_at    TIMESTAMPTZ NOT NULL,
-  detail        JSONB NOT NULL DEFAULT '{}'::jsonb
+  detail        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- Bumped on every acquisition and never decreased. A worker carries the value it was given and
+  -- presents it before each persistent write, so one whose lease lapsed mid-run can be told apart
+  -- from the one that replaced it. See azmonitor/cloud/lock.py.
+  fence         BIGINT NOT NULL DEFAULT 1
 );
 """
 
@@ -200,6 +204,19 @@ def dsn() -> str:
         "no database is configured: set AZMONITOR_DATABASE_URL, POSTGRES_URL or DATABASE_URL")
 
 
+def dsn_or_none() -> str | None:
+    """The connection string, or None when this deployment has no database.
+
+    A separate function rather than catching the exception at each call site, because "there is no
+    database configured" and "the database is unreachable" must never be handled the same way: the
+    first is a valid single-host deployment, the second is an outage.
+    """
+    try:
+        return dsn()
+    except RuntimeError:
+        return None
+
+
 def connect(url: str | None = None):
     """A connection, with the import kept local so the engine does not need psycopg to run."""
     try:
@@ -217,6 +234,11 @@ MIGRATIONS = (
     "ALTER TABLE indicators ADD COLUMN IF NOT EXISTS formula TEXT",
     "ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS trigger TEXT",
     "ALTER TABLE publications ADD COLUMN IF NOT EXISTS translation_available_at DATE",
+    "ALTER TABLE job_locks ADD COLUMN IF NOT EXISTS fence BIGINT NOT NULL DEFAULT 1",
+    # Editions gained provenance of their own once the catalogue moved into object storage.
+    "ALTER TABLE editions ADD COLUMN IF NOT EXISTS files_missing JSONB NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE editions ADD COLUMN IF NOT EXISTS catalogued_at TIMESTAMPTZ",
+    "ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT TRUE",
 )
 
 
@@ -367,27 +389,55 @@ def publish_publications(conn, db) -> int:
     return len(rows)
 
 
-def publish_editions(conn, editions: list[dict[str, Any]]) -> int:
-    """The report archive, as the dashboard lists it. `editions` comes from the archive index."""
+def publish_editions(conn, editions: list[dict[str, Any]]) -> dict[str, Any]:
+    """The report archive, as the dashboard lists it.
+
+    Upserted, never truncated. The previous version emptied the table and refilled it from whatever
+    editions happened to be on the runner's disk — which, on a fresh runner, is none. One ordinary
+    run after a publish would therefore have erased every report the dashboard knew about while the
+    files themselves sat safely in the store.
+
+    `editions` now comes from the catalogue in object storage, so it is the whole archive rather
+    than one run's output. Even so, nothing is deleted here: a row is only ever added or updated,
+    and removing an edition is a deliberate retention action, not a side effect of a run that could
+    not see it.
+    """
+    added = updated = 0
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE editions")
         for e in editions:
-            cur.execute(
+            row = cur.execute(
                 "INSERT INTO editions (report_type, edition, version, generated_at, as_of, status_label, "
                 "partial, n_slides, fingerprint, trigger, narrative_mode, numbers_checked, quality, "
-                "reporting_periods, summary, files, blob_prefix, is_latest) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "reporting_periods, summary, files, blob_prefix, is_latest, files_missing, catalogued_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now()) "
                 "ON CONFLICT (report_type, edition, version) DO UPDATE SET "
-                "is_latest = EXCLUDED.is_latest, files = EXCLUDED.files, blob_prefix = EXCLUDED.blob_prefix",
+                "  is_latest = EXCLUDED.is_latest, files = EXCLUDED.files, "
+                "  blob_prefix = EXCLUDED.blob_prefix, files_missing = EXCLUDED.files_missing "
+                "RETURNING (xmax = 0) AS inserted",
                 (e["report_type"], e["edition"], e["version"], e.get("generated_at"), e.get("as_of"),
                  e.get("status_label"), bool(e.get("partial")), e.get("n_slides"), e.get("fingerprint"),
                  e.get("trigger"), e.get("narrative_mode"), e.get("numbers_checked"),
                  json.dumps(e.get("quality") or {}), json.dumps(e.get("reporting_periods") or {}),
                  json.dumps(e.get("summary") or []), json.dumps(e.get("files") or []),
-                 e.get("blob_prefix"), bool(e.get("is_latest"))))
+                 e.get("blob_prefix"), bool(e.get("is_latest")),
+                 json.dumps(e.get("files_missing") or []))).fetchone()
+            if row and row[0]:
+                added += 1
+            else:
+                updated += 1
+
+        # `is_latest` is a property of the whole archive, so a version that is no longer newest has
+        # to be demoted even though this run never saw it.
+        if editions:
+            cur.execute(
+                "UPDATE editions e SET is_latest = FALSE "
+                "WHERE is_latest AND EXISTS (SELECT 1 FROM editions n "
+                "  WHERE n.report_type = e.report_type AND n.edition = e.edition "
+                "    AND n.version > e.version)")
+        total = cur.execute("SELECT COUNT(*) FROM editions").fetchone()[0]
     conn.commit()
-    log.info("published %d edition rows", len(editions))
-    return len(editions)
+    log.info("catalogue: %d added, %d updated, %d rows in total", added, updated, total)
+    return {"added": added, "updated": updated, "total": total}
 
 
 def publish_quality(conn, quality: dict[str, Any]) -> int:

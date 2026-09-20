@@ -15,6 +15,7 @@ CI job and that is the only interface such a caller can act on.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
@@ -27,6 +28,26 @@ from ..util.log import get_logger, setup_logging
 from . import objectstore as OS
 
 log = get_logger("cloud.publish")
+
+
+def _fence():
+    """The lease this worker holds, for checking ownership before anything persistent.
+
+    The workflow takes the lease in its own step and passes the holder and fence token down through
+    the environment, so every later command can prove it is still the worker that started the run.
+    Returns None when no database is configured — a single-host deployment has a file lock and does
+    not need this.
+    """
+    from . import lock as L, readmodel as RM
+
+    holder = os.environ.get("AZMONITOR_LEASE_HOLDER")
+    fence = os.environ.get("AZMONITOR_LEASE_FENCE")
+    if not holder or not RM.dsn_or_none():
+        return None
+    conn = RM.connect()
+    lease = L.DatabaseLease(conn, os.environ.get("AZMONITOR_LEASE_NAME", "azmonitor-run"),
+                            holder=holder, fence=int(fence) if fence else None)
+    return lease
 
 
 def _out(payload: dict[str, Any], code: int = 0) -> int:
@@ -96,73 +117,91 @@ def cmd_save(args) -> int:
 
     paths = config.paths()
     store = OS.store_from_env()
+    fence = _fence()
     result: dict[str, Any] = {"profile": config.profile()["name"],
-                              "dataset": OS.save_dataset(paths.data_dir, store)}
+                              "dataset": OS.save_dataset(paths.data_dir, store, fence=fence)}
 
-    # Every report version on disk that the store does not already hold. An edition is immutable, so
-    # this is an upload of what is new rather than a synchronisation of what has changed.
-    published = []
-    out_dir = paths.output_dir
-    if out_dir.exists():
-        for type_dir in sorted(p for p in out_dir.iterdir() if p.is_dir() and p.name != "latest"):
-            for edition_dir in sorted(p for p in type_dir.iterdir() if p.is_dir()):
-                for version_dir in sorted(p for p in edition_dir.iterdir() if p.is_dir()):
-                    try:
-                        version = int(version_dir.name.split("_")[0].lstrip("v"))
-                    except (ValueError, IndexError):
-                        continue
-                    res = OS.publish_edition(version_dir, type_dir.name, edition_dir.name, version, store)
-                    if res["uploaded"]:
-                        published.append({"report_type": type_dir.name, "edition": edition_dir.name,
-                                          "version": version, "files": len(res["uploaded"])})
-    result["editions_published"] = published
+    uploaded = _publish_local_editions(paths.output_dir, store, fence=fence)
+    result["editions_published"] = uploaded["published"]
+    result["catalogue_entries"] = len(store.list(OS.CATALOG_PREFIX))
     return _out(result)
 
 
-def _archive_editions() -> list[dict[str, Any]]:
-    """The archive as the dashboard should list it, read from what is actually on disk.
+def _publish_local_editions(out_dir: Path, store, *, fence) -> dict[str, Any]:
+    """Upload every report version on disk that the store does not already hold.
 
-    Built from the local archive index rather than from the store listing, because the manifest is
-    what carries the fingerprint, the quality summary and the validated findings, and the store only
-    knows about bytes. It therefore needs no object store, which is why rebuilding the projection
-    works against a dataset alone.
+    An edition is immutable, so this is an upload of what is new rather than a synchronisation of
+    what has changed. The catalogue entry for each version goes up after its files, so an entry
+    never describes an edition whose files are not there yet.
     """
-    from ..scheduling import archive
+    published: list[dict[str, Any]] = []
+    if not out_dir.exists():
+        return {"published": published, "note": "no output directory on this worker"}
 
-    index = archive.index()
-    out: list[dict[str, Any]] = []
-    for report_type, editions in (index.get("report_types") or {}).items():
-        for e in editions:
-            version_dir = Path(e["path"])
-            manifest_path = version_dir / "manifest.json"
-            manifest = {}
-            if manifest_path.exists():
+    for type_dir in sorted(p for p in out_dir.iterdir() if p.is_dir() and p.name != "latest"):
+        for edition_dir in sorted(p for p in type_dir.iterdir() if p.is_dir()):
+            # A version number can appear on disk more than once — `v1_<stamp>` twice, from two
+            # renders of the same version during development. Only one of them can be version 1 in
+            # the store, because a published version is immutable. Taking the newest directory is
+            # the deterministic choice; uploading both put two renders under one key and left the
+            # loser's files with no catalogue entry, which is what `publish verify` reported.
+            newest: dict[int, Path] = {}
+            for version_dir in sorted(p for p in edition_dir.iterdir() if p.is_dir()):
                 try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except ValueError:
-                    manifest = {}
-            summary = _summary_lines(version_dir, manifest)
-            files = [{"name": f.name, "bytes": f.stat().st_size,
-                      "key": f"reports/{report_type}/{e['edition']}/v{e['latest_version']}/{f.name}"}
-                     for f in sorted(version_dir.iterdir())
-                     if f.is_file() and f.suffix in (".pdf", ".pptx", ".xlsx")]
-            out.append({
-                "report_type": report_type, "edition": e["edition"], "version": e["latest_version"],
-                "generated_at": manifest.get("generated_at"), "as_of": manifest.get("as_of"),
-                "status_label": manifest.get("status_label"),
-                "partial": bool(manifest.get("partial_edition")),
-                "n_slides": manifest.get("n_slides"),
-                "fingerprint": (manifest.get("edition_fingerprint") or {}).get("fingerprint"),
-                "trigger": (manifest.get("edition_trigger") or {}).get("trigger"),
-                "narrative_mode": manifest.get("narrative_mode"),
-                "numbers_checked": (manifest.get("narrative_validation") or {}).get("numbers_checked"),
-                "quality": manifest.get("quality_summary") or {},
-                "reporting_periods": manifest.get("reporting_periods") or {},
-                "summary": summary, "files": files,
-                "blob_prefix": f"reports/{report_type}/{e['edition']}/v{e['latest_version']}",
-                "is_latest": True,
-            })
-    return out
+                    version = int(version_dir.name.split("_")[0].lstrip("v"))
+                except (ValueError, IndexError):
+                    continue
+                previous = newest.get(version)
+                if previous is None or version_dir.name > previous.name:
+                    newest[version] = version_dir
+
+            for version, version_dir in sorted(newest.items()):
+                if fence:
+                    fence.check(f"before publishing {type_dir.name} {edition_dir.name} v{version}")
+                res = OS.publish_edition(version_dir, type_dir.name, edition_dir.name, version, store)
+                OS.write_catalog_entry(
+                    _catalog_entry(version_dir, type_dir.name, edition_dir.name, version), store)
+                if res["uploaded"]:
+                    published.append({"report_type": type_dir.name, "edition": edition_dir.name,
+                                      "version": version, "files": len(res["uploaded"])})
+    return {"published": published, "editions_uploaded": len(published)}
+
+
+def _catalog_entry(version_dir: Path, report_type: str, edition: str, version: int) -> dict[str, Any]:
+    """Everything the dashboard needs about one edition version, read from its own manifest.
+
+    Written once, at publication, and never rewritten. It carries the fingerprint that decided the
+    edition was worth producing, the reporting period of every input, the quality result at the
+    time, and the findings the narrative validator passed — so the record of what was published
+    survives the runner that published it.
+    """
+    manifest: dict[str, Any] = {}
+    manifest_path = version_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            manifest = {}
+    files = [{"name": f.name, "bytes": f.stat().st_size,
+              "key": f"reports/{report_type}/{edition}/v{version}/{f.name}"}
+             for f in sorted(version_dir.iterdir())
+             if f.is_file() and f.suffix in (".pdf", ".pptx", ".xlsx")]
+    return {
+        "report_type": report_type, "edition": edition, "version": version,
+        "generated_at": manifest.get("generated_at"), "as_of": manifest.get("as_of"),
+        "status_label": manifest.get("status_label"),
+        "partial": bool(manifest.get("partial_edition")),
+        "n_slides": manifest.get("n_slides"),
+        "fingerprint": (manifest.get("edition_fingerprint") or {}).get("fingerprint"),
+        "trigger": (manifest.get("edition_trigger") or {}).get("trigger"),
+        "narrative_mode": manifest.get("narrative_mode"),
+        "numbers_checked": (manifest.get("narrative_validation") or {}).get("numbers_checked"),
+        "quality": manifest.get("quality_summary") or {},
+        "reporting_periods": manifest.get("reporting_periods") or {},
+        "summary": _summary_lines(version_dir, manifest),
+        "files": files,
+        "blob_prefix": f"reports/{report_type}/{edition}/v{version}",
+    }
 
 
 def _summary_lines(version_dir: Path, manifest: dict[str, Any]) -> list[str]:
@@ -184,26 +223,46 @@ def _summary_lines(version_dir: Path, manifest: dict[str, Any]) -> list[str]:
 
 
 def cmd_readmodel(args) -> int:
+    """Rebuild the projection the dashboard reads.
+
+    The report catalogue comes from object storage, not from this runner's disk. That is the whole
+    point: a fresh runner has no `outputs/` directory, and building the catalogue from what it can
+    see locally would publish an empty archive over a full one.
+    """
     from ..calc.validate import validate_all
     from ..storage.db import Database
     from . import readmodel as RM
 
     paths = config.paths()
+    store = OS.store_from_env()
+    fence = _fence()
+    if fence:
+        fence.check("before publishing the read model")
+
     conn = RM.connect()
     db = Database(paths.db_path)
     try:
         RM.ensure_schema(conn)
+        catalogue = OS.read_catalog(store)
+        broken = [f"{e['report_type']}/{e['edition']}/v{e['version']}"
+                  for e in catalogue if e.get("files_missing")]
         result = {
             "indicators": RM.publish_indicators(conn, db),
             "publications": RM.publish_publications(conn, db),
-            "editions": RM.publish_editions(conn, _archive_editions()),
+            "editions": RM.publish_editions(conn, catalogue),
             "deliveries": RM.publish_deliveries(conn, paths.data_dir / "deliveries.sqlite"),
             "definitions": RM.publish_definitions(conn),
         }
+        if broken:
+            # Reported, not hidden: an edition whose files have gone is a storage problem, and
+            # dropping it from the catalogue would make it look like a report nobody ever produced.
+            result["editions_with_missing_files"] = broken
+            log.warning("%d catalogued edition(s) reference files the store does not hold: %s",
+                        len(broken), ", ".join(broken[:5]))
         quality = validate_all(db, write=False)
         result["quality_checks"] = RM.publish_quality(conn, quality)
         RM.set_meta(conn, "last_readmodel_publish", {
-            "at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(timespec="seconds"),
+            "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "counts": result, "quality": quality["summary"],
         })
         return _out(result)
@@ -212,35 +271,190 @@ def cmd_readmodel(args) -> int:
         conn.close()
 
 
+def cmd_verify(args) -> int:
+    """Check that the catalogue and the store agree, without changing either.
+
+    Two failures worth catching before anyone relies on a download link: an edition the catalogue
+    lists whose files are not in the store, and files in the store that no catalogue entry claims.
+    The first breaks a download; the second is an upload that died before its entry was written and
+    is recoverable by re-running `save`.
+    """
+    store = OS.store_from_env()
+    catalogue = OS.read_catalog(store)
+    catalogued_keys = {f["key"] for e in catalogue for f in (e.get("files") or [])}
+    stored = {b["key"] for b in store.list("reports/")
+              if b["key"].rsplit(".", 1)[-1] in ("pdf", "pptx", "xlsx")}
+
+    broken = [{"edition": f"{e['report_type']}/{e['edition']}/v{e['version']}",
+               "missing": e["files_missing"]}
+              for e in catalogue if e.get("files_missing")]
+    orphans = sorted(stored - catalogued_keys)
+
+    result = {
+        "catalogue_entries": len(catalogue),
+        "files_catalogued": len(catalogued_keys),
+        "files_in_store": len(stored),
+        "editions_with_missing_files": broken,
+        "files_with_no_catalogue_entry": orphans[:20],
+        "orphan_count": len(orphans),
+        "ok": not broken,
+    }
+    if orphans:
+        result["note"] = ("files with no catalogue entry are usually an upload that was "
+                          "interrupted before its entry was written; re-running `save` writes it")
+    return _out(result, 0 if not broken else 5)
+
+
 def cmd_record_run(args) -> int:
-    """Record one scheduled run in the read model, so the dashboard can report on it."""
+    """Record one scheduled run in the read model, so the dashboard can report on it.
+
+    Recorded for a failed run too, and `--published` says whether the read model was refreshed from
+    it. A failed cycle that left no trace would look on the dashboard exactly like a cycle that
+    never happened, which is the difference between "nothing to report" and "the engine is down".
+    """
     from . import readmodel as RM
 
     paths = config.paths()
     summary_path = Path(args.summary) if args.summary else (
         paths.state_dir / f"last_{args.task.replace('-', '_')}.json")
-    if not summary_path.exists():
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    elif args.status:
+        # A run that died before writing its own summary still gets a row, built from what the
+        # workflow knows. Without this the most serious failures are the ones that vanish.
+        summary = {"status": args.status, "error": args.error,
+                   "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    else:
         return _out({"error": f"no run summary at {summary_path}"}, 2)
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
     conn = RM.connect()
     try:
         RM.ensure_schema(conn)
         RM.record_run(conn, {
             "run_id": args.run_id or os.environ.get("GITHUB_RUN_ID") or summary.get("started_at"),
-            "task": args.task, "trigger": args.trigger, "status": summary.get("status", "unknown"),
+            "task": args.task, "trigger": args.trigger,
+            "status": args.status or summary.get("status", "unknown"),
+            "published": bool(args.published),
             "started_at": summary.get("started_at"), "finished_at": summary.get("finished_at"),
             "local_time": summary.get("local_time"),
             "produced": summary.get("produced") or [],
             "delivered": summary.get("delivered_count") or 0,
             "readiness": (summary.get("steps") or {}).get("readiness") or {},
-            "error": summary.get("error"),
+            "error": args.error or summary.get("error"),
             "detail": {k: v for k, v in (summary.get("steps") or {}).items()
                        if k in ("refresh", "validate", "stale_sources", "monitor", "window")},
         })
-        return _out({"recorded": args.task, "status": summary.get("status")})
+        return _out({"recorded": args.task, "status": args.status or summary.get("status"),
+                     "published": bool(args.published)})
     finally:
         conn.close()
+
+
+def cmd_seed(args) -> int:
+    """Put the existing validated dataset into an empty store, once.
+
+    The dataset is not in git — it is 374 MB of SQLite and downloaded source documents — so the
+    first cloud run has to get it from the machine that already holds it. That transfer is the one
+    moment when an empty store is expected, which makes it the one moment when a mistake is
+    indistinguishable from normal operation unless it is checked.
+
+    So this refuses to do anything to a store that already holds a dataset, checks the local
+    dataset is complete before sending it, and verifies the digest afterwards by reading back what
+    the store now has. `--check` does everything except the upload.
+    """
+    paths = config.paths()
+    store = OS.store_from_env()
+    result: dict[str, Any] = {"data_dir": str(paths.data_dir), "profile": config.profile()["name"]}
+
+    refusal = _refuse_restricted_upload()
+    if refusal:
+        return _out({**result, **refusal}, 3)
+
+    # --- is there anything here to overwrite?
+    pointer = store.get(OS.POINTER_KEY)
+    existing = json.loads(pointer) if pointer else None
+    result["store_already_holds"] = existing
+    if existing and not args.replace:
+        return _out({**result, "seeded": False,
+                     "error": "this store already holds a dataset saved at "
+                              f"{existing.get('saved_at')}; seeding would replace it",
+                     "remedy": "run `publish restore` to check it is the one you expect, or pass "
+                               "--replace if you are certain you mean to overwrite it"}, 4)
+
+    # --- is the local dataset complete?
+    missing = [part for part in OS.DATASET_PARTS if not (paths.data_dir / part).exists()]
+    summary = OS.dataset_summary(paths.data_dir)
+    result["contents"] = summary
+    result["missing_parts"] = missing
+    if "monitor.sqlite" in missing:
+        return _out({**result, "seeded": False,
+                     "error": "there is no monitor.sqlite in the data directory; this is not a "
+                              "dataset and must not be uploaded as one"}, 2)
+
+    # --- would it carry anything it should not?
+    strays = _confidential_strays(paths.data_dir)
+    result["unexpected_files"] = strays
+    if strays and not args.allow_unexpected:
+        return _out({**result, "seeded": False,
+                     "error": f"{len(strays)} file(s) in the data directory are not part of the "
+                              "dataset and would be uploaded with it",
+                     "remedy": "remove them, or pass --allow-unexpected if they belong there"}, 2)
+
+    if args.check:
+        return _out({**result, "seeded": False, "checked_only": True,
+                     "would_upload_parts": [p for p in OS.DATASET_PARTS if p not in missing]})
+
+    # --- send it, then read back what arrived
+    saved = OS.save_dataset(paths.data_dir, store)
+    result["uploaded"] = saved
+
+    stored = store.stat(saved["key"])
+    result["verified"] = {
+        "key": saved["key"],
+        "bytes_expected": saved["bytes"],
+        "bytes_in_store": (stored or {}).get("size"),
+        "sha256": saved["sha256"],
+    }
+    if not stored:
+        return _out({**result, "seeded": False,
+                     "error": "the dataset was uploaded but the store does not list it"}, 1)
+    if stored.get("size") not in (None, saved["bytes"]):
+        return _out({**result, "seeded": False,
+                     "error": f"the store holds {stored['size']} bytes where {saved['bytes']} were "
+                              "sent; the upload did not complete"}, 1)
+
+    result["seeded"] = True
+
+    # The dataset carries the figures; the report archive is separate objects and its own
+    # catalogue. Seeding only the dataset leaves a dashboard with every indicator and no reports,
+    # which is a confusing first impression of a working system.
+    if args.with_reports:
+        result["reports"] = _publish_local_editions(paths.output_dir, store, fence=None)
+
+    result["next"] = ["python -m azmonitor.cloud.publish restore   # on a fresh worker",
+                      "python -m azmonitor.cloud.publish readmodel",
+                      "python -m azmonitor.cloud.publish verify"]
+    if not args.with_reports:
+        result["next"].insert(0, "python -m azmonitor.cloud.publish save   # to upload the report archive")
+    return _out(result)
+
+
+def _confidential_strays(data_dir: Path) -> list[str]:
+    """Files in the data directory that are not part of the dataset.
+
+    The dataset is four named things. Anything else sitting in the directory would be swept into
+    the tarball and sent to personal cloud storage, which is the mistake worth catching before the
+    upload rather than after.
+    """
+    if not data_dir.exists():
+        return []
+    expected = set(OS.DATASET_PARTS)
+    strays = []
+    for child in sorted(data_dir.iterdir()):
+        if child.name in expected or child.name in ("logs", "backups", "analytics", "snapshots"):
+            continue
+        strays.append(child.name)
+    return strays
 
 
 def cmd_status(args) -> int:
@@ -285,7 +499,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--trigger", default="github")
     s.add_argument("--run-id")
     s.add_argument("--summary", help="path to the run summary JSON (default: the task's own state file)")
+    s.add_argument("--status", help="override the status, for a run that died before writing one")
+    s.add_argument("--error", help="what went wrong, when there is no summary to read it from")
+    s.add_argument("--published", action="store_true",
+                   help="the read model was refreshed from this run")
     s.set_defaults(fn=cmd_record_run)
+    sub.add_parser("verify", help="check that the catalogue and the store agree").set_defaults(fn=cmd_verify)
+    s = sub.add_parser("seed", help="put the existing validated dataset into an empty store")
+    s.add_argument("--check", action="store_true", help="verify everything, upload nothing")
+    s.add_argument("--replace", action="store_true",
+                   help="overwrite a dataset the store already holds (say why in the run log)")
+    s.add_argument("--allow-unexpected", action="store_true",
+                   help="upload even though the data directory holds files that are not the dataset")
+    s.add_argument("--with-reports", action="store_true",
+                   help="also upload the report archive and its catalogue, so the dashboard has "
+                        "history from the first run")
+    s.set_defaults(fn=cmd_seed)
     sub.add_parser("status", help="what the store and the read model hold").set_defaults(fn=cmd_status)
 
     args = ap.parse_args(argv)

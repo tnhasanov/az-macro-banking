@@ -1,0 +1,10 @@
+{
+  "name": "azmonitor-blob",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Vercel Blob access for the Python engine, through the official SDK",
+  "dependencies": {
+    "@vercel/blob": "2.8.0"
+  }
+}

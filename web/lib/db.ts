@@ -276,6 +276,22 @@ export async function jobRuns(limit = 40): Promise<JobRun[]> {
   return sql()<JobRun[]>`SELECT * FROM job_runs ORDER BY started_at DESC LIMIT ${limit}`;
 }
 
+/**
+ * Every recorded run of one task in the recent past, newest first.
+ *
+ * The watchdog needs the runs themselves, not just the newest one: it asks whether a particular
+ * scheduled occurrence was attempted, and the newest run may belong to a later occurrence.
+ *
+ * Errors propagate. A caller deciding whether to start a second worker must not be handed an empty
+ * array when the truth is that the database could not be reached.
+ */
+export async function recentRuns(task: string, days = 12): Promise<JobRun[]> {
+  return sql()<JobRun[]>`
+    SELECT * FROM job_runs
+    WHERE task = ${task} AND started_at > now() - make_interval(days => ${days})
+    ORDER BY started_at DESC`;
+}
+
 export async function lastRunPerTask(): Promise<JobRun[]> {
   return sql()<JobRun[]>`
     SELECT DISTINCT ON (task) * FROM job_runs ORDER BY task, started_at DESC`;
@@ -323,7 +339,13 @@ export async function meta<T = unknown>(key: string): Promise<T | null> {
   return rows[0]?.value ?? null;
 }
 
-/** Leases currently held or lapsed, for the system page. */
+/**
+ * Leases currently held or lapsed.
+ *
+ * Deliberately has no internal error handling. A failed query here used to become an empty array at
+ * the call site, which reads as "nobody holds the lease" — the one conclusion a watchdog must never
+ * reach by accident, because acting on it starts a second worker over a healthy first one.
+ */
 export async function locks() {
   return sql()<
     { name: string; holder: string; acquired_at: string; expires_at: string; expired: boolean }[]

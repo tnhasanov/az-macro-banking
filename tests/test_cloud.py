@@ -99,10 +99,12 @@ def test_the_pointer_moves_only_after_the_upload(tmp_path):
     first = json.loads(store.get(OS.POINTER_KEY))
 
     class DiesOnUpload(OS.LocalObjectStore):
-        def put(self, key, data, *, content_type="application/octet-stream", overwrite=False):
+        # The dataset goes up through `put_file`, so that 260 MB is never held in memory
+        # alongside an open SQLite database. That is the call an interrupted upload interrupts.
+        def put_file(self, key, path, *, content_type="application/octet-stream", overwrite=False):
             if key.endswith(".tar.gz"):
                 raise OS.StorageError("connection lost half way through the upload")
-            return super().put(key, data, content_type=content_type, overwrite=overwrite)
+            return super().put_file(key, path, content_type=content_type, overwrite=overwrite)
 
     (data / "monitor.sqlite").write_bytes(b"v2")
     dying = DiesOnUpload(tmp_path / "bucket")

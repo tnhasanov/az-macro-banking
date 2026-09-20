@@ -17,6 +17,13 @@ holder and an expiry:
 * **Renewal is not automatic.** A long job renews as it goes, and a job that stops renewing loses
   the lease — which is the point. A lease that renewed itself in a background thread would outlive
   a wedged job for ever.
+* **Fencing decides what happens when renewal was not enough.** Renewal narrows the window in which
+  a healthy-but-slow job loses its lease; it cannot close it, because a job can always be paused
+  for longer than its remaining lease. So every acquisition stamps a monotonically increasing fence
+  token, and the worker re-checks holder *and* token immediately before each persistent write. A
+  worker that lost the lease finds a token it does not recognise and stops, instead of racing the
+  worker that replaced it. Without this, the 60-minute job timeout and the 55-minute lease left a
+  five-minute window in which two workers could both write the dataset.
 
 The file lock stays where it is. On a single host it is still the right mechanism, and a deployment
 that uses one should not pay for a database round trip to learn what a local file already knows.
@@ -66,13 +73,14 @@ class DatabaseLease:
 
     def __init__(self, conn, name: str = "azmonitor-run", *,
                  minutes: int = DEFAULT_LEASE_MINUTES, holder: str | None = None,
-                 detail: dict[str, Any] | None = None):
+                 detail: dict[str, Any] | None = None, fence: int | None = None):
         self.conn = conn
         self.name = name
         self.minutes = int(minutes)
         self.holder = holder or holder_id()
         self.detail = detail or {}
         self.acquired = False
+        self.fence = int(fence) if fence is not None else None
 
     # ------------------------------------------------------------------ acquiring
     def try_acquire(self) -> dict[str, Any]:
@@ -81,18 +89,23 @@ class DatabaseLease:
         `ON CONFLICT ... WHERE expires_at < now()` is what makes this safe: the row is only replaced
         when the existing lease has genuinely lapsed, and two workers racing to replace the same
         expired lease still produce exactly one winner.
+
+        Each acquisition bumps `fence`, which never goes backwards. The worker carries that number
+        and presents it before every persistent write, so a worker whose lease lapsed can be told
+        apart from the one that took over — by the database, not by either of them guessing.
         """
         import json
 
         with self.conn.cursor() as cur:
             row = cur.execute(
-                "INSERT INTO job_locks (name, holder, acquired_at, expires_at, detail) "
-                "VALUES (%s, %s, now(), now() + make_interval(mins => %s), %s) "
+                "INSERT INTO job_locks (name, holder, acquired_at, expires_at, detail, fence) "
+                "VALUES (%s, %s, now(), now() + make_interval(mins => %s), %s, 1) "
                 "ON CONFLICT (name) DO UPDATE SET "
                 "  holder = EXCLUDED.holder, acquired_at = EXCLUDED.acquired_at, "
-                "  expires_at = EXCLUDED.expires_at, detail = EXCLUDED.detail "
+                "  expires_at = EXCLUDED.expires_at, detail = EXCLUDED.detail, "
+                "  fence = job_locks.fence + 1 "
                 "WHERE job_locks.expires_at < now() "
-                "RETURNING holder, acquired_at, expires_at",
+                "RETURNING holder, acquired_at, expires_at, fence",
                 (self.name, self.holder, self.minutes, json.dumps(self.detail))).fetchone()
         self.conn.commit()
         if row is None:
@@ -101,18 +114,20 @@ class DatabaseLease:
                 f"{self.name} is held by {current.get('holder')} until {current.get('expires_at')}; "
                 f"this run is doing nothing rather than working on the same dataset")
         self.acquired = True
-        log.info("lease %s acquired by %s until %s", self.name, row[0], row[2])
-        return {"name": self.name, "holder": row[0], "acquired_at": row[1], "expires_at": row[2]}
+        self.fence = int(row[3])
+        log.info("lease %s acquired by %s until %s (fence %s)", self.name, row[0], row[2], self.fence)
+        return {"name": self.name, "holder": row[0], "acquired_at": row[1], "expires_at": row[2],
+                "fence": self.fence}
 
     def current(self) -> dict[str, Any]:
         with self.conn.cursor() as cur:
             row = cur.execute(
-                "SELECT holder, acquired_at, expires_at, detail, expires_at < now() AS expired "
+                "SELECT holder, acquired_at, expires_at, detail, expires_at < now() AS expired, fence "
                 "FROM job_locks WHERE name = %s", (self.name,)).fetchone()
         if not row:
             return {}
         return {"holder": row[0], "acquired_at": row[1], "expires_at": row[2], "detail": row[3],
-                "expired": row[4]}
+                "expired": row[4], "fence": row[5]}
 
     # ------------------------------------------------------------------- renewing
     def renew(self) -> None:
@@ -124,14 +139,43 @@ class DatabaseLease:
         with self.conn.cursor() as cur:
             row = cur.execute(
                 "UPDATE job_locks SET expires_at = now() + make_interval(mins => %s) "
-                "WHERE name = %s AND holder = %s RETURNING expires_at",
-                (self.minutes, self.name, self.holder)).fetchone()
+                "WHERE name = %s AND holder = %s AND expires_at > now() "
+                "  AND (%s::bigint IS NULL OR fence = %s) "
+                "RETURNING expires_at, fence",
+                (self.minutes, self.name, self.holder, self.fence, self.fence)).fetchone()
         self.conn.commit()
         if row is None:
             self.acquired = False
             raise LeaseLost(
                 f"the {self.name} lease is no longer held by {self.holder}; another run has taken it "
                 f"and this one must stop writing")
+        log.debug("lease %s renewed until %s", self.name, row[0])
+
+    # ------------------------------------------------------------------- fencing
+    def check(self, what: str = "this write") -> None:
+        """Refuse to go on unless this worker still owns the lease it started with.
+
+        Called immediately before anything persistent. The cost is one indexed row read; the thing
+        it prevents is a worker that was paused past its expiry waking up and overwriting the work
+        of the worker that replaced it.
+        """
+        current = self.current()
+        if not current:
+            raise LeaseLost(
+                f"refusing {what}: the {self.name} lease row has gone, so this worker cannot show "
+                f"it still owns the dataset")
+        if current["holder"] != self.holder:
+            raise LeaseLost(
+                f"refusing {what}: the {self.name} lease now belongs to {current['holder']}, not to "
+                f"{self.holder}; this worker was replaced and must not write")
+        if self.fence is not None and current.get("fence") != self.fence:
+            raise LeaseLost(
+                f"refusing {what}: the {self.name} lease has been reacquired since this worker took "
+                f"it (fence {current.get('fence')}, expected {self.fence})")
+        if current.get("expired"):
+            raise LeaseLost(
+                f"refusing {what}: the {self.name} lease expired at {current['expires_at']}; renew "
+                f"it or stop")
 
     def release(self) -> None:
         """Give it back early. A lease that is never released simply expires."""

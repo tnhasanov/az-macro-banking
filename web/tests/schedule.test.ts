@@ -1,123 +1,247 @@
 /**
- * The watchdog's decision: is the run that should have happened missing?
+ * Which scheduled runs should have happened, and whether they did.
  *
- * Two ways to get this wrong, and both are silent. Dispatch too eagerly and every slow run is run
- * twice — the lease stops the damage, but the history fills with skipped runs and a real overlap
- * stops being visible. Dispatch too reluctantly and a scheduler that has quietly stopped (GitHub
- * disables cron in a repository with no activity for sixty days) goes unnoticed until someone
- * notices the reports stopped.
+ * The bug this replaces: the watchdog compared elapsed time since the last run against a threshold.
+ * For the weekly digest — Monday 08:30, so seven days between healthy runs — any threshold wide
+ * enough not to fire on a good week is also wide enough to miss a skipped Monday until the next
+ * one. `a_missed_monday_digest_is_noticed_on_monday` is that case.
+ *
+ * The other failure mode is the opposite: dispatching a second worker on top of a healthy one. A
+ * run in progress has not recorded itself yet, so "no run found" and "no run happened" are not the
+ * same statement, and the lease is what tells them apart.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decide, OVERDUE_MINUTES } from "../lib/schedule.ts";
+import {
+  BAKU_OFFSET_HOURS, bakuWeekday, evaluate, isSuccessful, occurrences, SCHEDULE, shouldDispatch,
+} from "../lib/schedule.ts";
 
-const NOW = new Date("2026-09-20T12:00:00Z");
 const NO_LOCKS: { holder: string; expires_at: string; expired: boolean }[] = [];
+const HELD = [{ holder: "github-actions/42.1", expires_at: "2026-09-21T12:00:00Z", expired: false }];
+const LAPSED = [{ holder: "github-actions/41.1", expires_at: "2026-09-20T01:00:00Z", expired: true }];
 
-function minutesAgo(n: number): Date {
-  return new Date(NOW.getTime() - n * 60_000);
+function run(task: string, iso: string, status = "ok") {
+  return { task, started_at: iso, status };
 }
 
-test("a run inside its window is left alone", () => {
-  for (const [task, threshold] of Object.entries(OVERDUE_MINUTES)) {
-    const d = decide({ task, now: NOW, lastRunAt: minutesAgo(threshold - 1), locks: NO_LOCKS });
-    assert.equal(d.act, "wait", task);
-    assert.equal(d.reason, "the scheduled run is on time");
+// 2026-09-21 is a Monday. 09:00 UTC = 13:00 Baku, so Monday's 08:30 digest is long past.
+const MONDAY_MIDDAY = new Date("2026-09-21T09:00:00Z");
+
+test("Asia/Baku really is UTC+4, all year", () => {
+  // The whole conversion rests on this. Checked against the IANA data rather than assumed.
+  for (const month of ["01", "04", "07", "10"]) {
+    const instant = new Date(`2026-${month}-15T12:00:00Z`);
+    const local = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Baku", hour: "2-digit", hour12: false,
+    }).format(instant);
+    assert.equal(Number.parseInt(local, 10), (12 + BAKU_OFFSET_HOURS) % 24,
+      `Asia/Baku is not UTC+${BAKU_OFFSET_HOURS} in month ${month}`);
   }
 });
 
-test("a run past its window is dispatched", () => {
-  for (const [task, threshold] of Object.entries(OVERDUE_MINUTES)) {
-    const d = decide({ task, now: NOW, lastRunAt: minutesAgo(threshold + 1), locks: NO_LOCKS });
-    assert.equal(d.act, "dispatch", task);
-  }
+test("a Baku weekday is the local one, not the UTC one", () => {
+  // 21:00 UTC on Sunday is already Monday in Baku.
+  assert.equal(bakuWeekday(new Date("2026-09-20T21:00:00Z")), 1);
+  assert.equal(bakuWeekday(new Date("2026-09-20T19:00:00Z")), 7);
 });
 
-test("the thresholds clear the real gaps in the schedule", () => {
-  // source-check runs 09:15, 13:15, 17:15 Baku: the overnight gap is 16 hours.
-  assert.ok(OVERDUE_MINUTES["source-check"] > 16 * 60, "must survive the overnight gap");
-  // ...but must not swallow a whole extra day, or a stopped scheduler goes unnoticed.
-  assert.ok(OVERDUE_MINUTES["source-check"] < 24 * 60, "must notice within a day");
-
-  // monitor runs 07:45 and 18:45 Baku: the overnight gap is 13 hours.
-  assert.ok(OVERDUE_MINUTES.monitor > 13 * 60);
-  assert.ok(OVERDUE_MINUTES.monitor < 24 * 60);
-
-  // weekly-digest runs once a week; anything under a week would fire every single day.
-  assert.ok(OVERDUE_MINUTES["weekly-digest"] > 7 * 24 * 60);
-  assert.ok(OVERDUE_MINUTES["weekly-digest"] < 9 * 24 * 60);
+test("occurrences land on the local times the schedule names", () => {
+  const found = occurrences(SCHEDULE["source-check"], new Date("2026-09-21T18:00:00Z"), 1);
+  const asBaku = found.map((o) => new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Baku", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(o.due));
+  for (const t of asBaku) assert.ok(["09:15", "13:15", "17:15"].includes(t), `unexpected ${t}`);
 });
 
-test("a held lease stops a dispatch even when the recorded run looks ancient", () => {
-  // This is the case that matters: a long run in progress has not recorded itself yet, so its
-  // task's last *recorded* run is the previous one and looks overdue.
-  const d = decide({
-    task: "source-check",
-    now: NOW,
-    lastRunAt: minutesAgo(60 * 24 * 7),
-    locks: [{ holder: "github-actions/42.1", expires_at: "2026-09-20T12:45:00Z", expired: false }],
+test("the weekly digest only ever falls on a Monday", () => {
+  const found = occurrences(SCHEDULE["weekly-digest"], new Date("2026-09-25T12:00:00Z"), 14);
+  assert.ok(found.length >= 2);
+  for (const o of found) assert.equal(bakuWeekday(o.due), 1, `${o.due.toISOString()} is not a Monday`);
+});
+
+// --------------------------------------------------------------- the reported defect
+
+test("a missed Monday digest is noticed on Monday, not the following week", () => {
+  const verdict = evaluate({
+    task: "weekly-digest",
+    now: MONDAY_MIDDAY,
+    // The last digest ran a week ago and worked. Elapsed time since it is well under a week.
+    runs: [run("weekly-digest", "2026-09-14T04:30:00Z")],
+    locks: NO_LOCKS,
   });
-  assert.equal(d.act, "wait");
-  assert.equal(d.reason, "a run holds the lease");
-  assert.equal(d.holder, "github-actions/42.1");
+  assert.equal(verdict.state, "missed");
+  assert.ok(shouldDispatch(verdict), "this Monday's digest must be dispatched today");
+});
+
+test("a digest that ran this Monday is left alone", () => {
+  const verdict = evaluate({
+    task: "weekly-digest",
+    now: MONDAY_MIDDAY,
+    runs: [run("weekly-digest", "2026-09-21T04:31:00Z")],   // 08:31 Baku, just after due
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "satisfied");
+  assert.equal(shouldDispatch(verdict), false);
+});
+
+test("a run from before the occurrence does not satisfy it", () => {
+  // 04:00 UTC is 08:00 Baku — half an hour before the digest was due.
+  const verdict = evaluate({
+    task: "weekly-digest",
+    now: MONDAY_MIDDAY,
+    runs: [run("weekly-digest", "2026-09-21T04:00:00Z")],
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "missed");
+});
+
+test("the digest is not chased before its grace period is up", () => {
+  // 05:00 UTC = 09:00 Baku, half an hour after due, inside the two-hour grace. The previous
+  // Monday ran, so today's occurrence is the only one in question.
+  const verdict = evaluate({
+    task: "weekly-digest",
+    now: new Date("2026-09-21T05:00:00Z"),
+    runs: [run("weekly-digest", "2026-09-14T04:31:00Z")],
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "satisfied", "the newest occurrence past grace is last Monday's");
+  assert.equal(shouldDispatch(verdict), false);
+});
+
+test("an older missed occurrence is still reported once it is past grace", () => {
+  // Nothing has run for a fortnight. The evaluator looks back, so this does not go unnoticed.
+  const verdict = evaluate({
+    task: "weekly-digest",
+    now: new Date("2026-09-21T05:00:00Z"),
+    runs: [],
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "missed");
+  assert.equal(verdict.occurrence.label, "Monday 08:30");
+});
+
+// ------------------------------------------------------------------ several a day
+
+test("each source check is judged on its own", () => {
+  // 13:00 UTC = 17:00 Baku: the 09:15 and 13:15 runs are due, 17:15 is not.
+  const now = new Date("2026-09-21T13:00:00Z");
+  const satisfied = evaluate({
+    task: "source-check", now,
+    runs: [run("source-check", "2026-09-21T09:20:00Z")],   // 13:20 Baku, just after the 13:15 run
+    locks: NO_LOCKS,
+  });
+  assert.equal(satisfied.state, "satisfied");
+
+  const missed = evaluate({
+    task: "source-check", now,
+    runs: [run("source-check", "2026-09-21T05:20:00Z")],   // only the 09:15 run happened
+    locks: NO_LOCKS,
+  });
+  assert.equal(missed.state, "missed");
+  assert.equal(missed.occurrence.label, "13:15");
+});
+
+test("the overnight gap is not mistaken for a missed run", () => {
+  // 04:00 UTC = 08:00 Baku. The last occurrence was 17:15 yesterday and it ran.
+  const verdict = evaluate({
+    task: "source-check",
+    now: new Date("2026-09-21T04:00:00Z"),
+    runs: [run("source-check", "2026-09-20T13:20:00Z")],
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "satisfied");
+});
+
+// ------------------------------------------------------- delayed, failed, duplicated
+
+test("a run in progress is late, not missing", () => {
+  const verdict = evaluate({
+    task: "weekly-digest", now: MONDAY_MIDDAY,
+    runs: [],                       // it has not recorded itself yet
+    locks: HELD,
+  });
+  assert.equal(verdict.state, "running");
+  assert.equal(shouldDispatch(verdict), false, "dispatching here is how you get two workers");
 });
 
 test("a lapsed lease does not stop a dispatch", () => {
-  // A crashed run leaves its lease behind. If an expired lease blocked the watchdog, one crash
-  // would stop the schedule permanently.
-  const d = decide({
-    task: "source-check",
-    now: NOW,
-    lastRunAt: minutesAgo(60 * 24),
-    locks: [{ holder: "github-actions/41.1", expires_at: "2026-09-19T10:00:00Z", expired: true }],
+  const verdict = evaluate({
+    task: "weekly-digest", now: MONDAY_MIDDAY, runs: [], locks: LAPSED,
   });
-  assert.equal(d.act, "dispatch");
+  assert.equal(verdict.state, "missed");
 });
 
-test("a task that has never run is dispatched rather than waited on forever", () => {
-  const d = decide({ task: "monitor", now: NOW, lastRunAt: null, locks: NO_LOCKS });
-  assert.equal(d.act, "dispatch");
-  assert.match(d.reason, /has ever been recorded/);
-  assert.equal(d.minutesSince, null);
+test("a run that failed counts as attempted, so the watchdog does not loop", () => {
+  const verdict = evaluate({
+    task: "weekly-digest", now: MONDAY_MIDDAY,
+    runs: [run("weekly-digest", "2026-09-21T04:31:00Z", "failed")],
+    locks: NO_LOCKS,
+  });
+  assert.equal(verdict.state, "satisfied");
+  assert.equal(shouldDispatch(verdict), false,
+    "a failure is the monitoring task's business; re-dispatching would loop");
+  assert.equal(isSuccessful("failed"), false, "but it is still not a success");
 });
 
-test("a last run in the future is treated as on time, not as a negative interval", () => {
-  // Clock skew between the runner and the database, or a restored backup, can do this.
-  const d = decide({
-    task: "monitor", now: NOW, lastRunAt: new Date("2026-09-21T00:00:00Z"), locks: NO_LOCKS,
+test("a second check after a dispatch does not dispatch again", () => {
+  // The dispatched run takes the lease before it records anything.
+  const first = evaluate({ task: "weekly-digest", now: MONDAY_MIDDAY, runs: [], locks: NO_LOCKS });
+  assert.equal(first.state, "missed");
+
+  const whileRunning = evaluate({
+    task: "weekly-digest", now: new Date(MONDAY_MIDDAY.getTime() + 60_000),
+    runs: [], locks: HELD,
   });
-  assert.equal(d.act, "wait");
-  assert.ok((d.minutesSince ?? 0) < 0);
+  assert.equal(whileRunning.state, "running");
+
+  const afterwards = evaluate({
+    task: "weekly-digest", now: new Date(MONDAY_MIDDAY.getTime() + 20 * 60_000),
+    runs: [run("weekly-digest", new Date(MONDAY_MIDDAY.getTime() + 60_000).toISOString())],
+    locks: NO_LOCKS,
+  });
+  assert.equal(afterwards.state, "satisfied");
 });
 
-test("repeated firings of the same cron produce one dispatch, not several", () => {
-  // Cron delivery is at-least-once everywhere. The first call dispatches; once the run takes its
-  // lease, every later call declines — which is what the endpoint sees on a retry.
-  const first = decide({
-    task: "monitor", now: NOW, lastRunAt: minutesAgo(60 * 20), locks: NO_LOCKS,
+test("another task's runs never satisfy this one", () => {
+  const verdict = evaluate({
+    task: "weekly-digest", now: MONDAY_MIDDAY,
+    runs: [run("source-check", "2026-09-21T05:20:00Z"), run("monitor", "2026-09-21T05:00:00Z")],
+    locks: NO_LOCKS,
   });
-  assert.equal(first.act, "dispatch");
+  assert.equal(verdict.state, "missed");
+});
 
-  const whileRunning = decide({
-    task: "monitor", now: new Date(NOW.getTime() + 30_000), lastRunAt: minutesAgo(60 * 20),
-    locks: [{ holder: "github-actions/99.1", expires_at: "2026-09-20T12:55:00Z", expired: false }],
+test("an unparseable timestamp is ignored rather than treated as a run", () => {
+  const verdict = evaluate({
+    task: "weekly-digest", now: MONDAY_MIDDAY,
+    runs: [run("weekly-digest", "not-a-date")],
+    locks: NO_LOCKS,
   });
-  assert.equal(whileRunning.act, "wait");
-
-  const afterItRecorded = decide({
-    task: "monitor", now: new Date(NOW.getTime() + 15 * 60_000), lastRunAt: NOW, locks: NO_LOCKS,
-  });
-  assert.equal(afterItRecorded.act, "wait");
+  assert.equal(verdict.state, "missed");
 });
 
 test("an unknown task is refused rather than dispatched", () => {
-  const d = decide({ task: "drop-tables", now: NOW, lastRunAt: null, locks: NO_LOCKS });
-  assert.equal(d.act, "unknown-task");
+  const verdict = evaluate({ task: "drop-tables", now: MONDAY_MIDDAY, runs: [], locks: NO_LOCKS });
+  assert.equal(verdict.state, "unknown-task");
+  assert.equal(shouldDispatch(verdict), false);
 });
 
-test("the tasks with thresholds are exactly the tasks the workflow runs", () => {
-  assert.deepEqual(
-    Object.keys(OVERDUE_MINUTES).sort(),
-    ["monitor", "source-check", "weekly-digest"],
-  );
+test("the scheduled tasks are exactly the ones the workflow runs", () => {
+  assert.deepEqual(Object.keys(SCHEDULE).sort(), ["monitor", "source-check", "weekly-digest"]);
+});
+
+test("every task has a grace period, and none of them swallows a whole cycle", () => {
+  for (const [name, s] of Object.entries(SCHEDULE)) {
+    assert.ok(s.graceMinutes > 0, `${name} has no grace period`);
+    // A grace longer than the gap to the next occurrence would let a miss go unnoticed for ever.
+    const gapMinutes = s.weekday ? 7 * 24 * 60 : Math.min(
+      ...s.times.map((t, i) => {
+        const next = s.times[(i + 1) % s.times.length];
+        const mins = (x: string) => Number(x.slice(0, 2)) * 60 + Number(x.slice(3));
+        return ((mins(next) - mins(t)) + 24 * 60) % (24 * 60) || 24 * 60;
+      }),
+    );
+    assert.ok(s.graceMinutes < gapMinutes,
+      `${name}: a ${s.graceMinutes}-minute grace is not shorter than its ${gapMinutes}-minute cycle`);
+  }
 });

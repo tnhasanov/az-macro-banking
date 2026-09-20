@@ -107,6 +107,12 @@ releases:
 
 # ------------------------------------------------------- freshness and monitoring
 monitoring:
+  # When the health check itself runs. 07:45 catches an overnight problem before the working day
+  # starts; 18:45 catches the day's. Listed here so that the timers, the workflow crons and the
+  # dashboard's watchdog all have one definition to be checked against, rather than three.
+  times: ["07:45", "18:45"]
+  # How long after a scheduled health check may pass before the watchdog treats it as missed.
+  grace_minutes: 90
   # A source that has not changed for longer than this is reported as stale. These are generous:
   # the CBA banking tables appear monthly, the stability report twice a year.
   stale_after_days:
