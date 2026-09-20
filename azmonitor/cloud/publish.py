@@ -510,6 +510,24 @@ def _confidential_strays(data_dir: Path) -> list[str]:
     return strays
 
 
+def cmd_check(args) -> int:
+    """Does the configured credential open the store? Nothing is written either way.
+
+    Separate from `status`, which reports what the store holds and tolerates a store it cannot
+    reach. This one exists to be a gate: it exits non-zero when the credential does not work, so a
+    workflow can stop before a run that would spend an hour and then fail to save.
+    """
+    try:
+        store = OS.store_from_env()
+        result = store.check()
+    except OS.StorageError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 1
+    result["ok"] = bool(result.get("reachable"))
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
 def cmd_status(args) -> int:
     paths = config.paths()
     result: dict[str, Any] = {"data_dir": str(paths.data_dir), "on_disk": OS.dataset_summary(paths.data_dir)}
@@ -569,6 +587,9 @@ def main(argv: list[str] | None = None) -> int:
                         "history from the first run")
     s.set_defaults(fn=cmd_seed)
     sub.add_parser("status", help="what the store and the read model hold").set_defaults(fn=cmd_status)
+    sub.add_parser(
+        "check", help="prove the Blob credential opens the store (writes nothing)",
+    ).set_defaults(fn=cmd_check)
 
     args = ap.parse_args(argv)
     setup_logging(config.paths().logs_dir)

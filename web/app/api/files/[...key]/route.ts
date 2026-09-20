@@ -71,8 +71,17 @@ export async function GET(
     return NextResponse.json({ error: "No such report file." }, { status: 404 });
   }
 
+  // Two credentials open a private store, and which one this deployment has depends on how the
+  // store was connected. Connecting it to a project gives the project OIDC: Vercel injects a
+  // short-lived, auto-rotating token and `BLOB_STORE_ID` naming the store, and the SDK pairs them
+  // without being asked. A read-write token is the static alternative, and the only one available
+  // to code running outside Vercel — the GitHub Actions worker uses it, this route need not.
+  //
+  // So the token is passed only when there is one. Passing `token: undefined` would resolve the
+  // same way, but being explicit keeps it visible that omitting it is what selects OIDC rather
+  // than an oversight.
   const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!blobToken) {
+  if (!blobToken && !process.env.BLOB_STORE_ID) {
     return NextResponse.json(
       { error: "This deployment has no blob storage configured." },
       { status: 503 },
@@ -82,7 +91,11 @@ export async function GET(
   const { get } = await import("@vercel/blob");
   let found;
   try {
-    found = await get(key, { access: "private", token: blobToken, useCache: false });
+    found = await get(key, {
+      access: "private",
+      useCache: false,
+      ...(blobToken ? { token: blobToken } : {}),
+    });
   } catch (error) {
     // The SDK's message can name the pathname; it never carries the token.
     const message = error instanceof Error ? error.name : "unknown";

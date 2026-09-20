@@ -127,6 +127,13 @@ jobs:
           assert p['external_upload'], f'{p[\"name\"]} may not upload; set AZMONITOR_PROFILE=neutral'
           "
 
+      - name: Prove the Blob credential before anything writes
+        run: |
+          # A wrong credential fails on the first call either way. What this catches is the run that
+          # gets far enough to matter first: restore the dataset, spend ten minutes refreshing
+          # sources and rendering, and only then discover it cannot save. One listing, no writes.
+          python -m azmonitor.cloud.publish check
+
       - name: What a seed would upload
         if: inputs.seed
         run: python -m azmonitor.cloud.publish seed --check

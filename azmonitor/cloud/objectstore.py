@@ -98,6 +98,16 @@ class ObjectStore:
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
+    def check(self) -> dict[str, Any]:
+        """Prove this store can be opened, writing nothing.
+
+        Called before a run that will write, because the failure worth catching is not a typo — a
+        bad credential fails on the first call either way — but the run that gets far enough to
+        matter first: restore a dataset, spend ten minutes refreshing sources and rendering, and
+        only then discover it cannot save.
+        """
+        raise NotImplementedError
+
     def url_for(self, key: str) -> str | None:
         """A URL the dashboard can proxy. None when the backend has no addressable URL.
 
@@ -193,8 +203,56 @@ class LocalObjectStore(ObjectStore):
         if p.exists():
             p.unlink()
 
+    def check(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        return {"backend": "local", "credential": "none (a local directory)",
+                "root": str(self.root), "reachable": True}
+
     def url_for(self, key):
         return None
+
+
+#: Every environment variable that can authenticate to a Blob store, in the order the SDK resolves
+#: them. Named here so the selector, the store and the tests all mean the same set.
+CREDENTIAL_VARS = ("BLOB_READ_WRITE_TOKEN", "VERCEL_OIDC_TOKEN", "BLOB_STORE_ID")
+
+
+def blob_credentials(token: str | None = None) -> tuple[str, dict[str, str]]:
+    """Which credential opens the store, and the environment that carries it to the helper.
+
+    A private store takes either of two, and which one is available is decided by where the code
+    runs rather than by preference:
+
+    * **OIDC** — ``VERCEL_OIDC_TOKEN`` with ``BLOB_STORE_ID``. Short-lived and rotated by Vercel,
+      and the better credential. It is issued to Vercel's own runtimes, and to the CLI on a linked
+      project; there is no way to obtain one on a GitHub Actions runner, so the worker cannot use
+      it. The dashboard, which runs on Vercel, can and does.
+    * **Read-write token** — ``BLOB_READ_WRITE_TOKEN``. Long-lived and static, and what Vercel
+      documents for code running outside Vercel, a CI job included. It is scoped to a single store,
+      which makes it the *narrower* credential here even though it is the static one: the
+      alternative for CI is a Vercel account token, which reaches the whole account.
+
+    Resolved in the SDK's own order so this never disagrees with the helper it calls. The value is
+    never logged, and only the name of the kind is returned alongside it.
+    """
+    read_write = (token or os.environ.get("BLOB_READ_WRITE_TOKEN") or "").strip()
+    if read_write:
+        return "read-write token", {"BLOB_READ_WRITE_TOKEN": read_write}
+
+    oidc = (os.environ.get("VERCEL_OIDC_TOKEN") or "").strip()
+    store_id = (os.environ.get("BLOB_STORE_ID") or "").strip()
+    if oidc and store_id:
+        return "oidc", {"VERCEL_OIDC_TOKEN": oidc, "BLOB_STORE_ID": store_id}
+    if oidc:
+        raise StorageError(
+            "VERCEL_OIDC_TOKEN is set but BLOB_STORE_ID is not; OIDC needs the store it names")
+    if store_id:
+        raise StorageError(
+            "BLOB_STORE_ID is set but VERCEL_OIDC_TOKEN is not. Outside Vercel there is no OIDC "
+            "token to pair it with; set BLOB_READ_WRITE_TOKEN instead")
+    raise StorageError(
+        "no Blob credentials: set BLOB_READ_WRITE_TOKEN (outside Vercel, including CI), or "
+        "VERCEL_OIDC_TOKEN with BLOB_STORE_ID (on Vercel)")
 
 
 class VercelBlobStore(ObjectStore):
@@ -222,9 +280,7 @@ class VercelBlobStore(ObjectStore):
     REFUSED = 4
 
     def __init__(self, token: str | None = None, prefix: str = "", *, helper: Path | None = None):
-        self.token = token or os.environ.get("BLOB_READ_WRITE_TOKEN")
-        if not self.token:
-            raise StorageError("BLOB_READ_WRITE_TOKEN is not set; Vercel Blob cannot be used")
+        self.credential, self._credential_env = blob_credentials(token)
         self.prefix = prefix.strip("/")
         self.helper = Path(helper) if helper else self.HELPER
         if not self.helper.exists():
@@ -236,7 +292,12 @@ class VercelBlobStore(ObjectStore):
 
     def _run(self, *argv: str, timeout: int = 900) -> tuple[int, dict[str, Any]]:
         """Call the helper. Returns its exit code and the JSON it printed, if any."""
-        env = {**os.environ, "BLOB_READ_WRITE_TOKEN": self.token}
+        # Only the credential this store resolved to is handed down, so a stale variable left in the
+        # environment cannot quietly authenticate a different way than the one reported.
+        env = {**os.environ, **self._credential_env}
+        for name in CREDENTIAL_VARS:
+            if name not in self._credential_env:
+                env.pop(name, None)
         try:
             proc = subprocess.run([self._node(), str(self.helper), *argv], capture_output=True,
                                   text=True, timeout=timeout, env=env)
@@ -317,9 +378,23 @@ class VercelBlobStore(ObjectStore):
     def delete(self, key: str) -> None:
         self._run("del", "--key", self._key(key), timeout=120)
 
+    def check(self):
+        """One listing, so the credential is proved against the real store before anything writes.
+
+        A listing is the cheapest call that still requires the credential to be valid for *this*
+        store: a wrong or revoked one is refused by the service, and an empty store answers with an
+        empty page rather than an error, so a first run is not mistaken for a failure.
+        """
+        _, payload = self._run("check", timeout=120)
+        return {"backend": "vercel-blob", "credential": self.credential,
+                "store_id": payload.get("store_id"), "prefix": self.prefix or None,
+                "reachable": bool(payload.get("reachable")),
+                "store_is_empty": not payload.get("objects_seen")
+                and not payload.get("store_has_more")}
+
     def url_for(self, key):
-        # A private blob has no URL anyone can use without the token, so there is nothing to hand
-        # out. Returning None is what keeps a caller from trying.
+        # A private blob has no URL anyone can use without a credential, so there is nothing to
+        # hand out. Returning None is what keeps a caller from trying.
         return None
 
 
@@ -332,11 +407,12 @@ def store_from_env() -> ObjectStore:
     local = os.environ.get("AZMONITOR_OBJECT_STORE_DIR")
     if local:
         return LocalObjectStore(local)
-    if os.environ.get("BLOB_READ_WRITE_TOKEN"):
+    if any(os.environ.get(name) for name in CREDENTIAL_VARS):
         return VercelBlobStore(prefix=os.environ.get("AZMONITOR_BLOB_PREFIX", ""))
     raise StorageError(
-        "no object store is configured: set AZMONITOR_OBJECT_STORE_DIR for a local directory or "
-        "BLOB_READ_WRITE_TOKEN for Vercel Blob")
+        "no object store is configured: set AZMONITOR_OBJECT_STORE_DIR for a local directory, or "
+        "a Vercel Blob credential — BLOB_READ_WRITE_TOKEN outside Vercel, or VERCEL_OIDC_TOKEN "
+        "with BLOB_STORE_ID on it")
 
 
 # ------------------------------------------------------------------- the dataset

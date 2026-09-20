@@ -204,3 +204,74 @@ test("the client matches the SDK's not-found the same way this test does", async
   assert.ok(!source.includes('name === "BlobNotFoundError"'),
     "the duck-typed check must not come back");
 });
+
+// --------------------------------------------------------------- the two credentials
+
+/**
+ * A private store takes either a read-write token or OIDC, and the choice is made by where the code
+ * runs, not by preference. The worker runs on a GitHub Actions runner, where no Vercel-issued OIDC
+ * token exists and a read-write token is the only option Vercel documents; the dashboard runs on
+ * Vercel, where a connected store supplies OIDC and no static token is present at all.
+ *
+ * `blob.mjs` therefore resolves both, in the SDK's own order. These tests put each on the wire,
+ * because the two are passed under different option names and a mistake in either is invisible
+ * until a real request is refused.
+ */
+const OIDC_TOKEN = "ey.conformance.oidc";
+
+test("a read-write token authenticates as a bearer credential", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  await list({ token: TOKEN, limit: 1 });
+
+  const req = seen.find((s) => s.method === "GET");
+  assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+});
+
+test("OIDC authenticates with the oidc token and the store it names", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  await list({ oidcToken: OIDC_TOKEN, storeId: STORE_ID, limit: 1 });
+
+  const req = seen.find((s) => s.method === "GET");
+  assert.equal(req.headers.authorization, `Bearer ${OIDC_TOKEN}`,
+    "the OIDC token is the credential; there is no read-write token to fall back to");
+  assert.ok(!JSON.stringify(req).includes(TOKEN),
+    "no read-write token may appear on an OIDC request");
+});
+
+test("the store id is accepted with or without its prefix", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  await list({ oidcToken: OIDC_TOKEN, storeId: `store_${STORE_ID}`, limit: 1 });
+  assert.ok(seen.find((s) => s.method === "GET"), "a prefixed store id is not rejected");
+});
+
+test("OIDC without a store id is refused rather than guessed", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  await assert.rejects(
+    () => list({ oidcToken: OIDC_TOKEN, limit: 1 }),
+    /storeId/,
+    "an OIDC token names no store by itself, and the SDK will not invent one",
+  );
+});
+
+test("both credentials reach the private download too", async () => {
+  install();
+  const { put, get } = await import("@vercel/blob");
+  await put("reports/cred.pdf", Buffer.alloc(32), { ...PUT_OPTIONS(32), contentType: "application/pdf" });
+
+  for (const [label, creds] of [
+    ["read-write", { token: TOKEN }],
+    ["oidc", { oidcToken: OIDC_TOKEN, storeId: STORE_ID }],
+  ]) {
+    seen = [];
+    const found = await get("reports/cred.pdf", { access: "private", ...creds, useCache: false });
+    assert.ok(found?.stream, `${label} could not read a private blob`);
+    await new Response(found.stream).arrayBuffer();
+    const download = seen.find((s) => s.method === "DOWNLOAD");
+    assert.ok(String(download.headers.authorization).startsWith("Bearer "),
+      `${label}: a private download is refused without a credential`);
+  }
+});

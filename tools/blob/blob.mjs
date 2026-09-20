@@ -15,8 +15,9 @@
  * detour — without it this would be a slower way to make the same single request.
  *
  * Every object is written with `access: 'private'`. A private blob has no publicly readable URL:
- * reads carry the token in an Authorization header, and the token stays in this process — it is
- * never placed in a URL, never printed, and never returned to the caller.
+ * reads carry the credential in an Authorization header, and it stays in this process — never
+ * placed in a URL, never printed, and never returned to the caller. See `credentials()` for which
+ * credential that is and why the answer depends on where this runs.
  *
  * Payloads move as files rather than through stdout, because a pipe is the wrong shape for
  * hundreds of megabytes and stdout is reserved for the one JSON line each command returns.
@@ -26,6 +27,9 @@
  *   3  the object is not there (a fact, not a failure — `get` and `head` both use it)
  *   4  refused: the object exists and this call may not overwrite it
  *   1  anything else
+ *
+ * `check` is the one command that writes nothing anywhere: it proves the credential opens the
+ * store, so a run that is going to fail on authentication fails before it spends an hour.
  */
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
@@ -49,12 +53,46 @@ const REFUSED = 4;
  */
 const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
 
-function token() {
-  const t = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!t) {
-    fail("BLOB_READ_WRITE_TOKEN is not set; private Blob cannot be used", 1);
+/**
+ * What this process authenticates to the store with.
+ *
+ * A private store takes either credential, and which one is available is decided by where the code
+ * runs, not by preference:
+ *
+ * * **OIDC** — `VERCEL_OIDC_TOKEN` plus `BLOB_STORE_ID`. Short-lived and rotated by Vercel, and the
+ *   better credential by some distance. It is issued to Vercel's own runtimes and to the CLI on a
+ *   linked project; `@vercel/oidc` reads it from the environment or refreshes it from the CLI's
+ *   stored login. Neither exists on a GitHub Actions runner, so the worker cannot use it.
+ * * **Read-write token** — `BLOB_READ_WRITE_TOKEN`. Long-lived and static, and what Vercel's own
+ *   documentation points to for code running outside Vercel, such as a CI job. It is scoped to one
+ *   store, which is why it is the narrower credential here despite being the static one: the
+ *   alternative for CI is a Vercel account token, which can reach the whole account.
+ *
+ * Resolved in the same order as the SDK's own resolver, so this never disagrees with it. Returned
+ * as options to spread into a call rather than as a bare string, because the two credentials are
+ * passed under different names.
+ */
+function credentials() {
+  const rw = process.env.BLOB_READ_WRITE_TOKEN?.trim();
+  if (rw) return { token: rw };
+
+  const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim();
+  const storeId = process.env.BLOB_STORE_ID?.trim();
+  if (oidcToken && storeId) return { oidcToken, storeId };
+  if (oidcToken) {
+    fail("VERCEL_OIDC_TOKEN is set but BLOB_STORE_ID is not; OIDC needs the store it names", 1);
   }
-  return t;
+  if (storeId) {
+    fail("BLOB_STORE_ID is set but VERCEL_OIDC_TOKEN is not. Outside Vercel there is no OIDC "
+         + "token to pair it with; set BLOB_READ_WRITE_TOKEN instead", 1);
+  }
+  fail("no Blob credentials: set BLOB_READ_WRITE_TOKEN (outside Vercel, including CI), or "
+       + "VERCEL_OIDC_TOKEN with BLOB_STORE_ID (on Vercel)", 1);
+}
+
+/** Which credential is in use, for a message. Never the credential itself. */
+function credentialKind(creds) {
+  return creds.token ? "read-write token" : "oidc";
 }
 
 function emit(payload) {
@@ -91,7 +129,7 @@ function args(argv) {
  */
 async function exists(key) {
   try {
-    return await head(key, { token: token() });
+    return await head(key, { ...credentials() });
   } catch (error) {
     if (error instanceof BlobNotFoundError) return null;
     throw error;
@@ -114,7 +152,7 @@ async function cmdPut(o) {
   const multipart = size > MULTIPART_THRESHOLD;
   const result = await put(o.key, createReadStream(o.file), {
     access: ACCESS,
-    token: token(),
+    ...credentials(),
     contentType: o.contentType || "application/octet-stream",
     addRandomSuffix: false,
     allowOverwrite: Boolean(o.overwrite),
@@ -128,7 +166,7 @@ async function cmdPut(o) {
 
 async function cmdGet(o) {
   if (!o.key || !o.out) fail("get needs --key and --out");
-  const found = await get(o.key, { access: ACCESS, token: token(), useCache: false });
+  const found = await get(o.key, { access: ACCESS, ...credentials(), useCache: false });
   if (!found || !found.stream) process.exit(NOT_FOUND);
 
   // Written to a temporary name and moved into place, so a transfer that dies part way through
@@ -165,7 +203,7 @@ async function cmdList(o) {
   let cursor;
   do {
     const page = await list({
-      token: token(), prefix: o.prefix || undefined, limit: 1000, cursor,
+      ...credentials(), prefix: o.prefix || undefined, limit: 1000, cursor,
     });
     for (const b of page.blobs) {
       out.push({ key: b.pathname, size: b.size, uploaded_at: b.uploadedAt });
@@ -177,11 +215,39 @@ async function cmdList(o) {
 
 async function cmdDel(o) {
   if (!o.key) fail("del needs --key");
-  await del(o.key, { token: token() });
+  await del(o.key, { ...credentials() });
   emit({ deleted: o.key });
 }
 
-const COMMANDS = { put: cmdPut, get: cmdGet, head: cmdHead, list: cmdList, del: cmdDel };
+/**
+ * Does the configured credential actually open this store? Reads one object listing and writes
+ * nothing.
+ *
+ * It exists so the credential can be proved before a run that writes. The failure it is aimed at is
+ * not a typo — a wrong token fails loudly on the first call either way — but the run that gets far
+ * enough to matter before it fails: the worker restores a dataset, spends ten minutes refreshing
+ * sources and rendering, and only then discovers it cannot save. A list is the cheapest call that
+ * still requires the credential to be valid for this store.
+ *
+ * The store id is reported only when OIDC names it in the environment. Deriving it from a
+ * read-write token means splitting the token on an undocumented internal format, and the SDK does
+ * not export its parser; that is exactly the guesswork this helper exists to avoid.
+ */
+async function cmdCheck() {
+  const creds = credentials();
+  const page = await list({ ...creds, limit: 1 });
+  emit({
+    credential: credentialKind(creds),
+    store_id: creds.storeId ?? null,
+    reachable: true,
+    objects_seen: page.blobs.length,
+    store_has_more: Boolean(page.hasMore),
+  });
+}
+
+const COMMANDS = {
+  put: cmdPut, get: cmdGet, head: cmdHead, list: cmdList, del: cmdDel, check: cmdCheck,
+};
 
 const [command, ...rest] = process.argv.slice(2);
 const run = COMMANDS[command];

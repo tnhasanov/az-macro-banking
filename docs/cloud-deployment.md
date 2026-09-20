@@ -36,16 +36,60 @@ rather than accumulated, so it does not grow without bound.
 
 ## 2. Vercel Blob — private
 
-Create a Blob store in the Vercel project and copy its `BLOB_READ_WRITE_TOKEN`.
-
 **Everything is written with `access: 'private'`.** A private blob has no publicly readable URL at
-all: reads carry the token in an Authorization header. That is why the dashboard streams report
-files through its own authenticated route rather than redirecting to storage — a URL copied out of
-the network tab is worth nothing to anyone who is not signed in.
+all: reads carry the credential in an Authorization header. That is why the dashboard streams
+report files through its own authenticated route rather than redirecting to storage — a URL copied
+out of the network tab is worth nothing to anyone who is not signed in.
 
-The token is read-write and is the only credential that can reach the dataset. It belongs in GitHub
-Actions secrets and Vercel environment variables, nowhere else — in particular never in a URL,
-where it would end up in a log.
+### Which credential, and where
+
+A private store takes either of two, and which one is available is decided by *where the code runs*
+rather than by preference.
+
+| | credential | lifetime | scope | who uses it |
+|---|---|---|---|---|
+| On Vercel | `VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID` | minutes, rotated by Vercel | the project | the dashboard |
+| Anywhere else | `BLOB_READ_WRITE_TOKEN` | until revoked | one store | the GitHub Actions worker |
+
+Connecting a store to a Vercel project gives that project OIDC: Vercel injects a short-lived,
+auto-rotating token and `BLOB_STORE_ID` naming the store, and the SDK pairs them without being
+asked. No static token is involved, which is the better arrangement and the one the dashboard uses.
+
+**The worker cannot use it.** A Vercel-issued OIDC token is issued to Vercel's own runtimes, and to
+the Vercel CLI on a linked project where it is refreshed from a stored login. There is no third way
+to obtain one, so a GitHub Actions runner has none — which is why Vercel's own documentation points
+to the read-write token for code running outside Vercel, a CI job included.
+
+It is worth being clear about the trade, because "static" sounds worse than it is here. The
+alternative for CI would be a **Vercel account token**, used to mint short-lived credentials on each
+run. That does give a shorter-lived credential at the point of use, but the secret sitting in CI is
+then one that can deploy, read every environment variable and delete projects. The read-write token
+reaches exactly one Blob store and nothing else. Narrow and static beats broad and short-lived for
+this worker.
+
+Either way the credential belongs in GitHub Actions secrets and Vercel environment variables and
+nowhere else — in particular never in a URL, where it would end up in a log.
+
+### Getting a read-write token for a store that is already connected with OIDC
+
+A store connected to a project with OIDC shows `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` in the
+project's environment variables and **no** `BLOB_READ_WRITE_TOKEN`, because nothing on Vercel needs
+one. The token is added to a project's environment when the store is connected with the read-write
+token opted in, for the environments you select; connect the store to the project again from the
+store's **Projects** tab and include it.
+
+Do not create a second store to get a token: a new store is a different store, and the dataset and
+the report archive live in this one.
+
+### Proving it before anything writes
+
+```bash
+python -m azmonitor.cloud.publish check
+```
+
+One listing, no writes. It reports which credential resolved and whether it opens the store, and
+exits non-zero when it does not. Both workflows run it before taking the lease, so a run cannot
+spend an hour refreshing and rendering only to fail at the point of saving.
 
 ## 3. The engine, on GitHub Actions
 
@@ -54,7 +98,7 @@ Set these as **repository secrets** (Settings → Secrets and variables → Acti
 | Secret | What it is | Needed for |
 |---|---|---|
 | `AZMONITOR_DATABASE_URL` | Neon pooled connection string | the read model and the run lease |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token | the dataset and the report archive |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob read-write token | the dataset and the report archive |
 | `AZMONITOR_ARCHIVE_BASE_URL` | public base of the dashboard | links in emails |
 | `AZMONITOR_OWNER_EMAIL` | the one authorised test recipient | delivery routing |
 | `AZMONITOR_GRAPH_TENANT_ID` | Entra tenant | Microsoft Graph email |
@@ -97,8 +141,10 @@ since `main` holds no engine — and runs that branch's code with repository sec
 a dry run, shares the scheduled workflow's concurrency group so the two can never overlap, and
 refuses to start at all if delivery has been switched on.
 
-**This is the one thing that needs you before anything else can proceed**, because it is a commit to
-the default branch and I do not push there. It is a single new file and touches nothing else.
+It is on the default branch now, with the repository owner's explicit approval, as a single file
+that touches nothing else. Dispatching it offers a branch to run from: choose
+`claude/vercel-deployment`, so the run uses that branch's copy of the workflow as well as its
+engine.
 
 Delete it once `scheduled.yml` is merged and running. It is scaffolding, not architecture.
 
@@ -134,13 +180,18 @@ const { webcrypto } = require("crypto"); globalThis.crypto = webcrypto;
 | `AZMONITOR_DATABASE_URL` | Neon pooled string | read-only use; the dashboard never writes |
 | `AZMONITOR_SESSION_SECRET` | `openssl rand -base64 48` | at least 32 characters, or the app refuses to serve |
 | `AZMONITOR_DASHBOARD_PASSPHRASE_HASH` | the `pbkdf2$…` digest above | not the passphrase |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token | to stream report files out of private storage |
+| `BLOB_READ_WRITE_TOKEN` | **omit it** on Vercel | the store is connected to the project, so the deployment authenticates with OIDC; set it only if the store is not connected |
 | `CRON_SECRET` | `openssl rand -hex 32` | Vercel sends this to the cron route |
 | `AZMONITOR_OWNER_EMAIL` | your address | shown as the signed-in identity |
 | `AZMONITOR_CRON_ENABLED` | **unset** | leave unset until you authorise scheduled dispatch |
 | `GITHUB_DISPATCH_TOKEN` | fine-grained PAT, *Actions: write* on this repo only | only once dispatch is enabled |
 | `GITHUB_REPOSITORY` | `owner/repo` | |
 | `GITHUB_WORKFLOW_REF` | branch to dispatch, default `main` | |
+
+`BLOB_STORE_ID` is not in the table because you do not set it: connecting the store to the project
+is what puts it there, alongside the OIDC token the dashboard authenticates with. If it is absent
+*and* no read-write token is set, the download route answers 503 rather than serving a file it
+cannot authenticate for.
 
 **On a preview deployment, set none of the last four.** With `AZMONITOR_CRON_ENABLED` unset the
 watchdog reports what it would have done and dispatches nothing.
@@ -173,6 +224,7 @@ From the machine that holds the validated dataset, with `BLOB_READ_WRITE_TOKEN` 
 
 ```bash
 export AZMONITOR_PROFILE=neutral
+python -m azmonitor.cloud.publish check             # proves the credential; writes nothing
 python -m azmonitor.cloud.publish seed --check      # verifies; uploads nothing
 python -m azmonitor.cloud.publish seed              # the dataset only
 ```

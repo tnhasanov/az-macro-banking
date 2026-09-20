@@ -130,6 +130,14 @@ jobs:
       - name: Configuration and timers agree with the schedule
         run: python -m azmonitor.cli schedule check
 
+      - name: Prove the Blob credential before anything writes
+        run: |
+          # A wrong or expired credential fails on the first call either way. What this catches is
+          # the run that gets far enough to matter first: restore the dataset, spend ten minutes
+          # refreshing sources and rendering, and only then discover it cannot save. It reads one
+          # listing and writes nothing.
+          python -m azmonitor.cloud.publish check
+
       - name: Take the run lease
         id: lease
         run: |

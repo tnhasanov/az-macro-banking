@@ -152,6 +152,102 @@ def test_the_store_is_chosen_by_what_is_configured(tmp_path, monkeypatch):
         OS.store_from_env()
 
 
+# ------------------------------------------------------------- the blob credential
+
+# A private store takes either of two credentials, and which one is available is decided by where
+# the code runs rather than by preference. OIDC — a short-lived token Vercel issues and rotates,
+# paired with the store id — is the better one, and is what a deployment on Vercel gets when a
+# store is connected to it. It cannot be had on a GitHub Actions runner: Vercel issues those tokens
+# to its own runtimes and to the CLI on a linked project, and there is no third way to obtain one.
+# So the worker uses a read-write token, which is what Vercel documents for code running outside
+# Vercel, and which is scoped to one store rather than to an account.
+#
+# These pin the resolution order, because the engine and the Node helper it calls must agree: a
+# disagreement is a run that authenticates one way and reports the other.
+
+
+@pytest.fixture
+def _no_blob_credentials(monkeypatch):
+    for name in OS.CREDENTIAL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("AZMONITOR_OBJECT_STORE_DIR", raising=False)
+
+
+def test_a_read_write_token_is_the_credential_outside_vercel(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    kind, env = OS.blob_credentials()
+    assert kind == "read-write token"
+    assert env == {"BLOB_READ_WRITE_TOKEN": "vercel_blob_rw_storeabc_secret"}
+
+
+def test_oidc_is_taken_when_there_is_no_static_token(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_abc")
+    kind, env = OS.blob_credentials()
+    assert kind == "oidc"
+    assert env == {"VERCEL_OIDC_TOKEN": "ey.oidc", "BLOB_STORE_ID": "store_abc"}
+
+
+def test_a_read_write_token_wins_when_both_are_present(_no_blob_credentials, monkeypatch):
+    """The SDK resolves in this order, so resolving differently here would misreport which
+    credential a run actually used."""
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_abc")
+    assert OS.blob_credentials()[0] == "read-write token"
+
+
+def test_half_an_oidc_credential_is_refused_with_the_reason(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
+    with pytest.raises(OS.StorageError, match="BLOB_STORE_ID is not"):
+        OS.blob_credentials()
+
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_abc")
+    with pytest.raises(OS.StorageError, match="no OIDC token to pair it with"):
+        OS.blob_credentials()
+
+
+def test_an_empty_variable_counts_as_absent(_no_blob_credentials, monkeypatch):
+    """A secret that is configured but unset comes through as an empty string, and an empty bearer
+    would be sent as a credential and refused a long way from here."""
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "   ")
+    with pytest.raises(OS.StorageError, match="no Blob credentials"):
+        OS.blob_credentials()
+
+
+def test_only_the_resolved_credential_is_handed_to_the_helper(_no_blob_credentials, monkeypatch,
+                                                              tmp_path):
+    """A stale variable left in the environment must not quietly authenticate a different way than
+    the one the run reports."""
+    helper = tmp_path / "blob.mjs"
+    helper.write_text("// not run by this test")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.stale")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_stale")
+
+    store = OS.VercelBlobStore(helper=helper)
+    assert store.credential == "read-write token"
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        raise AssertionError("stop here; the environment is what this test is about")
+
+    monkeypatch.setattr(OS.subprocess, "run", fake_run)
+    with pytest.raises(AssertionError):
+        store._run("check")
+    assert seen["BLOB_READ_WRITE_TOKEN"] == "vercel_blob_rw_storeabc_secret"
+    assert "VERCEL_OIDC_TOKEN" not in seen and "BLOB_STORE_ID" not in seen
+
+
+def test_either_credential_selects_the_blob_store(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_abc")
+    assert isinstance(OS.store_from_env(), OS.VercelBlobStore)
+
+
 # ---------------------------------------------------------------------- the lease
 
 def test_two_workers_cannot_hold_the_same_lease():
