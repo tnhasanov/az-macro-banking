@@ -63,6 +63,14 @@ jobs:
       AZMONITOR_RESTORE_CMD: python -m azmonitor.cloud.publish restore
       AZMONITOR_SAVE_CMD: python -m azmonitor.cloud.publish save
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      # Used only to mint a short-lived Blob credential when no read-write token exists. Pinned,
+      # so a new CLI release cannot change how a run authenticates without a commit saying so.
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_CLI_VERSION: "59.23.2"
+      # Bumped whenever this file changes in a way a run depends on. See the revision check below.
+      WORKFLOW_REVISION: "1"
       AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
       AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
       AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
@@ -71,6 +79,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+
+      - name: The workflow that ran is the one this branch expects
+        # This has already gone wrong once, silently and for the length of a whole run.
+        #
+        # `workflow_dispatch` runs the workflow file from the ref chosen in the dropdown, while the
+        # engine comes from the `ref` input. Those are usually different: the file is registered on
+        # the default branch, the code lives on a feature branch. So dispatching with an older copy
+        # of this file on the default branch runs an older workflow against newer code, and the
+        # only symptom was a run that finished green having skipped the steps that authenticate.
+        #
+        # Comparing the revision the running file declares against the one the checked-out branch
+        # declares turns that into a failure in two seconds, naming the fix.
+        run: |
+          want=$(grep -m1 -E '^ *WORKFLOW_REVISION:' .github/workflows/manual-run.yml | tr -dc '0-9')
+          if [ -z "$want" ]; then
+            echo "::error::${{ inputs.ref }} has no WORKFLOW_REVISION in .github/workflows/manual-run.yml"
+            exit 1
+          fi
+          if [ "$want" != "$WORKFLOW_REVISION" ]; then
+            echo "::error::this run used revision $WORKFLOW_REVISION of manual-run.yml, but ${{ inputs.ref }} has revision $want. Re-dispatch with 'Use workflow from' set to ${{ inputs.ref }}, or update the copy on the default branch."
+            exit 1
+          fi
+          echo "manual-run.yml revision $WORKFLOW_REVISION matches ${{ inputs.ref }}"
 
       - uses: actions/setup-python@v5
         with:
@@ -126,6 +157,54 @@ jobs:
           print(f'profile: {p[\"name\"]}, external upload permitted: {p[\"external_upload\"]}')
           assert p['external_upload'], f'{p[\"name\"]} may not upload; set AZMONITOR_PROFILE=neutral'
           "
+
+      - name: Mint a short-lived Blob credential
+        # Only when no read-write token is configured. On a store connected to a Vercel project
+        # that is the normal case rather than a misconfiguration: Vercel keeps the read-write token
+        # as a sensitive variable, and a sensitive variable is write-only by design — no reveal in
+        # the dashboard, no API that returns it — so it cannot be copied into a GitHub secret at
+        # all. What can be had is the other credential. `vercel env pull` writes a fresh
+        # VERCEL_OIDC_TOKEN, good for about twelve hours, beside the BLOB_STORE_ID it belongs to.
+        #
+        # The pulled file holds every non-sensitive variable in that environment, so it is read and
+        # deleted inside this step: nothing else from it travels on, and the token is masked before
+        # it can reach a log.
+        if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          pulled="$RUNNER_TEMP/.env.pulled"
+          log="$RUNNER_TEMP/vercel-pull.log"
+          trap 'rm -f "$pulled" "$log"' EXIT
+
+          # Preview first, because that is the environment this deployment lives in. Development is
+          # tried second because it is what Vercel's own local-development flow pulls, and a store
+          # may be connected there instead.
+          for target in preview development; do
+            if npx --yes "vercel@$VERCEL_CLI_VERSION" env pull "$pulled" \
+                 --environment="$target" --token="$VERCEL_TOKEN" --yes >"$log" 2>&1; then
+              # The extractor says for itself which variable was missing, if one was.
+              if node tools/blob/oidc-from-env-file.mjs "$pulled"; then
+                echo "credential minted from the $target environment"
+                exit 0
+              fi
+            else
+              # `env pull` reports the names of variables, never their values, so the log is safe
+              # to show — and the first run of this needs a reason more than it needs quiet.
+              echo "pulling the $target environment failed:"
+              tail -n 20 "$log" || true
+            fi
+            rm -f "$pulled"
+          done
+          echo "::error::could not mint a Blob credential. Check that the Blob store is connected" \
+               "to this project, and that VERCEL_TOKEN is scoped to it and has not expired."
+          exit 1
+
+      - name: Prove the Blob credential before anything writes
+        run: |
+          # A wrong credential fails on the first call either way. What this catches is the run that
+          # gets far enough to matter first: restore the dataset, spend ten minutes refreshing
+          # sources and rendering, and only then discover it cannot save. One listing, no writes.
+          python -m azmonitor.cloud.publish check
 
       - name: What a seed would upload
         if: inputs.seed
