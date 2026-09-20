@@ -408,20 +408,22 @@ def cmd_seed(args) -> int:
     saved = OS.save_dataset(paths.data_dir, store)
     result["uploaded"] = saved
 
-    stored = store.stat(saved["key"])
-    result["verified"] = {
-        "key": saved["key"],
-        "bytes_expected": saved["bytes"],
-        "bytes_in_store": (stored or {}).get("size"),
-        "sha256": saved["sha256"],
-    }
-    if not stored:
-        return _out({**result, "seeded": False,
-                     "error": "the dataset was uploaded but the store does not list it"}, 1)
-    if stored.get("size") not in (None, saved["bytes"]):
-        return _out({**result, "seeded": False,
-                     "error": f"the store holds {stored['size']} bytes where {saved['bytes']} were "
-                              "sent; the upload did not complete"}, 1)
+    # Read back what the store now holds, rather than trusting the upload call. The dataset is two
+    # objects, and both have to be there: a dataset missing either half is not a smaller dataset.
+    verified = []
+    for name in ("mutable", "static"):
+        piece = saved[name]
+        stored = store.stat(piece["key"])
+        verified.append({"part": name, "key": piece["key"], "bytes_expected": piece["bytes"],
+                         "bytes_in_store": (stored or {}).get("size"), "sha256": piece["sha256"]})
+        if not stored:
+            return _out({**result, "seeded": False, "verified": verified,
+                         "error": f"{piece['key']} was uploaded but the store does not list it"}, 1)
+        if stored.get("size") not in (None, piece["bytes"]):
+            return _out({**result, "seeded": False, "verified": verified,
+                         "error": f"the store holds {stored['size']} bytes of {piece['key']} where "
+                                  f"{piece['bytes']} were sent; the upload did not complete"}, 1)
+    result["verified"] = verified
 
     result["seeded"] = True
 

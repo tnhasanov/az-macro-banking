@@ -292,9 +292,12 @@ def test_seeding_an_empty_store_uploads_and_verifies_the_dataset(monkeypatch, tm
     code, result = _seed(monkeypatch, tmp_path, tmp_path / "bucket", data, tmp_path / "outputs")
     assert code == 0
     assert result["seeded"] is True
-    # Verified by reading back what the store now holds, not by trusting the upload call.
-    assert result["verified"]["bytes_in_store"] == result["verified"]["bytes_expected"]
-    assert len(result["verified"]["sha256"]) == 64
+    # Verified by reading back what the store now holds, not by trusting the upload call. Both
+    # halves are checked: a dataset missing either one is not a smaller dataset, it is broken.
+    assert {v["part"] for v in result["verified"]} == {"mutable", "static"}
+    for piece in result["verified"]:
+        assert piece["bytes_in_store"] == piece["bytes_expected"], piece["part"]
+        assert len(piece["sha256"]) == 64
 
 
 def test_seeding_a_store_that_already_holds_a_dataset_is_refused(monkeypatch, tmp_path):
@@ -383,3 +386,125 @@ def test_two_directories_claiming_one_version_publish_once(tmp_path):
     # And nothing was uploaded that the catalogue does not account for.
     stored = {b["key"] for b in store.list("reports/") if b["key"].endswith(".pdf")}
     assert stored == {f["key"] for f in catalogue[0]["files"]}
+
+
+# -------------------------------------------------- shipping only what actually changed
+
+def test_an_unchanged_raw_archive_is_not_uploaded_twice(tmp_path):
+    """The measured reason this exists: 5.9 MB changes every run, 254 MB does not.
+
+    A source check that finds nothing used to ship the whole 260 MB back up for no reason. Now it
+    ships the databases and state, and the pointer goes on naming the raw object already in the
+    store.
+    """
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+
+    first = OS.save_dataset(data, store, stamp="20260920T000000Z")
+    assert first["static_reused"] is False
+
+    # A run that changed the database but downloaded nothing new.
+    (data / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"changed" * 600)
+    second = OS.save_dataset(data, store, stamp="20260920T010000Z")
+
+    assert second["static_reused"] is True
+    assert second["static"]["key"] == first["static"]["key"], "the pointer keeps the same raw object"
+    assert second["mutable"]["key"] != first["mutable"]["key"], "the changed half is new"
+    assert second["uploaded_bytes"] < second["bytes"], "less was sent than the dataset weighs"
+
+
+def test_a_new_source_document_does_trigger_a_raw_upload(tmp_path):
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+    first = OS.save_dataset(data, store, stamp="20260920T000000Z")
+
+    (data / "raw" / "ssc_prices.pdf").write_bytes(b"%PDF-1.7\n" + b"new" * 400)
+    second = OS.save_dataset(data, store, stamp="20260920T010000Z")
+
+    assert second["static_reused"] is False
+    assert second["static"]["key"] != first["static"]["key"]
+
+
+def test_a_reused_archive_still_round_trips_and_is_still_verified(tmp_path):
+    """A raw object can be named by a pointer for weeks. Every restore checks it, not just the
+    run that wrote it."""
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+    OS.save_dataset(data, store, stamp="20260920T000000Z")
+    (data / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"later" * 700)
+    pointer = OS.save_dataset(data, store, stamp="20260920T010000Z")
+    assert pointer["static_reused"] is True
+
+    fresh = tmp_path / "fresh"
+    result = OS.restore_dataset(fresh, store)
+    assert result["restored"] is True
+    assert result["objects"] == 2
+    assert (fresh / "raw" / "cba_loans.xlsx").read_bytes() == (data / "raw" / "cba_loans.xlsx").read_bytes()
+    assert (fresh / "monitor.sqlite").read_bytes() == (data / "monitor.sqlite").read_bytes()
+
+    # Corrupt the reused half and the next restore must refuse it.
+    store.put(pointer["static"]["key"], b"corrupted", overwrite=True)
+    with pytest.raises(OS.StorageError, match="does not match its recorded digest"):
+        OS.restore_dataset(tmp_path / "fresh2", store)
+
+
+def test_a_restored_dataset_fingerprints_the_same_as_the_one_that_was_saved(tmp_path):
+    """The whole scheme rests on this: a fresh worker must reach the same answer about whether the
+    raw archive changed, having only just unpacked it."""
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+    saved = OS.save_dataset(data, store, stamp="20260920T000000Z")
+
+    fresh = tmp_path / "fresh"
+    OS.restore_dataset(fresh, store)
+    after = OS._tree_fingerprint([fresh / p for p in OS.STATIC_PARTS], fresh)
+    assert after == saved["static"]["fingerprint"], (
+        "tarfile must preserve mtime through the round trip, or every run would re-upload 254 MB")
+
+    # And a worker that restored then saved again reuses rather than re-uploading.
+    again = OS.save_dataset(fresh, store, stamp="20260920T020000Z")
+    assert again["static_reused"] is True
+
+
+def test_retention_never_removes_an_object_a_pointer_still_names(tmp_path):
+    """A reused raw archive looks old. Deleting it would break every restore afterwards."""
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+    first = OS.save_dataset(data, store, stamp="20260920T000000Z")
+    for hour in range(1, 10):
+        (data / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + bytes([hour]) * 900)
+        OS.save_dataset(data, store, stamp=f"202609{20:02d}T{hour:02d}0000Z")
+
+    plan = OS.prune_datasets(store, keep=3)
+    assert first["static"]["key"] in plan["in_use"]
+    assert first["static"]["key"] not in plan["would_remove"]
+    current = json.loads(store.get(OS.POINTER_KEY))
+    assert current["mutable"]["key"] not in plan["would_remove"]
+
+
+def test_a_pointer_written_before_the_split_still_restores(tmp_path):
+    """A store seeded by an earlier version names one object. It must keep working."""
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")
+
+    # Build the old single-tarball shape by hand.
+    import tarfile, tempfile, hashlib
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "d.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            for part in OS.DATASET_PARTS:
+                if (data / part).exists():
+                    tf.add(data / part, arcname=part)
+        blob = archive.read_bytes()
+    store.put("dataset/monitor-legacy.tar.gz", blob, content_type="application/gzip")
+    store.put(OS.POINTER_KEY, json.dumps({
+        "key": "dataset/monitor-legacy.tar.gz",
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "bytes": len(blob), "files": 5, "saved_at": "2026-09-01T00:00:00Z",
+    }).encode(), content_type="application/json", overwrite=True)
+
+    fresh = tmp_path / "fresh"
+    result = OS.restore_dataset(fresh, store)
+    assert result["restored"] is True
+    assert result["objects"] == 1
+    assert (fresh / "monitor.sqlite").exists() and (fresh / "raw" / "cba_loans.xlsx").exists()

@@ -60,7 +60,9 @@ def test_the_dataset_round_trips_through_the_store(tmp_path):
 
     store = OS.LocalObjectStore(tmp_path / "bucket")
     pointer = OS.save_dataset(data, store, stamp="20260920T000000Z")
-    assert pointer["key"] == "dataset/monitor-20260920T000000Z.tar.gz"
+    # Two objects: the small half that changes every run, and the large half that rarely does.
+    assert pointer["mutable"]["key"] == "dataset/state-20260920T000000Z.tar.gz"
+    assert pointer["static"]["key"] == "dataset/raw-20260920T000000Z.tar.gz"
 
     fresh = tmp_path / "fresh"
     result = OS.restore_dataset(fresh, store)
@@ -84,7 +86,7 @@ def test_a_dataset_that_does_not_match_its_digest_is_refused(tmp_path):
     store = OS.LocalObjectStore(tmp_path / "bucket")
     pointer = OS.save_dataset(data, store, stamp="20260920T000000Z")
 
-    store.put(pointer["key"], b"corrupted", overwrite=True)
+    store.put(pointer["mutable"]["key"], b"corrupted", overwrite=True)
     with pytest.raises(OS.StorageError, match="does not match its recorded digest"):
         OS.restore_dataset(tmp_path / "fresh", store)
 

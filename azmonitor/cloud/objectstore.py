@@ -35,8 +35,14 @@ from ..util.log import get_logger
 
 log = get_logger("cloud.objectstore")
 
-# The dataset is pushed as one tarball; anything under these names is what a run needs to resume.
-DATASET_PARTS = ("monitor.sqlite", "deliveries.sqlite", "raw", "state")
+# What a run needs to resume. Split by how often it changes, because the two halves are wildly
+# different sizes: the databases and state come to about 6 MB and change on every run, while the
+# downloaded source documents are about 254 MB and change only when a source publishes. Shipping
+# 254 MB back up after a run that changed nothing was most of the transfer bill for none of the
+# value, so the static half is re-uploaded only when its contents actually differ.
+MUTABLE_PARTS = ("monitor.sqlite", "deliveries.sqlite", "state")
+STATIC_PARTS = ("raw",)
+DATASET_PARTS = MUTABLE_PARTS + STATIC_PARTS
 POINTER_KEY = "dataset/current.json"
 # One immutable JSON object per published edition version. This, not the runner's disk, is what the
 # dashboard's report catalogue is rebuilt from.
@@ -346,14 +352,43 @@ def _tar(paths: Iterable[Path], base: Path, dest: Path) -> dict[str, Any]:
     return {"files": n, "bytes": dest.stat().st_size}
 
 
+def _tree_fingerprint(paths: Iterable[Path], base: Path) -> str:
+    """A digest of what a set of files *is*, without reading their contents.
+
+    Path, size and modification time. `tarfile` preserves mtime through a round trip, so a restored
+    tree fingerprints the same as the one that was saved, which is what makes "has the raw archive
+    changed since the last run?" answerable on a fresh worker that has only just unpacked it.
+
+    Hashing 254 MB of contents would also work and would be stricter; it would also cost a second
+    of CPU on every run to answer a question that path-size-mtime answers correctly for an archive
+    that only ever gains whole new files.
+    """
+    digest = hashlib.sha256()
+    for root in sorted(paths):
+        if not root.exists():
+            continue
+        entries = [root] if root.is_file() else sorted(root.rglob("*"))
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            stat = entry.stat()
+            digest.update(f"{entry.relative_to(base)}|{stat.st_size}|{int(stat.st_mtime)}\n".encode())
+    return digest.hexdigest()
+
+
 def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str | None = None,
                  fence: "Fence | None" = None) -> dict[str, Any]:
     """Push the working dataset up, then move the pointer.
 
-    The order is the safety property. The tarball goes to a key nobody is reading yet; only once it
-    is uploaded and its digest recorded does the pointer move to it. A run that dies between the two
-    leaves an orphaned object and a pointer that still names the last complete dataset, which is the
-    failure everyone would choose.
+    The order is the safety property. Each tarball goes to a key nobody is reading yet; only once
+    both are uploaded and their digests recorded does the pointer move. A run that dies between the
+    two leaves orphaned objects and a pointer that still names the last complete dataset, which is
+    the failure everyone would choose.
+
+    The static half — the downloaded source documents — is only re-uploaded when its fingerprint
+    differs from the one the current pointer records. A source check that finds nothing therefore
+    ships about 6 MB rather than 260 MB, and the pointer simply keeps naming the raw object that is
+    already there. That object is never deleted while a pointer refers to it.
 
     `fence` is checked twice, and the second check is the one that matters: immediately before the
     pointer moves. A worker whose lease lapsed mid-upload has been replaced, and the replacement may
@@ -363,30 +398,70 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
     store = store or store_from_env()
     data_dir = Path(data_dir)
     stamp = stamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    key = f"dataset/monitor-{stamp}.tar.gz"
 
     if fence:
         fence.check("before uploading the dataset")
 
+    previous = _current_pointer(store)
+    static_fingerprint = _tree_fingerprint([data_dir / p for p in STATIC_PARTS], data_dir)
+    reused = (previous or {}).get("static") or {}
+    reuse_static = bool(reused.get("fingerprint") == static_fingerprint and reused.get("key")
+                        and store.exists(reused["key"]))
+
     with tempfile.TemporaryDirectory() as tmp:
-        archive = Path(tmp) / "dataset.tar.gz"
-        info = _tar([data_dir / p for p in DATASET_PARTS], data_dir, archive)
-        uploaded = store.put_file(key, archive, content_type="application/gzip")
-        size = archive.stat().st_size
+        tmp = Path(tmp)
+        mutable_key = f"dataset/state-{stamp}.tar.gz"
+        mutable_archive = tmp / "mutable.tar.gz"
+        mutable_info = _tar([data_dir / p for p in MUTABLE_PARTS], data_dir, mutable_archive)
+        mutable_meta = store.put_file(mutable_key, mutable_archive, content_type="application/gzip")
 
-        pointer = {"key": key, "sha256": uploaded["sha256"], "bytes": size, "files": info["files"],
-                   "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                   "parts": [p for p in DATASET_PARTS if (data_dir / p).exists()]}
+        if reuse_static:
+            static = dict(reused)
+            log.info("raw documents unchanged; reusing %s (%.1f MB not re-uploaded)",
+                     static["key"], static.get("bytes", 0) / 1e6)
+        else:
+            static_key = f"dataset/raw-{stamp}.tar.gz"
+            static_archive = tmp / "static.tar.gz"
+            static_info = _tar([data_dir / p for p in STATIC_PARTS], data_dir, static_archive)
+            static_meta = store.put_file(static_key, static_archive, content_type="application/gzip")
+            static = {"key": static_key, "sha256": static_meta["sha256"],
+                      "bytes": static_archive.stat().st_size, "files": static_info["files"],
+                      "fingerprint": static_fingerprint}
 
-        # The upload can take minutes. Ownership is re-checked here, with the object already safely
-        # in the store, so losing the lease costs an orphaned tarball rather than the dataset.
+        pointer = {
+            "version": 2,
+            "mutable": {"key": mutable_key, "sha256": mutable_meta["sha256"],
+                        "bytes": mutable_archive.stat().st_size, "files": mutable_info["files"]},
+            "static": static,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "parts": [p for p in DATASET_PARTS if (data_dir / p).exists()],
+            "static_reused": reuse_static,
+        }
+        pointer["bytes"] = pointer["mutable"]["bytes"] + static.get("bytes", 0)
+        pointer["files"] = pointer["mutable"]["files"] + static.get("files", 0)
+        pointer["uploaded_bytes"] = pointer["mutable"]["bytes"] + (0 if reuse_static else static["bytes"])
+
+        # The uploads can take minutes. Ownership is re-checked here, with the objects already
+        # safely in the store, so losing the lease costs an orphaned tarball rather than the dataset.
         if fence:
             fence.check("before moving the dataset pointer")
 
         store.put(POINTER_KEY, json.dumps(pointer, indent=2).encode(),
                   content_type="application/json", overwrite=True)
-    log.info("dataset saved: %s (%.1f MB, %d files)", key, size / 1e6, info["files"])
+
+    log.info("dataset saved: %.1f MB uploaded of %.1f MB total (%d files)",
+             pointer["uploaded_bytes"] / 1e6, pointer["bytes"] / 1e6, pointer["files"])
     return pointer
+
+
+def _current_pointer(store: ObjectStore) -> dict[str, Any] | None:
+    raw = store.get(POINTER_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[str, Any]:
@@ -399,7 +474,8 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
     one. The caller is told which, and `safe_to_backfill` is only ever true for the first case.
 
     A digest that does not match what the pointer recorded is always an error: a truncated dataset
-    that looks plausible is the one thing worse than no dataset.
+    that looks plausible is the one thing worse than no dataset. Both halves are checked; a stale
+    raw archive reused across runs is verified on every restore, not merely on the run that wrote it.
     """
     store = store or store_from_env()
     data_dir = Path(data_dir)
@@ -423,48 +499,68 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
 
     pointer = json.loads(raw)
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # A pointer written before the dataset was split names one object; one written since names two.
+    # Both are restored the same way, so a store seeded earlier keeps working.
+    pieces = ([pointer["mutable"], pointer["static"]] if pointer.get("version", 1) >= 2
+              else [{"key": pointer["key"], "sha256": pointer["sha256"]}])
+
+    total = 0
     with tempfile.TemporaryDirectory() as tmp:
-        archive = Path(tmp) / "dataset.tar.gz"
-        if not store.get_file(pointer["key"], archive):
-            raise StorageError(
-                f"the pointer names {pointer['key']}, which is not in the store. The dataset is "
-                f"not being replaced; investigate before running again.")
+        for piece in pieces:
+            archive = Path(tmp) / f"{Path(piece['key']).name}"
+            if not store.get_file(piece["key"], archive):
+                raise StorageError(
+                    f"the pointer names {piece['key']}, which is not in the store. The dataset is "
+                    f"not being replaced; investigate before running again.")
 
-        digest = hashlib.sha256()
-        with open(archive, "rb") as fh:
-            for chunk in iter(lambda: fh.read(CHUNK), b""):
-                digest.update(chunk)
-        if digest.hexdigest() != pointer["sha256"]:
-            raise StorageError(
-                f"the dataset does not match its recorded digest (expected {pointer['sha256'][:12]}, "
-                f"got {digest.hexdigest()[:12]}); it is not being unpacked")
+            digest = hashlib.sha256()
+            with open(archive, "rb") as fh:
+                for chunk in iter(lambda: fh.read(CHUNK), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != piece["sha256"]:
+                raise StorageError(
+                    f"{piece['key']} does not match its recorded digest (expected "
+                    f"{piece['sha256'][:12]}, got {digest.hexdigest()[:12]}); it is not being "
+                    f"unpacked")
+            total += archive.stat().st_size
 
-        size = archive.stat().st_size
-        with tarfile.open(archive, "r:gz") as tf:
-            # a tar member that escapes the destination is a classic archive attack, and this
-            # archive comes from a store rather than from us
-            for member in tf.getmembers():
-                target = (data_dir / member.name).resolve()
-                if not str(target).startswith(str(data_dir.resolve())):
-                    raise StorageError(f"archive member escapes the data directory: {member.name!r}")
-            tf.extractall(data_dir)
-    log.info("dataset restored from %s (%.1f MB)", pointer["key"], size / 1e6)
-    return {"restored": True, "safe_to_backfill": False, **pointer}
+            with tarfile.open(archive, "r:gz") as tf:
+                # a tar member that escapes the destination is a classic archive attack, and this
+                # archive comes from a store rather than from us
+                for member in tf.getmembers():
+                    target = (data_dir / member.name).resolve()
+                    if not str(target).startswith(str(data_dir.resolve())):
+                        raise StorageError(
+                            f"archive member escapes the data directory: {member.name!r}")
+                tf.extractall(data_dir)
+
+    log.info("dataset restored: %d object(s), %.1f MB", len(pieces), total / 1e6)
+    return {"restored": True, "safe_to_backfill": False, "objects": len(pieces), **pointer}
 
 
 def prune_datasets(store: ObjectStore | None = None, keep: int = 7) -> dict[str, Any]:
-    """Keep a few dataset snapshots as backups; the pointer's own object is never a candidate."""
+    """Keep a few dataset snapshots as backups.
+
+    Anything the current pointer names is never a candidate, and that now includes the raw archive,
+    which a pointer can go on naming for weeks because it is only re-uploaded when it changes. A
+    retention rule that deleted it because it looked old would break every restore afterwards.
+    """
     store = store or store_from_env()
-    raw = store.get(POINTER_KEY)
-    current = json.loads(raw)["key"] if raw else None
+    pointer = _current_pointer(store) or {}
+    in_use = {piece.get("key") for piece in
+              (pointer.get("mutable"), pointer.get("static")) if isinstance(piece, dict)}
+    in_use.add(pointer.get("key"))          # a pointer written before the split
+    in_use.discard(None)
+
     blobs = sorted((b for b in store.list("dataset/") if b["key"].endswith(".tar.gz")),
                    key=lambda b: b["key"])
-    doomed = [b for b in blobs[:-keep] if b["key"] != current] if len(blobs) > keep else []
-    return {"snapshots": len(blobs), "current": current, "would_remove": [b["key"] for b in doomed],
+    candidates = [b for b in blobs if b["key"] not in in_use]
+    doomed = candidates[:-keep] if len(candidates) > keep else []
+    return {"snapshots": len(blobs), "in_use": sorted(in_use),
+            "would_remove": [b["key"] for b in doomed],
             "note": "removal is left to the store's own retention; nothing is deleted here"}
 
-
-# -------------------------------------------------------------------- the reports
 
 def publish_edition(edition_dir: Path, report_type: str, edition: str, version: int,
                     store: ObjectStore | None = None) -> dict[str, Any]:
