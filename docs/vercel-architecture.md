@@ -121,11 +121,25 @@ knows nor cares that the storage is remote.
    conditional insert (`ON CONFLICT ... WHERE expires_at < now()`) so exactly one holder wins, and
    a lease left behind by a crashed run is taken over once it lapses.
 
-**Vercel Blob holds** the dataset tarball and every published report version. Editions are
-immutable: `publish_edition` refuses to overwrite a key that exists, so a link sent six months ago
-still resolves to the bytes that were sent. The dataset pointer moves only *after* the new tarball
-has uploaded and its digest is recorded, so a run that dies mid-upload leaves an orphan object and
-a pointer still naming the last complete dataset.
+**Vercel Blob holds** the dataset, every published report version, and the catalogue that
+describes them. All of it is written `access: 'private'`, so there is no publicly readable URL and
+the dashboard streams downloads through its own authenticated route.
+
+Three properties matter here:
+
+- **Editions are immutable.** `publish_edition` refuses to overwrite a key that exists, so a link
+  sent six months ago still resolves to the bytes that were sent.
+- **The catalogue lives beside the files.** One immutable JSON object per edition version. The
+  dashboard's report list is rebuilt from that, never from the runner's disk — a runner starts empty,
+  and a catalogue derived from an empty disk is an empty catalogue.
+- **The dataset pointer moves last.** Both halves upload to keys nobody is reading yet, and only
+  then does the pointer move, under a second ownership check. A run that dies mid-upload leaves an
+  orphan object and a pointer still naming the last complete dataset.
+
+The dataset is two objects rather than one, split by how often each half changes: about 6 MB of
+databases and state that change every run, and about 254 MB of downloaded source documents that
+change only when a source publishes. The static half is re-uploaded only when its fingerprint
+differs, which took an unchanged run's upload from 260 MB to 5.9 MB.
 
 Nothing persistent lives in a Function's temporary directory.
 
@@ -152,6 +166,14 @@ once.
 - **Two runs at once.** The workflow's `concurrency` group queues the second; the database lease
   refuses it outright if it gets that far. The workflow exits 75 (`EX_TEMPFAIL`) rather than failing
   when the lease is held, so a skipped run does not look like a broken one.
+- **A run that outlives its lease.** The job may take 60 minutes and the lease lasts 55, so renewal
+  alone cannot guarantee ownership — a process can be paused for longer than its remaining lease.
+  Each acquisition stamps a monotonically increasing fence token, and the worker presents holder and
+  token before every persistent write. A worker that was replaced is refused rather than racing its
+  replacement.
+- **A run that fails.** The read model is published only for outcomes `ok` and `partial`. A failed
+  restore in particular must never publish: the dataset was never fetched, so the database on disk
+  is empty, and publishing from it would replace every figure on the dashboard with nothing.
 - **A repeated cron event.** The watchdog declines while a lease is held, and declines again once
   the run has recorded itself.
 - **A crashed run.** Its lease lapses and the next run takes it over, recording who held it before.

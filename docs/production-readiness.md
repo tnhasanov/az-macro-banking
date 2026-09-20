@@ -1,35 +1,148 @@
 # Production readiness
 
-**Verdict: not production-ready, and not because anything is broken.** Every component has been
-built and exercised, but three of them have only ever been exercised against local stand-ins —
-PostgreSQL 16 instead of Neon, a directory instead of Vercel Blob, and a local Next.js server
-instead of a Vercel deployment. No Vercel or Neon credentials existed in the session that built
-this, so no deployment was created and none could be.
+**Verdict: not production-ready, and the reason is unchanged — nothing has been run against the
+real services.** Vercel, Neon and Vercel Blob have never been contacted from the environment this
+was built in: there are no credentials for them, and `vercel.com` is unreachable through its egress
+proxy. Everything below is either verified against a real PostgreSQL and the real 374 MB dataset, or
+honestly marked as not verified.
 
-The brief said not to declare production readiness on the strength of local tests, and this is what
-that looks like when it is taken seriously. What follows separates what was actually verified from
-what was not, and names exactly what is needed to close the gap.
+What has changed since the last report is the quality of what is waiting to be deployed. An
+independent review found four critical defects; all four were real, all four are fixed, and testing
+them turned up four more.
+
+---
+
+## What the review found, and what was true
+
+### 1. Private Blob access — confirmed, and worse than reported
+
+The review said downloads were unauthenticated. They were, and reading the official SDK's source
+showed the Python client was wrong in four other ways as well, so it could not have worked against
+the real API at all:
+
+| | Was | Actually |
+|---|---|---|
+| API base | `https://blob.vercel-storage.com` | `https://vercel.com/api/blob` |
+| Upload | `PUT /<key>` | `PUT /?pathname=<key>` |
+| API version | `7` | `12` |
+| Access level | not sent | `x-vercel-blob-access: private` |
+| Download | plain GET, no credential | `https://<store>.private.blob.vercel-storage.com/<path>` with a Bearer token |
+
+**Fixed** by delegating to `@vercel/blob` — the SDK Vercel maintains — through
+`tools/blob/blob.mjs`. Shelling out to Node from Python is a detour, and the deciding reason is the
+dataset: 260 MB is not a single PUT, and multipart upload, retries and the error taxonomy are
+exactly the undocumented behaviour worth not re-deriving.
+
+Everything is written `access: 'private'`, so there is no public URL to leak. The dashboard reads
+through `get(key, {access: 'private', token})` and streams the bytes; it checks the session in the
+handler rather than trusting the middleware matcher alone; and it serves only pdf/pptx/xlsx keys
+that an edition actually lists, so the dataset tarball, the delivery ledger and raw source documents
+are unreachable even by someone signed in.
+
+### 2. Historical report persistence — confirmed, and severe
+
+The catalogue was rebuilt from `archive.index()`, which reads the local `outputs/` directory, and
+published with `TRUNCATE editions`. Runner A publishes; its disk goes away; Runner B starts empty,
+finds no local editions, truncates. Every report ever produced disappears from the dashboard while
+its files sit untouched in the store.
+
+**Fixed.** The catalogue is now one immutable JSON object per edition version, written to the store
+beside the files it describes, and `publish_editions` upserts and never deletes. A side effect worth
+noting: the catalogue now holds all **95** edition versions where the local index only ever reported
+the 7 newest.
+
+`tests/test_cloud_persistence.py::test_runner_b_does_not_erase_runner_as_history` is the scenario
+the review asked for, end to end.
+
+### 3. Failed-run handling — confirmed
+
+The read-model step was gated on holding the lease, not on the task succeeding.
+
+`failed_restore` is the one that matters. It means the dataset was never fetched, so the SQLite on
+disk is empty — publishing indicators from it would have replaced every figure on the dashboard
+with nothing. A storage failure turned into data loss.
+
+**Fixed.** Publication is gated on outcomes 0 (ok) and 2 (partial) only. 3, 5 and 6 record the
+failure separately for monitoring, leave the last good dataset alone, and fail the job with a
+summary that says which outcome occurred and whether the dashboard was updated. Lock contention
+(4) is still not a failure.
+
+### 4. Watchdog reliability — confirmed, both parts
+
+Elapsed-time thresholds cannot detect a specific missed occurrence. For a weekly report, any
+threshold that does not fire on a healthy week also cannot detect a skipped Monday until the next
+one.
+
+**Fixed.** The watchdog enumerates the occurrences the schedule calls for, applies each one's grace,
+and asks whether that occurrence was attempted — so a missed Monday digest is visible on Monday.
+It distinguishes *satisfied*, *running* (due, unrecorded, lease held — late, not missing) and
+*missed*, and a failed run counts as attempted so a broken cycle cannot become a dispatch loop.
+
+The second part was the more dangerous one. `locks()` and the run history were wrapped in
+`.catch(() => [])`, so a Neon outage read as "no lease is held" — the one conclusion that starts a
+second worker on top of a healthy one. Both reads now propagate and the route answers 503 without
+dispatching. **Verified by stopping PostgreSQL**: HTTP 503, `dispatched: false`.
+
+### 5. Locking and recovery — confirmed
+
+The job timeout is 60 minutes and the lease was 55. Renewal narrows that window but cannot close
+it, because a process can be paused for longer than its remaining lease.
+
+**Fixed with fencing.** Each acquisition bumps a monotonic fence token; the worker presents holder
+and token before every persistent write, and once more immediately before the dataset pointer
+moves — the write that would otherwise roll the dataset back to an older copy. Eleven tests in
+`tests/test_lease_fencing.py` run against a real PostgreSQL, because the interesting behaviour is
+the database arbitrating between two connections.
+
+### 6. Initial dataset deployment — implemented
+
+`publish seed` refuses a store that already holds a dataset, refuses a directory with no
+`monitor.sqlite`, refuses to sweep up files that are not part of the dataset, and verifies the
+upload by reading back what the store holds. `--with-reports` also uploads the existing archive so
+the dashboard has history from the first run.
+
+`restore` now distinguishes a genuinely empty store from one whose pointer has gone. The second is
+damage, and treating it as a first run is how a backfill replaces a real dataset with an empty one.
+
+### 7. Cost — measured, then acted on
+
+The dataset splits 5.9 MB mutable / 254.2 MB static. A run that downloaded nothing was shipping all
+260 MB back up. The static half is now re-uploaded only when its fingerprint changes: **260.0 MB →
+5.9 MB, 11.5 s → 0.6 s**, measured on the real dataset. See `costs.md`.
+
+### Four more, found while testing the above
+
+- `publish_edition` silently dropped a manifest it skipped, so its uploaded and already-present
+  lists did not account for every file in the edition.
+- Two directories can claim the same version on disk (`v1_<stampA>`, `v1_<stampB>`, from repeated
+  renders). Both were uploaded under one key, leaving the loser's files with no catalogue entry.
+  `publish verify` went from 12 orphans to 0 on the real archive once the newest render became the
+  published one.
+- `_archive_editions` took an `ObjectStore` it never used, forcing `readmodel` to require storage it
+  did not touch.
+- The monitor task's times (07:45, 18:45) existed only in the systemd timer and the workflow, never
+  in `config/schedule.yaml`. They are now in the configuration, and a test compares all four copies.
 
 ---
 
 ## Verified, with evidence
 
-### The engine, against the real dataset
-
 | Check | Result |
 |---|---|
-| Python test suite | **151 passed, 3 skipped** |
-| Cloud tests against real PostgreSQL 16 | **14 passed** |
-| Dashboard test suite | **38 passed** (32 without a database, 6 skipped then) |
-| Full source refresh | **645.8 s**, peak RSS 112 MB, exit 0 — ~300 documents from live sources |
-| Monthly deck rendered end to end | 27 slides, PPTX + PDF + XLSX, from the real July 2026 dataset |
-| Read model published | 57,974 indicators, 95 publications, 7 editions, 40 quality checks, 27 MB |
-| Dataset round trip | 260 MB tarball, 396 files restored, digest verified, 520 report objects |
+| Python test suite | **225 passed** (against real PostgreSQL 16) |
+| Dashboard test suite | **59 passed**, 6 skipped without a database |
+| Full source refresh | 645.8 s, peak RSS 112 MB, exit 0 — ~300 documents from live sources |
+| Dataset seeded into an empty store | 260.0 MB, both halves verified by read-back |
+| Restored on a worker with an empty filesystem | 396 files, both digests checked |
+| Read model rebuilt there from nothing | 57,974 indicators, 95 editions, 95 publications |
+| `publish verify` on the real archive | 226 files catalogued, 226 in store, 0 missing, 0 orphans |
+| Upload after a run with no new documents | 5.9 MB, 0.6 s |
+| Watchdog, live | named the exact occurrence ("13:15", "Monday 08:30", "07:45") |
+| Watchdog, lease held | `state: running`, no dispatch |
+| Watchdog, PostgreSQL stopped | **HTTP 503, `dispatched: false`** |
+| Lease fencing | 11 tests across two real connections |
 
-### The figures agree with the deck
-
-Spot-checked against the rendered July 2026 edition, which is itself claim-validated against
-sources:
+### The figures still agree with the deck
 
 | Figure | Dashboard | Dataset |
 |---|---|---|
@@ -38,122 +151,71 @@ sources:
 | FX share of deposits | 34.7% | 34.72 |
 | Indicative pricing spread, AZN | +11.5 pp | 11.50 (AZN slice) |
 
-### The security boundary
-
-Each of these was exercised against a running server, not reasoned about:
-
-| Attempt | Result |
-|---|---|
-| Any page without a session | 307 → `/login` |
-| Any API route without a session | 401 |
-| Cron endpoint with no bearer token | 401 |
-| Cron endpoint with a wrong bearer token | 401 |
-| Cron endpoint with a token that is a prefix of the real one | 401 (constant-time compare) |
-| Wrong passphrase | 401, same message as every other failure |
-| Report file listed by an edition | served, streamed through the app |
-| `dataset/current.json` | 404 |
-| `reports/../../dataset/current.json` | 404 |
-| A plausible-but-unlisted report file | 404, indistinguishable from the others |
-
-The file route authorises by **catalogue membership** — the key must appear in some edition's file
-list — rather than by sanitising a path, and the storage URL is never handed to the browser.
-
-### Concurrency and missed runs
-
-| Scenario | Behaviour |
-|---|---|
-| Two workers race for the lease | one wins; the other is refused (tested on two connections) |
-| A crashed run leaves its lease | taken over once lapsed, previous holder recorded |
-| Watchdog while a lease is held | declines, names the holder and expiry |
-| Watchdog, run on time | declines |
-| Watchdog, run overdue | would dispatch — **blocked because dispatch is disabled** |
-| Watchdog, repeated firing | one dispatch, then declines |
-| Watchdog, unknown task | 404 |
-| Watchdog, last run in the future (clock skew) | treated as on time, not a negative interval |
-| Unchanged inputs | `unchanged`; no edition, no delivery |
-| Failed blocking validation | edition blocked, reason recorded |
-| Late weekly digest | still covers its own week |
-| Asia/Baku → UTC across the year | fixed 4 hours, checked against tzdata in Jan/Apr/Jul/Oct |
-| Schedule in three places | compared by `monitor schedule check`; CI fails on drift |
-
-### Confidentiality
-
-The brief forbade moving the bank's proprietary assets to personal cloud infrastructure. Verified on
-real output:
-
-| Artefact | Neutral profile | Branded profile |
-|---|---|---|
-| Deck embedded images | none | `ppt/media/image1.png` (the logo) |
-| Brand colours in the deck | none | 289 × `6F00B6`, 3,936 × `DDD0EA`, and three more |
-| Bank name in deck and PDF | absent | present |
-| Workbook header colour | theme navy | brand purple |
-
-The two profiles produce **identical figures**: all 207 fact-pack metrics equal, same edition
-fingerprint, same reporting periods, same quality summary, same narrative. Only the cover differs.
-`publish save` exits 3 and uploads nothing under a profile that does not permit external
-distribution.
-
-### The dashboard, looked at rather than assumed
-
-Rendered in a real browser at 1440 px and 390 px, in light and dark mode: no console errors, no
-page errors, no horizontal overflow on any page. Three defects were found this way and fixed —
-`minmax(380px, …)` forcing a phone page 6–33 px wide, a missing icon causing a 404, and a
-Recharts tooltip escaping the viewport.
-
 ---
 
 ## Not verified — and what each one needs
 
-These are the gaps. None is known to be broken; all are untested against the real service.
-
 | # | Gap | Why it matters | To close it |
 |---|---|---|---|
-| 1 | **Vercel Blob has never been contacted.** `VercelBlobStore`'s REST calls are exercised only against a local directory implementation of the same interface. | Wrong header, wrong status handling or an unexpected response shape would fail the first real save — after a 646-second refresh. | Set `BLOB_READ_WRITE_TOKEN` and run `publish save` once by hand. |
-| 2 | **Neon has never been contacted.** Postgres was tested against a local PostgreSQL 16. | Neon's pooled endpoint runs pgbouncer in transaction mode. `prepare: false` is set for that reason but has not been proven against it. The lease uses a plain conditional insert, which is transaction-pooling-safe, but that is reasoning, not evidence. | Point `AZMONITOR_DATABASE_URL` at the pooled endpoint, run `publish readmodel`, then open the dashboard. |
-| 3 | **Nothing has been deployed to Vercel.** `next build` succeeds locally and the output is 7 routes plus middleware; that is a build, not a deployment. | Middleware behaves differently on the Edge than in `next start`; environment variables, regions and the cron schedule are all deployment-time. | Deploy a preview with `AZMONITOR_CRON_ENABLED` unset. |
-| 4 | **The GitHub Actions workflow has never run.** Its YAML is parsed and asserted by tests; no run has executed it. | Runner package availability, the pip cache, the lease step's exit-75 path and the job summary are unexercised. | Run it once with dry run ticked, then once without. |
-| 5 | **The workflow-dispatch path is unexercised.** No `GITHUB_DISPATCH_TOKEN` has been issued. | A token with wrong scopes fails silently from the dashboard's point of view — the watchdog reports the status code and nothing else. | Issue a fine-grained PAT with *Actions: write*, then force a dispatch by temporarily lowering a threshold. |
-| 6 | **No email has been sent.** Deliberate: the brief requires explicit authorisation first. | The Graph send path was tested against a fake provider, not Microsoft. | Authorise a controlled test to one recipient. |
-| 7 | **Login rate limiting is per-instance and therefore weak.** Serverless instances do not share memory, so the 10-attempts-per-15-minutes limit applies per instance rather than globally. | An attacker distributing attempts across instances gets more tries than the limit suggests. The real brake is 600,000 PBKDF2 iterations plus a long passphrase. | Either accept it with a long passphrase, or move the counter into Postgres — which would give the dashboard its first write path, so it is a deliberate trade, not an oversight. |
-| 8 | **Blob transfer volume is higher than it needs to be.** ~94 GB/month, about $4.70, because the whole 260 MB dataset moves both ways on every run even when only state changed. | Cost is minor; the wasted minute per run and the extra chance of a mid-transfer failure are the real cost. | Split the dataset into a small mutable part and an append-mostly raw archive. Described in `costs.md`. Not done here because it changes the storage layout and cannot be tested against real Blob from this environment. |
+| 1 | **Vercel Blob has never been contacted.** The SDK is exercised only against a local directory implementing the same interface. | The protocol is now the SDK's problem rather than ours, which is the point of using it — but "the SDK is correct" is a reasonable belief, not evidence. | `publish seed --check`, then `seed`, with a real token. |
+| 2 | **Neon has never been contacted.** PostgreSQL 16 locally is not Neon. | Neon's pooled endpoint runs pgbouncer in transaction mode. `prepare: false` is set for that reason and the lease uses a plain conditional insert, which is transaction-pooling-safe — but that is reasoning, not evidence. | Point `AZMONITOR_DATABASE_URL` at the pooled endpoint and run `publish readmodel`. |
+| 3 | **Nothing has been deployed to Vercel.** `next build` succeeds; that is a build, not a deployment. | Middleware behaves differently on the Edge than under `next start`; environment variables, regions and the cron schedule are deployment-time. | Deploy a preview with `AZMONITOR_CRON_ENABLED` unset. |
+| 4 | **The workflow has never run.** Its YAML is parsed and its gating asserted by 24 tests; no run has executed it. | Runner package availability, the pip and npm caches, the exit-75 lease path and the job summary are unexercised. | Run it once with dry run ticked, then once without. |
+| 5 | **The dispatch path is unexercised.** No `GITHUB_DISPATCH_TOKEN` has been issued. | A token with wrong scopes fails silently from the dashboard's point of view. | Issue a fine-grained PAT with *Actions: write*, then force a dispatch. |
+| 6 | **No email has been sent.** Deliberate. | The Graph send path was tested against a fake provider, not Microsoft. | Authorise a controlled test to one recipient. |
+| 7 | **Login rate limiting is per-instance and therefore weak.** Serverless instances do not share memory. | An attacker distributing attempts across instances gets more tries than the limit suggests. The real brake is 600,000 PBKDF2 iterations plus a long passphrase. | Accept it with a long passphrase, or move the counter into Postgres — which would give the dashboard its first write path, so it is a deliberate trade. |
+| 8 | **The raw archive is still downloaded in full on every run** (46.8 GB/month). | Skipping it would mean the worker cannot see documents it may need to re-parse. The upload side was the safe half to optimise. | Would need a behavioural change validated against live sources. |
 | 9 | **The dashboard has one reader and has not been load-tested.** | Not a risk at this scale; stated so it is not mistaken for a tested property. | — |
 
 ---
 
 ## What is deliberately switched off
 
-Each of these is off in a way that takes a specific, separate action to change. None is off by
-accident, and none can be turned on by an inherited or misread value.
-
-| Off | Switch | Why it is off |
+| Off | Switch | Why |
 |---|---|---|
-| Outbound delivery | `enabled: false` in `config/delivery.yaml` | the brief: no real email until explicitly authorised |
-| WhatsApp | `channels.whatsapp.enabled: false` | the brief: preserved, disabled for this deployment |
-| Scheduled dispatch from the watchdog | `AZMONITOR_CRON_ENABLED` unset | a preview must not run the engine |
+| Outbound delivery | `enabled: false` in `config/delivery.yaml` | no real email until explicitly authorised |
+| WhatsApp | `channels.whatsapp.enabled: false` | preserved, disabled for this deployment |
+| Watchdog dispatch | `AZMONITOR_CRON_ENABLED` unset | a preview must not run the engine |
 | Upload under the branded profile | `AZMONITOR_PROFILE` + the `save` guard | the bank's assets do not belong in personal storage |
-| Automatic retry of an uncertain delivery | `TERMINAL = ("sent",)`, no retry path from `needs_review` | a retry after an uncertain send is how a report goes out twice |
+| Automatic retry of an uncertain delivery | `TERMINAL = ("sent",)` | a retry after an uncertain send is how a report goes out twice |
+
+---
+
+## Confidentiality: what the repository holds
+
+Re-scanned across all 193 tracked files.
+
+**No credentials.** The only credential-shaped string is a test fixture in `web/tests/auth.test.ts`.
+
+**Three binary fixtures** (`tests/fixtures/*.xlsx`) are Central Bank published tables — Cədvəl 2.6,
+3.2.1 and 5.6 — which are public source data, not bank-internal material.
+
+**One proprietary asset**, unchanged from the last report and still needing your decision:
+`theme/assets/atb_logo.png` has been tracked in this **public** repository since its first commit,
+alongside the bank's brand colours and organisation name in `config/theme.yaml`.
+
+The neutral profile keeps all of it out of anything rendered or uploaded by the cloud deployment —
+verified on real output: the neutral deck, workbook and PDF contain no embedded image, no brand
+colour and no mention of the bank, while the branded ones contain all three, and all 207 fact-pack
+metrics are identical between the two profiles. What the profile cannot do is remove the logo from
+the repository's history.
+
+Three options, none of which I have taken:
+
+1. **Leave it.** The logo is already public and has been since the first commit.
+2. **Make the repository private.** This costs roughly **$18.72/month** in Actions minutes, which
+   are free only for public repositories (see `costs.md`) — a change since 1 January 2026.
+3. **Rewrite history.** Removes it properly, breaks every existing clone and commit reference.
+
+This needs an ownership decision from you, not a default from me.
 
 ---
 
 ## Recommended order to reach production
 
-1. Create the Neon project and the Blob store. Both stay inside their free tiers.
-2. Set the GitHub secrets. Run `scheduled` with **dry run ticked**. Read the job summary. *(closes gap 4)*
-3. Run it again without dry run. This is the first real write to Blob and Postgres. *(closes gaps 1, 2)*
-4. Deploy the dashboard as a **preview**, with `AZMONITOR_CRON_ENABLED` unset and no dispatch token. Sign in, check every page against the engine's own output. *(closes gap 3)*
-5. Watch the schedule for about a week. Nothing is sent to anyone in this state. Read the System page and the run history.
-6. Only then: promote to production, issue the dispatch token and set `AZMONITOR_CRON_ENABLED=true`. *(closes gap 5)*
-7. Separately, and only when you choose to: authorise one controlled email to one recipient, confirm the ledger recorded `sent`, and leave it there until you are satisfied. *(closes gap 6)*
+Set out in full in [`cloud-deployment.md`](cloud-deployment.md). In short: Neon and Blob (free
+tiers) → secrets → seed and verify the dataset → a dry run → a real run with delivery off → watch
+it for a few days → merge to the default branch to start the schedule → and only then, separately,
+authorise one email.
 
-Steps 1–6 create no paid resource and send nothing to anybody.
-
----
-
-## One thing outside the scope of this work
-
-`theme/assets/atb_logo.png` has been tracked in this **public** repository since its first commit,
-along with the bank's brand colours and organisation name in `config/theme.yaml`. The distribution
-profile added here keeps them out of anything rendered or uploaded by the cloud deployment, but it
-cannot remove them from the repository's history, and purging git history is not something to do
-without asking. Worth a decision: leave it, make the repository private (which costs Actions
-minutes — see `costs.md`), or rewrite the history.
+Stages one to five create no paid resource and send nothing to anybody.
