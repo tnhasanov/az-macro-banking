@@ -58,6 +58,13 @@ jobs:
     timeout-minutes: 60
     env:
       TZ: Asia/Baku
+      # This worker uploads to personal object storage, so it renders under the neutral
+      # distribution profile: no organisation logo, no brand colours, a neutral footer. The
+      # figures, the narrative and the edition fingerprint are identical either way — the profile
+      # changes the cover and nothing else. `publish save` refuses to upload under any profile
+      # that does not permit external distribution, so removing this line stops the run rather
+      # than quietly publishing someone else's branding.
+      AZMONITOR_PROFILE: neutral
       AZMONITOR_DATA_DIR: ${{ github.workspace }}/.state/data
       AZMONITOR_OUTPUT_DIR: ${{ github.workspace }}/.state/outputs
       # Persistence goes through the engine's own hooks, inside its lock.

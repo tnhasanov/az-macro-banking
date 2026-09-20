@@ -51,10 +51,10 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     s = d.new_slide()
     d.add_rect(s, 0, 0, 4.85, 7.5, C["primary"], None, radius=None)
     d.add_rect(s, 4.85, 0, 0.09, 7.5, C["gold"], None, radius=None)
-    d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("sector_review", lang).upper(), size=9, color="DDD0EA", bold=True)
+    d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("sector_review", lang).upper(), size=9, color=C["cover_text"], bold=True)
     d.add_text(s, 0.56, 1.5, 4.1, 1.4, f"{label}: activity, credit and banking questions", size=24, bold=True, color=C["white"])
-    d.add_text(s, 0.56, 3.0, 4.0, 1.0, f"As of {fp['as_of']} · {config.term('draft_label', lang)} · banking data to {plabel(fp['edition'].get('banking_period'), 'month_end_stock')}", size=11, color="DDD0EA")
-    d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{config.settings()['report'].get('organisation_label')}  |  {config.settings()['report'].get('audience_label')}", size=9, color="DDD0EA")
+    d.add_text(s, 0.56, 3.0, 4.0, 1.0, f"As of {fp['as_of']} · {config.term('draft_label', lang)} · banking data to {plabel(fp['edition'].get('banking_period'), 'month_end_stock')}", size=11, color=C["cover_text"])
+    d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{config.settings()['report'].get('organisation_label')}  |  {config.settings()['report'].get('audience_label')}", size=9, color=C["cover_text"])
     if d.logo_path:
         s.shapes.add_picture(d.logo_path, d.prs.slide_width - d.prs.slide_width * 0.46, d.prs.slide_height * 0.15, width=d.prs.slide_width * 0.16)
     tiles = [_kpi(gdp_share, f"{label}: share of nominal GDP (YTD)") if gdp_share and gdp_share.get("latest") else ("n/a", "Share of GDP", "not published for this mapping"),

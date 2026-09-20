@@ -1,0 +1,37 @@
+# Distribution profiles: whose identity a report is rendered under, and where it may go.
+#
+# The reporting engine is the same in every profile. It reads the same public sources, applies the
+# same validated metric dictionary, runs the same quality checks and produces the same figures and
+# the same claim-validated narrative. What a profile changes is the cover: the theme, the
+# organisation named in the footer, the audience line — and, consequently, whether the output may
+# be uploaded outside the organisation's own infrastructure.
+#
+# `external_upload: false` is enforced, not advisory. `azmonitor.cloud.publish save` refuses to
+# upload anything while such a profile is active, because the destination in a cloud deployment is
+# personal storage and the branding is not the operator's to put there.
+#
+# Select one with AZMONITOR_PROFILE. Unset means the default below.
+
+default: internal
+
+profiles:
+  internal:
+    label: Internal, branded
+    theme: config/theme.yaml
+    organisation_label: Azer-Turk Bank
+    audience_label: For internal discussion
+    external_upload: false
+    note: >-
+      Renders with the bank's logo and brand colours. For use on the bank's own infrastructure.
+      Output must not be uploaded to personal or third-party storage.
+
+  neutral:
+    label: Neutral, externally distributable
+    theme: config/theme.neutral.yaml
+    organisation_label: Azerbaijan Macro & Banking Monitor
+    audience_label: Independent analysis of publicly released data
+    external_upload: true
+    note: >-
+      Renders with no organisation logo and a neutral palette. Contains only figures derived from
+      publications the Central Bank of Azerbaijan and the State Statistical Committee have
+      released publicly, so it carries nothing that is not already public.

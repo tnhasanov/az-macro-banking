@@ -4,6 +4,14 @@
 # approved brand asset or set it to null to render without a logo.
 
 name: atb-reference
+
+# This theme carries Azer-Turk Bank's identity: the logo below was extracted from the reference
+# deck, and the purple is the bank's brand colour. Both are the bank's assets, not this project's.
+# `restricted` therefore means: reports rendered with this theme must not be uploaded to personal
+# or third-party infrastructure. `azmonitor.cloud.publish save` refuses to do so. Use the neutral
+# profile (AZMONITOR_PROFILE=neutral) for any deployment outside the bank's own systems.
+external_distribution: restricted
+
 slide_size: [13.333, 7.5]      # inches, 16:9
 
 fonts:
@@ -38,6 +46,7 @@ colors:
   table_stripe: "F6F3F8"
   highlight: "FFF7D6"
   white: "FFFFFF"
+  cover_text: "DDD0EA"   # secondary text on the coloured cover panel
   # Semantic series colours (stable across every report)
   series_primary: "6F00B6"
   series_secondary: "9B59D0"

@@ -48,10 +48,56 @@ def cmd_restore(args) -> int:
     return _out(result)
 
 
+# An operator who genuinely owns the branded content can set this to override the profile check.
+# Spelled out in full rather than made a boolean, so it cannot be turned on by an inherited `1`.
+UPLOAD_OVERRIDE = "AZMONITOR_ALLOW_RESTRICTED_UPLOAD"
+UPLOAD_OVERRIDE_VALUE = "i-own-this-content"
+
+
+def _refuse_restricted_upload() -> dict[str, Any] | None:
+    """Stop before uploading anything the active profile is not allowed to distribute.
+
+    In a cloud deployment the destination is personal object storage, and the branded profile
+    renders a specific bank's logo and brand colours onto every slide. Those are the bank's assets.
+    Uploading them would move a third party's property onto infrastructure that is not theirs, and
+    no amount of access control on the bucket makes that the operator's call to make.
+
+    So the refusal is in the upload path rather than in a runbook: it fires whatever invoked `save`,
+    including an unattended scheduled run, and it fires before the dataset is written rather than
+    after the reports are already up.
+    """
+    active = config.profile()
+    if active.get("external_upload"):
+        return None
+    if os.environ.get(UPLOAD_OVERRIDE) == UPLOAD_OVERRIDE_VALUE:
+        log.warning("uploading under the %r profile because %s is set", active["name"],
+                    UPLOAD_OVERRIDE)
+        return None
+    return {
+        "uploaded": False,
+        "profile": active["name"],
+        "error": (
+            f"the {active['name']!r} distribution profile does not permit external upload"
+        ),
+        "reason": active.get("note", "").strip(),
+        "remedy": (
+            f"Render and upload under a profile that permits it (AZMONITOR_PROFILE=neutral), or, "
+            f"if you own this content and intend to publish it, set "
+            f"{UPLOAD_OVERRIDE}={UPLOAD_OVERRIDE_VALUE}."
+        ),
+    }
+
+
 def cmd_save(args) -> int:
+    refusal = _refuse_restricted_upload()
+    if refusal:
+        log.error("%s", refusal["error"])
+        return _out(refusal, 3)
+
     paths = config.paths()
     store = OS.store_from_env()
-    result: dict[str, Any] = {"dataset": OS.save_dataset(paths.data_dir, store)}
+    result: dict[str, Any] = {"profile": config.profile()["name"],
+                              "dataset": OS.save_dataset(paths.data_dir, store)}
 
     # Every report version on disk that the store does not already hold. An edition is immutable, so
     # this is an upload of what is new rather than a synchronisation of what has changed.

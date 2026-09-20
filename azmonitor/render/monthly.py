@@ -200,15 +200,15 @@ class MonthlyRenderer(PolicyStabilitySlides):
         d.add_rect(s, 4.85, 0, 0.09, 7.5, C["gold"], None, radius=None)
         ed = self.ed
         gen = dt.datetime.fromisoformat(self.fp["generated_at"].replace("Z", "+00:00"))
-        d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("monthly_edition", self.lang).upper(), size=9, color="DDD0EA", bold=True)
+        d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("monthly_edition", self.lang).upper(), size=9, color=C["cover_text"], bold=True)
         d.add_text(s, 0.56, 1.5, 4.1, 1.4, config.term("report_title", self.lang), size=26, bold=True, color=C["white"], line_spacing=1.0)
         bp = plabel(ed.get("banking_period"), "month_end_stock") if ed.get("banking_period") else "n/a"
         mp = plabel(ed.get("macro_period"), "ytd_flow") if ed.get("macro_period") else "n/a"
         cp = plabel(ed.get("cpi_period"), "monthly") if ed.get("cpi_period") else "n/a"
-        d.add_text(s, 0.56, 3.0, 4.0, 0.9, f"Edition {ed.get('edition_month')} · banking data to {bp} · macro data to {mp} · CPI {cp}", size=12, color="DDD0EA", line_spacing=1.05)
+        d.add_text(s, 0.56, 3.0, 4.0, 0.9, f"Edition {ed.get('edition_month')} · banking data to {bp} · macro data to {mp} · CPI {cp}", size=12, color=C["cover_text"], line_spacing=1.05)
         d.add_text(s, 0.6, 5.7, 3.9, 0.9, f"{config.term('draft_label', self.lang)}. {config.term('information_cutoff', self.lang)}: {self.fp['as_of']} 23:59 Asia/Baku. "
-                   f"{config.term('generated', self.lang)}: {gen:%d %b %Y %H:%M} UTC. Narrative mode: {self.nar.get('mode')}.", size=9, color="DDD0EA", line_spacing=1.05)
-        d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{self.settings['report'].get('organisation_label')}  |  {self.settings['report'].get('audience_label')}", size=9, color="DDD0EA")
+                   f"{config.term('generated', self.lang)}: {gen:%d %b %Y %H:%M} UTC. Narrative mode: {self.nar.get('mode')}.", size=9, color=C["cover_text"], line_spacing=1.05)
+        d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{self.settings['report'].get('organisation_label')}  |  {self.settings['report'].get('audience_label')}", size=9, color=C["cover_text"])
         if d.logo_path:
             s.shapes.add_picture(d.logo_path, d.prs.slide_width - d.prs.slide_width * 0.46, d.prs.slide_height * 0.28, width=d.prs.slide_width * 0.19)
         headline = (self.nar.get("cover") or {}).get("headline") or "Facts-only descriptive edition"
