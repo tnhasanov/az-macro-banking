@@ -165,7 +165,7 @@ def _publish_local_editions(out_dir: Path, store, *, fence,
     Every artefact is opened and read before it is uploaded. The distribution profile governs how
     the engine renders; it says nothing about files rendered earlier under a different one, and an
     archive of those is exactly what a first seed uploads. Checking the profile alone let 95 branded
-    decks, 36 branded workbooks and 78 branded PDFs through under the neutral profile.
+    decks, 36 branded workbooks and 95 branded PDFs through under the neutral profile.
     """
     from . import artifacts
 

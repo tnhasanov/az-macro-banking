@@ -5,7 +5,7 @@ disk — and an archive of previously rendered reports is exactly what a first s
 
 That gap was not theoretical. Running `publish seed --with-reports` under the neutral profile, on
 the archive this repository actually holds, uploaded **95 branded decks, 36 branded workbooks and
-78 branded PDFs** to personal object storage. Every one carried the bank's logo or its palette. The
+95 branded PDFs** to personal object storage. Every one carried the bank's logo or its palette. The
 profile guard passed each time, correctly, because the profile was neutral; the files were not.
 
 So the question asked of an artefact is no longer "which profile is active?" but "does this file
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -22,6 +23,8 @@ import pytest
 
 from azmonitor import config
 from azmonitor.cloud import artifacts
+
+from conftest import minimal_pdf
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +85,66 @@ def test_a_file_that_cannot_be_read_is_a_finding_not_a_pass(tmp_path):
     broken.write_bytes(b"PK\x03\x04 not really a zip")
     findings = artifacts.inspect(broken)
     assert findings and "could not be inspected" in findings[0]
+
+
+# ---------------------------------------------------------------------- PDFs
+
+# A converted deck is where the check was weakest. Of the 95 PDFs in this repository's archive, 78
+# name the bank in their text and 17 do not — those 17 carry its logo on the cover and its brand
+# purple on every slide, and a text-only check passed every one of them.
+
+
+def test_a_pdf_that_names_the_organisation_is_a_finding(tmp_path):
+    findings = artifacts.inspect(
+        minimal_pdf(tmp_path / "named.pdf", text="Azer-Turk Bank  |  For internal discussion"))
+    assert any("names the organisation" in f for f in findings)
+
+
+def test_a_pdf_carrying_the_brand_palette_and_no_name_is_a_finding(tmp_path):
+    """The 17-file case: converting a deck keeps the palette and can drop the footer."""
+    findings = artifacts.inspect(
+        minimal_pdf(tmp_path / "purple.pdf", text="Loans to the economy", colour="6F00B6"))
+    assert any("6F00B6" in f for f in findings), findings
+
+
+def test_a_pdf_is_not_a_finding_merely_for_carrying_images(tmp_path):
+    """`no_embedded_images` catches a logo in a deck. In a PDF every chart is an image, so the
+    same rule would refuse every file the engine has ever produced, branded or not."""
+    assert artifacts.inspect(
+        minimal_pdf(tmp_path / "charts.pdf", text="Loans to the economy", image=True)) == []
+
+
+def test_a_neutral_pdf_has_no_findings(tmp_path):
+    assert artifacts.inspect(minimal_pdf(tmp_path / "clean.pdf",
+                                         text="Azerbaijan Macro & Banking Monitor",
+                                         colour="1F3F7A", image=True)) == []
+
+
+def test_a_file_that_is_not_a_readable_pdf_is_a_finding_not_a_pass(tmp_path):
+    """The shape of the defect that reached CI.
+
+    `pdftotext` reports a file it cannot parse by exiting non-zero with empty output, and empty
+    output read as "no organisation named" — so a PDF the guard could not open was uploaded as
+    clean. Reading it in-process turns the same case into an exception, which is already a finding.
+    """
+    broken = tmp_path / "truncated.pdf"
+    broken.write_bytes(b"%PDF-1.7\nnot really a pdf\n")
+    findings = artifacts.inspect(broken)
+    assert findings and "could not be inspected" in findings[0]
+
+
+def test_inspecting_a_pdf_shells_out_to_nothing(tmp_path, monkeypatch):
+    """Why this is pinned: the guard used to call `pdftotext`, which nothing declared as a
+    dependency. The test runner had poppler installed and CI did not, so the same file was clean
+    on one machine and uninspectable on the other. An in-process reader cannot drift that way."""
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"the artefact guard shelled out to {args[0]!r}")
+
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    findings = artifacts.inspect(
+        minimal_pdf(tmp_path / "named.pdf", text="Azer-Turk Bank", colour="6F00B6"))
+    assert len(findings) == 2, findings
 
 
 def test_report_metadata_is_inspected_too(tmp_path):

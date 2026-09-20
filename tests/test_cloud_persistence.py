@@ -21,6 +21,8 @@ import pytest
 
 from azmonitor.cloud import objectstore as OS
 
+from conftest import minimal_pdf
+
 
 # --------------------------------------------------------------- building fixtures
 
@@ -40,10 +42,10 @@ def _edition_on_disk(root: Path, report_type: str, edition: str, version: int,
         "reporting_periods": {"banking": "2026-07-31", "macro": "2026-08-31"},
     }), encoding="utf-8")
     (d / "narrative.json").write_text(json.dumps({"mode": "analyst", "slides": {}}), encoding="utf-8")
-    (d / f"report_{edition}_v{version}.pdf").write_bytes(b"%PDF-1.7\n" + b"x" * 2048)
-    # Real zips, not `PK\x03\x04` stubs. Artefacts are opened and read before upload, and a file
-    # that cannot be opened is a finding rather than a pass — so a stub would be refused on its way
-    # past the thing these tests are actually about.
+    # Real files, not `%PDF-1.7` and `PK\x03\x04` stubs. Artefacts are opened and read before
+    # upload, and a file that cannot be opened is a finding rather than a pass — so a stub would be
+    # refused on its way past the thing these tests are actually about.
+    minimal_pdf(d / f"report_{edition}_v{version}.pdf", text="Loans to the economy")
     _office(d / f"report_{edition}_v{version}.pptx", "ppt/slides/slide1.xml",
             '<?xml version="1.0"?><p:sld xmlns:p="x" xmlns:a="y"><a:t>Loans</a:t></p:sld>')
     _office(d / f"report_{edition}_v{version}.xlsx", "xl/sharedStrings.xml",
@@ -386,7 +388,7 @@ def test_two_directories_claiming_one_version_publish_once(tmp_path):
     for d, tag in ((first, "early"), (second, "late")):
         d.mkdir(parents=True)
         (d / "manifest.json").write_text(json.dumps({"generated_at": f"2026-09-19T0{len(tag)}:00:00"}))
-        (d / f"report_{tag}.pdf").write_bytes(b"%PDF-1.7\n")
+        minimal_pdf(d / f"report_{tag}.pdf", text="Loans to the economy")
 
     _publish_local_editions(outputs, store, fence=None)
 

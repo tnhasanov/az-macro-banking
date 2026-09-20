@@ -19,16 +19,17 @@
 # The distinction matters and was found the hard way: the profile controls how the engine *renders*,
 # so switching to `neutral` makes new output clean, while files rendered earlier under `internal`
 # sit on disk unchanged. Seeding an archive of those under the neutral profile uploaded 95 branded
-# decks, 36 branded workbooks and 78 branded PDFs to personal storage without a single complaint.
+# decks, 36 branded workbooks and 95 branded PDFs to personal storage without a single complaint.
 restricted_markers:
   # Phrases that identify the organisation. Matched in extracted text, case-insensitively.
   text:
     - "Azer-Turk Bank"
     - "Azər-Türk Bank"
     - "Azerturk"
-  # The brand palette, as it appears in Office XML.
+  # The brand palette, as it appears in Office XML and as a PDF's content stream draws it.
   colours: ["6F00B6", "4E0080", "9B59D0", "DDD0EA", "E6DAF1", "F5ECFA"]
-  # A neutral deck embeds no images at all, so any embedded image is a logo until proven otherwise.
+  # A neutral deck embeds no images at all, so any embedded image is a logo until proven
+  # otherwise. Decks and workbooks only: in a PDF every chart is an image.
   no_embedded_images: true
 
 default: internal

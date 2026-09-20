@@ -60,19 +60,39 @@ The distribution profile governs how the engine *renders*. It says nothing about
 earlier under a different profile — and an archive of those is exactly what a first seed uploads.
 
 `publish seed --with-reports` under the neutral profile, against the archive this repository
-actually holds, uploaded **95 branded decks, 36 branded workbooks and 78 branded PDFs** to personal
+actually holds, uploaded **95 branded decks, 36 branded workbooks and 95 branded PDFs** to personal
 object storage. Every one carried the bank's logo or its palette. The guard passed each time,
 correctly, because the profile was neutral. The files were not.
 
 **Fixed** by inspecting the artefacts themselves. Every file is opened and read before upload, and
 the question asked is "does this file carry the organisation's identity?" — matched against markers
 declared in `config/distribution.yaml`: the name in extracted text, the palette as Office XML spells
-it, and any embedded image at all. A file that cannot be opened is a finding, not a pass. A refusal
-stops the whole publish rather than skipping one edition, because a half-uploaded archive with no
-record of which half is worse than none.
+it and as a PDF's content stream draws it, and, in a deck or a workbook, any embedded image at all.
+A file that cannot be opened is a finding, not a pass. A refusal stops the whole publish rather than
+skipping one edition, because a half-uploaded archive with no record of which half is worse than
+none.
 
 Verified on the real archive: the same seed now uploads zero report files and refuses with the
-reason, while still seeding the dataset. A neutral edition passes cleanly.
+reason, while still seeding the dataset. A neutral edition — rendered, converted to PDF and
+inspected end to end — passes cleanly.
+
+The PDF half of that check was weaker than the rest until CI said so, twice over.
+
+* It only read text, and a converted deck keeps the logo and the palette without necessarily
+  keeping the footer that names the bank. 78 of the 95 PDFs named the organisation; the other 17
+  carried its logo on the cover and its brand purple on every slide, and passed. Reading colours as
+  well as text catches all 95.
+* It extracted that text by running `pdftotext`, a binary nothing declared as a dependency. The
+  machine these tests were written on had poppler installed; the CI runner did not, so the guard
+  reported every PDF as uninspectable there and the suite failed on four tests. Worse than the
+  failure was the passing case: `pdftotext` reports a file it cannot parse by exiting non-zero with
+  empty output, which read as "no organisation named" — a fail-open in a guard whose whole premise
+  is that "we could not check" is not "it is clean".
+
+Both are fixed by reading the PDF in-process with `pdfplumber`, already a dependency of the engine
+because the parsers read published PDFs with it. A file it cannot open raises, and an exception was
+already a finding. A test asserts the inspector shells out to nothing, so the dependency cannot
+drift back in unnoticed.
 
 ### B. `multipart` is opt-in, and the client was not passing it
 
