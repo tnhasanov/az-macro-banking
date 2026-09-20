@@ -90,7 +90,12 @@ jobs:
 
           d = config.delivery_config()
           assert d.get("enabled") is False, "delivery must be disabled in the committed configuration"
-          assert (d["channels"]["whatsapp"].get("enabled") is False), "WhatsApp must be disabled in the committed configuration"
+          # Every channel, not a named one. This check used to name WhatsApp alone, and `email:
+          # enabled: true` sat in the committed configuration for weeks without CI objecting —
+          # caught in the end by the workflow's own refusal to start, which is a slower place to
+          # find it and one that only a dispatched run reaches.
+          on = [name for name, ch in (d.get("channels") or {}).items() if ch.get("enabled")]
+          assert not on, f"these channels are enabled in the committed configuration: {on}"
 
           # Every recipient is named by an environment variable, never by an address, and every
           # credential is a variable name. A literal address or token here would be committed.
