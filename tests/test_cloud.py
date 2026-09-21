@@ -379,3 +379,45 @@ def test_the_projection_matches_the_dataset_it_came_from():
     finally:
         db.close()
         conn.close()
+
+
+def test_the_environment_mismatch_reaches_python_with_its_advice(_no_blob_credentials, monkeypatch,
+                                                                 tmp_path):
+    """The refusal that reads as the wrong problem.
+
+    `OIDC is enabled for this project, but not for the "development" environment` names the symptom
+    and not the fix: what has to change is which environments the *store* is connected to. A
+    credential minted outside a deployment is always a development one — preview and production
+    tokens are issued to deployments at runtime — so a store connected only to Preview and
+    Production refuses every call from CI.
+
+    The helper appends the fix to that message; this pins that it survives the trip through the
+    subprocess boundary rather than being truncated into the symptom again.
+    """
+    helper = tmp_path / "blob.mjs"
+    helper.write_text("// replaced by the fake below")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    store = OS.VercelBlobStore(helper=helper)
+
+    message = (
+        'Vercel Blob: OIDC is enabled for this project, but not for the "development" environment.'
+        "\n\nThe store is not connected to the development environment, which is the one this "
+        "token was issued for. A credential minted outside a deployment is always a development "
+        "one, so a store connected only to Preview and Production cannot be reached from CI.\n"
+        "Either add that environment to the store's project connection (Storage -> the store -> "
+        "Projects -> ⋯ -> Update Project Connection), or set BLOB_READ_WRITE_TOKEN, which "
+        "carries its own store and no environment at all."
+    )
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = message
+
+    monkeypatch.setattr(OS.subprocess, "run", lambda *a, **k: Result())
+    with pytest.raises(OS.StorageError) as excinfo:
+        store.check()
+
+    said = str(excinfo.value)
+    assert "Update Project Connection" in said, "the fix must survive, not just the symptom"
+    assert "BLOB_READ_WRITE_TOKEN" in said, "and the alternative credential with it"

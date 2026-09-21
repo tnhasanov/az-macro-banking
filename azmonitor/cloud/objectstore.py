@@ -309,9 +309,12 @@ class VercelBlobStore(ObjectStore):
         if proc.returncode in (self.NOT_FOUND, self.REFUSED):
             return proc.returncode, {}
         if proc.returncode != 0:
-            # stderr carries the SDK's own message; it names the object but never the token.
+            # stderr carries the SDK's own message, and the helper's advice where it has any; it
+            # names the object but never the credential. The cap is generous because the message
+            # worth reading is the long one — an environment mismatch explains itself in a
+            # paragraph, and truncating it leaves the symptom without the fix.
             raise StorageError(
-                f"blob {' '.join(argv)} failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
+                f"blob {' '.join(argv)} failed ({proc.returncode}): {proc.stderr.strip()[:2000]}")
         try:
             return 0, json.loads(proc.stdout or "{}")
         except ValueError as exc:

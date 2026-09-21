@@ -30,6 +30,39 @@
  */
 const API = "https://api.vercel.com";
 
+/**
+ * The environment a minted token is for, read from its own claims.
+ *
+ * A Vercel OIDC token names the team, the project *and the environment* it was issued for, and the
+ * Blob API checks that environment against the ones the store is connected to. The mint endpoint
+ * issues a **development** token — `vercel project token` is documented as "Get a development OIDC
+ * token for a project" and takes no environment option — because preview and production tokens are
+ * issued to deployments at runtime, not on demand. A runner is therefore always a development
+ * caller, whatever branch it is building.
+ *
+ * Reported here so that a store connected to the wrong environments says so at the point the token
+ * is made, rather than two steps later as "OIDC is enabled for this project, but not for the
+ * \"development\" environment" — which is accurate and gives no hint that it is a *store
+ * connection* that needs changing.
+ *
+ * The payload is read, not verified: this is a label for a log line, and the API is the thing that
+ * decides. Only the environment is taken. The rest of the payload names the owner and the project,
+ * and there is no reason to put those in a log.
+ */
+function environmentOf(jwt) {
+  const parts = jwt.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    if (typeof payload.environment === "string") return payload.environment;
+    // Older tokens carry it only inside `sub`, as `owner:x:project:y:environment:z`.
+    const sub = typeof payload.sub === "string" ? payload.sub : "";
+    return /(?:^|:)environment:([^:]+)/.exec(sub)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Status and Vercel's error code. Never a body, which could echo a name or a value. */
 async function probe(method, path, token) {
   try {
@@ -148,8 +181,15 @@ async function main() {
         "::warning::BLOB_STORE_ID is not set. The token was minted, but OIDC needs the store it"
         + " names; set BLOB_STORE_ID from the project's environment variables.\n");
     }
+    const environment = environmentOf(minted);
+    if (environment) {
+      process.stdout.write(
+        `::notice::the minted token is for the "${environment}" environment. The Blob store must`
+        + ` be connected to that environment, or the call is refused.\n`);
+    }
     process.stdout.write(JSON.stringify({
       minted: true, project: projectId, oidc_token_length: minted.length, store_id: store || null,
+      environment,
     }) + "\n");
     return;
   }

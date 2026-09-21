@@ -36,6 +36,7 @@ import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { pathToFileURL } from "node:url";
 import { put, get, head, list, del, BlobNotFoundError } from "@vercel/blob";
 
 const ACCESS = "private";
@@ -250,12 +251,39 @@ const COMMANDS = {
 };
 
 const [command, ...rest] = process.argv.slice(2);
-const run = COMMANDS[command];
-if (!run) fail(`unknown command ${command ?? "(none)"}; expected one of ${Object.keys(COMMANDS).join(", ")}`);
+// Imported rather than executed — by a test reaching for `advice` — so there is no command line to
+// read and nothing to run.
+const invoked = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const run = invoked ? COMMANDS[command] : null;
+if (invoked && !run) {
+  fail(`unknown command ${command ?? "(none)"}; expected one of ${Object.keys(COMMANDS).join(", ")}`);
+}
 
 try {
-  await run(args(rest));
+  if (run) await run(args(rest));
 } catch (error) {
-  // The message can carry a pathname but never the token, which the SDK keeps in a header.
-  fail(`${error?.name ?? "Error"}: ${error?.message ?? String(error)}`, 1);
+  // The message can carry a pathname but never the credential, which the SDK keeps in a header.
+  fail(`${error?.name ?? "Error"}: ${error?.message ?? String(error)}${advice(error)}`, 1);
+}
+
+/**
+ * The one failure whose message names the symptom and not the fix.
+ *
+ * `OIDC is enabled for this project, but not for the "development" environment` is accurate and
+ * unhelpful: it reads as though OIDC needs enabling somewhere, when what it means is that the
+ * *store* is connected to some environments and not to the one this token was issued for. A token
+ * minted for a runner is always a development one — preview and production tokens are issued to
+ * deployments at runtime, not on demand — so a store connected only to Preview and Production
+ * refuses every call from CI with this message.
+ */
+export function advice(error) {
+  const message = String(error?.message ?? "");
+  if (!message.startsWith("Vercel Blob: OIDC is enabled for this project")) return "";
+  const environment = /for the "([^"]+)" environment/.exec(message)?.[1] ?? "this token's";
+  return `\n\nThe store is not connected to the ${environment} environment, which is the one this`
+    + " token was issued for. A credential minted outside a deployment is always a development"
+    + " one, so a store connected only to Preview and Production cannot be reached from CI."
+    + "\nEither add that environment to the store's project connection (Storage -> the store ->"
+    + " Projects -> \u22ef -> Update Project Connection), or set BLOB_READ_WRITE_TOKEN, which"
+    + " carries its own store and no environment at all.";
 }

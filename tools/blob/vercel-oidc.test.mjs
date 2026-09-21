@@ -159,3 +159,67 @@ test("the mint request carries the bearer and the team, and posts", async () => 
   ]);
   assert.equal(result.ok, true, result.stderr);
 });
+
+// ------------------------------------------------------- which environment the token is for
+
+/**
+ * A Vercel OIDC token names the environment it was issued for, and the Blob API checks that
+ * against the environments the store is connected to. The mint endpoint issues a **development**
+ * token — `vercel project token` is documented as "Get a development OIDC token for a project" and
+ * takes no environment option, because preview and production tokens are issued to deployments at
+ * runtime rather than on demand.
+ *
+ * So a store connected only to Preview and Production refuses every call from CI, with a message
+ * that names the symptom and not the fix. These tests exist so the environment is stated where the
+ * token is made, two steps before the refusal.
+ */
+function jwt(payload) {
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "RS256" })}.${b64(payload)}.signature`;
+}
+
+async function mintWithClaims(payload) {
+  const token = jwt(payload);
+  const result = await mint([
+    { method: "POST", path: "/v1/projects", status: 200, body: { token } },
+  ]);
+  assert.equal(result.ok, true, result.stderr);
+  return { ...result, summary: JSON.parse(result.stdout.trim().split("\n").pop()) };
+}
+
+test("the environment the token is for is reported, not left to be discovered", async () => {
+  const { summary, stdout } = await mintWithClaims({
+    sub: "owner:agrifin:project:az-macro-banking:environment:development",
+    environment: "development",
+  });
+  assert.equal(summary.environment, "development");
+  assert.match(stdout, /::notice::the minted token is for the "development" environment/);
+  assert.match(stdout, /store must be connected to that environment/);
+});
+
+test("an environment carried only inside `sub` is still found", async () => {
+  const { summary } = await mintWithClaims({
+    sub: "owner:agrifin:project:az-macro-banking:environment:preview",
+  });
+  assert.equal(summary.environment, "preview");
+});
+
+test("a token whose claims cannot be read is minted anyway", async () => {
+  /** The environment is a label for a log line. The API decides, and an unreadable payload is no
+      reason to refuse a token the API may well accept. */
+  const result = await mint([
+    { method: "POST", path: "/v1/projects", status: 200, body: { token: "not.a.jwt" } },
+  ]);
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(JSON.parse(result.stdout.trim().split("\n").pop()).environment, null);
+});
+
+test("no claim other than the environment is printed", async () => {
+  const { stdout } = await mintWithClaims({
+    sub: "owner:agrifin:project:prj_SecretLookingId:environment:development",
+    environment: "development",
+    owner_id: "team_Private",
+  });
+  assert.ok(!stdout.includes("prj_SecretLookingId"), "the sub names the project; a log need not");
+  assert.ok(!stdout.includes("team_Private"));
+});

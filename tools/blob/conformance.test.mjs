@@ -275,3 +275,55 @@ test("both credentials reach the private download too", async () => {
       `${label}: a private download is refused without a credential`);
   }
 });
+
+// ------------------------------------------ the store's environments vs the token's
+
+/**
+ * The refusal that reads as the wrong problem.
+ *
+ * `OIDC is enabled for this project, but not for the "development" environment` is accurate and
+ * gives no hint that what needs changing is a *store connection*. A credential minted outside a
+ * deployment is always a development one — preview and production tokens are issued to deployments
+ * at runtime, not on demand — so a store connected only to Preview and Production refuses every
+ * call from CI with exactly this message.
+ */
+test("the SDK raises its own error type for an environment mismatch", async () => {
+  install();
+  const { list, BlobError } = await import("@vercel/blob");
+
+  const agent = new MockAgent();
+  agent.disableNetConnect();
+  setGlobalDispatcher(agent);
+  agent.get(API).intercept({ path: (p) => p.startsWith("/api/blob"), method: "GET" })
+    .reply(403, { error: { code: "forbidden",
+      message: 'OIDC is enabled for this project, but not for the "development" environment.' } })
+    .persist();
+
+  await assert.rejects(
+    () => list({ oidcToken: OIDC_TOKEN, storeId: STORE_ID, limit: 1 }),
+    (error) => {
+      assert.ok(error instanceof BlobError);
+      assert.match(error.message, /not for the "development" environment/);
+      return true;
+    },
+  );
+});
+
+test("the helper turns that message into the change that fixes it", async () => {
+  // Run against the real wording the SDK produces, not a paraphrase of it: the helper matches on
+  // that message, so a reworded one would silently stop being explained.
+  const { advice } = await import("./blob.mjs?advice");
+  const said = advice(new Error(
+    'Vercel Blob: OIDC is enabled for this project, but not for the "development" environment.'));
+
+  assert.match(said, /not connected to the development environment/,
+    "it must name the environment out of the message, not a guess");
+  assert.match(said, /Update Project Connection/, "the fix is a store connection; say where");
+  assert.match(said, /BLOB_READ_WRITE_TOKEN/, "and name the credential that has no environment");
+});
+
+test("nothing else gets unsolicited advice", async () => {
+  const { advice } = await import("./blob.mjs?advice");
+  assert.equal(advice(new Error("Vercel Blob: Access denied, please provide a valid token")), "");
+  assert.equal(advice(new Error("ENOTFOUND")), "");
+});

@@ -125,6 +125,39 @@ actually used for storage being a token that dies in hours.
 If a readable store-scoped token ever becomes available, nothing needs rewriting: set
 `BLOB_READ_WRITE_TOKEN` as a repository secret and the minting step skips itself.
 
+### The environment the token is for
+
+A Vercel OIDC token names the team, the project **and the environment** it was issued for, and the
+Blob API checks that environment against the ones the store is connected to.
+
+**A credential minted outside a deployment is always a `development` one.** `vercel project token`
+is documented as "Get a development OIDC token for a project" and takes no environment option;
+preview and production tokens are issued to deployments at runtime, not on demand. A runner is a
+development caller whatever branch it builds, and no parameter changes that.
+
+So a store connected only to **Preview** and **Production** refuses every call from CI:
+
+```
+Vercel Blob: OIDC is enabled for this project, but not for the "development" environment.
+```
+
+which names the symptom and not the fix: what has to change is the store's *connection*, not
+anything about OIDC. The store must include **Development** among its connected environments — from
+Storage → the store → **Projects** → ⋯ → **Update Project Connection**.
+
+That is not a loosening worth worrying about, and it is worth saying why rather than asserting it.
+Adding Development lets a development OIDC token for this project reach the store. Anyone who can
+mint one already has a credential for the project — and could deploy code to it, which would run
+holding a Preview or Production token that reaches the same store. The set of people who can reach
+the store is unchanged; only the shape of the credential they would use differs.
+
+The alternative is `BLOB_READ_WRITE_TOKEN`, which carries its own store and no environment at all —
+and which this store cannot give you, for the reason above.
+
+`tools/blob/vercel-oidc.mjs` reports the environment from the token's own claims when it mints, so
+a mismatch is visible at that step rather than two steps later, and `tools/blob/blob.mjs` appends
+the fix to the API's message when it sees it.
+
 ### When minting fails
 
 `tools/blob/vercel-oidc.mjs` diagnoses itself. On any refusal it asks four questions in turn and
