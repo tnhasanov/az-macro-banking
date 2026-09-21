@@ -8,6 +8,6 @@
     "@vercel/blob": "2.8.0"
   },
   "scripts": {
-    "test": "VERCEL_BLOB_RETRIES=0 node --test conformance.test.mjs oidc-from-env-file.test.mjs"
+    "test": "VERCEL_BLOB_RETRIES=0 node --test conformance.test.mjs oidc-from-env-file.test.mjs vercel-oidc.test.mjs"
   }
 }

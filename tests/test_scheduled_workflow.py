@@ -297,19 +297,46 @@ def _workflow(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
+def _code(name: str) -> str:
+    """The workflow with its comments removed.
+
+    A test about what a workflow *does* must not match the prose explaining why it stopped doing
+    something else — the comment saying `vercel env pull` cannot work here contains the very string
+    that would prove it still ran.
+    """
+    return "\n".join(l for l in _workflow(name).split("\n") if not l.strip().startswith("#"))
+
+
 @pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
 def test_a_run_mints_its_own_blob_credential(name):
     """The read-write token cannot be a GitHub secret, because it cannot be read.
 
     Opting it into a project connection stores it as a *sensitive* Vercel variable, which is
     write-only by design: no reveal, no API, and `vercel env pull` returns it empty. So each run
-    pulls a short-lived OIDC token instead, and the step that does it must be there in both
+    mints a short-lived OIDC token instead, and the step that does it must be there in both
     workflows or the scheduled one fails at the point of saving while the manual one works.
     """
     body = _workflow(name)
     assert "Mint a short-lived Blob credential" in body
-    assert "env pull" in body and "oidc-from-env-file.mjs" in body
-    assert "VERCEL_CLI_VERSION" in body, "the CLI version is pinned, not floating"
+    assert "node tools/blob/vercel-oidc.mjs" in body
+    assert "BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}" in body, \
+        "an OIDC token names no store by itself"
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_the_run_does_not_reach_for_env_pull(name):
+    """`vercel env pull` cannot work with a project-scoped access token, and failed as a linking
+    error rather than an authorisation one.
+
+    The CLI fetches the team alongside the project — `getOrgById` settled in parallel with the
+    project lookup — and a project-scoped token is denied team-level resources by design. The 403
+    surfaces as "Could not retrieve Project Settings ... remove the `.vercel` directory", which
+    sends you looking for a link that was never missing. Minting through the project's own token
+    endpoint asks for nothing at team level.
+    """
+    code = _code(name)
+    assert "env pull" not in code
+    assert "VERCEL_CLI_VERSION" not in code, "no CLI is invoked any more, so none is pinned"
 
 
 @pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
@@ -321,14 +348,15 @@ def test_minting_is_skipped_when_a_read_write_token_exists(name):
 
 
 @pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
-def test_the_pulled_file_does_not_outlive_the_step(name):
-    """It holds every non-sensitive variable in that environment, the database URL among them."""
+def test_minting_writes_no_file_at_all(name):
+    """`env pull` wrote every non-sensitive variable in the environment to disk, the database URL
+    among them, and the step had to be careful to delete it. Asking only for the token writes
+    nothing, so there is nothing to leak or to clean up."""
     body = _workflow(name)
     step = body[body.index("Mint a short-lived Blob credential"):]
-    step = step[:step.index("- name:", 10)]
-    assert "trap 'rm -f" in step, "the pulled file is removed however the step ends"
-    assert "$RUNNER_TEMP" in step, "and it is written outside the checkout, never into it"
-    assert "cat " not in step, "nothing prints the pulled file"
+    step = step[step.index("run:"):]
+    step = step[:step.index("- name:")]
+    assert ".env" not in step and "cat " not in step
 
 
 @pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])

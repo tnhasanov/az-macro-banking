@@ -68,20 +68,35 @@ to get a readable one is not an option because the dataset lives in this store.
 
 ### What the worker uses instead
 
-An OIDC token is *issued* by Vercel but not *confined* to it. `vercel env pull` writes a fresh one,
-which is exactly how local development reaches a private store — and a GitHub Actions runner is the
-same case. The pull runs non-interactively with a Vercel access token plus `VERCEL_ORG_ID` and
-`VERCEL_PROJECT_ID`.
-
-So each run mints its own credential:
+An OIDC token is *issued* by Vercel but not *confined* to it, so a runner can use one — it just has
+to be able to ask for one. The narrow way to ask is `POST /v1/projects/{id}/token`, which mints an
+OIDC token for a single project. It is the call `@vercel/oidc` makes to refresh one, and the CLI
+exposes it as `vercel project token`. `tools/blob/vercel-oidc.mjs` makes it directly.
 
 ```
-vercel env pull  ──>  VERCEL_OIDC_TOKEN (~12h) + BLOB_STORE_ID  ──>  the SDK, unchanged
+POST /v1/projects/{id}/token  ──>  VERCEL_OIDC_TOKEN (~12h)  ──+
+                                                               ├──>  the SDK, unchanged
+BLOB_STORE_ID (a repository secret)  ─────────────────────────-+
 ```
 
-`tools/blob/oidc-from-env-file.mjs` takes only those two out of the pulled file, masks the token
-before anything is printed, and deletes the file. `BLOB_READ_WRITE_TOKEN` is never taken from it,
-empty or not.
+**Not `vercel env pull`.** That was the first attempt and it cannot work with a project-scoped
+token. The CLI resolves a project by fetching the *team* alongside it — `getOrgById(client,
+link.orgId)`, settled in parallel with the project lookup — and a project-scoped token is denied
+team-level resources by design. The 403 surfaces as:
+
+```
+Error: Could not retrieve Project Settings.
+To link your Project, remove the `.vercel` directory and deploy again.
+```
+
+which reads like a linking problem and is not one. The CLI prints that message only from a 403
+whose code is `forbidden` or `team_unauthorized`; a wrong project or team id returns 404 and takes
+a different branch, and an invalid token raises `InvalidToken`. So the message is itself evidence
+that the token was accepted and the identifiers were found — the refusal was about scope.
+
+The store id has to be supplied separately now, because nothing pulls the environment any more. It
+is not a secret — it sits in the project's environment variables beside the token Vercel keeps
+write-only — but it is kept as a repository secret so a log cannot name the store.
 
 **Read this part carefully, because it is the real cost.** What sits in CI permanently is the
 access token used to mint the short-lived one, and it is a *Vercel access token*, not a Blob
@@ -109,6 +124,24 @@ actually used for storage being a token that dies in hours.
 
 If a readable store-scoped token ever becomes available, nothing needs rewriting: set
 `BLOB_READ_WRITE_TOKEN` as a repository secret and the minting step skips itself.
+
+### When minting fails
+
+`tools/blob/vercel-oidc.mjs` diagnoses itself. On any refusal it asks four questions in turn and
+prints only status codes and Vercel's own error codes — never a credential, never a response body:
+
+| what it asks | what an answer means |
+|---|---|
+| `GET /v2/user` | 401 everywhere below too: the access token is invalid or expired |
+| `GET /v9/projects/{id}` | 404: `VERCEL_PROJECT_ID` names no project this token can see |
+| `GET /v9/projects/{id}?teamId={org}` | 404 while the row above is 200: the project is not in that team |
+| `GET /v2/teams/{org}` | 403 is **expected** for a project-scoped token, and is what `env pull` tripped over |
+
+It ends with a one-line verdict. Run it anywhere the three variables are set:
+
+```bash
+VERCEL_TOKEN=... VERCEL_PROJECT_ID=prj_... VERCEL_ORG_ID=team_... node tools/blob/vercel-oidc.mjs
+```
 
 ### What was considered and rejected
 
@@ -147,8 +180,9 @@ Set these as **repository secrets** (Settings → Secrets and variables → Acti
 |---|---|---|
 | `AZMONITOR_DATABASE_URL` | Neon pooled connection string | the read model and the run lease |
 | `VERCEL_TOKEN` | **project-scoped** Vercel access token, with an expiry | minting the Blob credential each run |
-| `VERCEL_ORG_ID` | team id from the project's settings | so the pull knows which project |
-| `VERCEL_PROJECT_ID` | project id from the project's settings | so the pull knows which project |
+| `VERCEL_ORG_ID` | team id from the team's settings | the team the project belongs to |
+| `VERCEL_PROJECT_ID` | project id from the project's settings | which project to mint a token for |
+| `BLOB_STORE_ID` | `store_…`, from the project's environment variables | which store that token is for |
 | `BLOB_READ_WRITE_TOKEN` | **leave unset** | unreadable by design; see above. Set it only if a readable one ever exists, and the minting step will skip itself |
 | `AZMONITOR_ARCHIVE_BASE_URL` | public base of the dashboard | links in emails |
 | `AZMONITOR_OWNER_EMAIL` | the one authorised test recipient | delivery routing |
@@ -291,6 +325,7 @@ repository secret, one each:
 | `VERCEL_TOKEN` | the token from step 4 |
 | `VERCEL_ORG_ID` | the team id |
 | `VERCEL_PROJECT_ID` | the project id |
+| `BLOB_STORE_ID` | `store_…`, from the project's Environment Variables |
 | `AZMONITOR_DATABASE_URL` | the Neon pooled string |
 | `AZMONITOR_OWNER_EMAIL` | your address |
 
