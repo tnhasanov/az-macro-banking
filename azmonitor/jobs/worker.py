@@ -167,6 +167,7 @@ class Worker:
         self._lease_renewed = 0.0
         self._detail_at = 0.0
         self._dataset_dirty = False
+        self._collected = False
         self._produced: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ plumbing
@@ -245,6 +246,8 @@ class Worker:
                     self.engine.close()
                 try:
                     self._save_dataset(claim)
+                    if self._collected and self.settings.save_dataset and not self.settings.skip_restore:
+                        self._refresh_readmodel(claim)
                 except LeaseLost:
                     raise
                 except Exception as exc:
@@ -385,6 +388,23 @@ class Worker:
         except Exception:  # pragma: no cover - a note is not worth failing over
             pass
 
+    def _refresh_readmodel(self, claim: Claim) -> None:
+        """The dashboard's figures, rebuilt from the dataset this worker just saved, under its lease."""
+        from ..cloud.publish import refresh_readmodel
+
+        self._renew_dataset_lease(force=True)
+        conn = self.connect()
+        try:
+            counts = refresh_readmodel(conn, self.store)
+            J.note(self.conn, claim, "dashboard figures refreshed",
+                   {k: v for k, v in counts.items() if isinstance(v, (int, float, str))})
+        except Exception as exc:  # the figures lag one run; the reports are already published
+            log.exception("the read model could not be refreshed")
+            J.note(self.conn, claim, "the dashboard figures could not be refreshed; they update on the next run",
+                   {"error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            conn.close()
+
     def _sync(self) -> None:
         with self.conn.cursor() as cur:
             cur.execute("SELECT edition_id, report_type, edition, version, fingerprint, published_at, "
@@ -475,6 +495,7 @@ class Worker:
         if refresh.get("datasets") and len(failed) == len(refresh["datasets"]):
             raise Transient("sources_unreachable", "Every official source failed to respond; the check will be retried.")
         self._dataset_dirty = True
+        self._collected = True
         quality = self.engine.validate()
         found = CH.classify_refresh(refresh, batch_id=batch_id, today=self._today())
         CH.record(self.conn, found, batch_id=batch_id, environment=claim.environment)
@@ -515,6 +536,11 @@ class Worker:
             pub = self.engine.resolve_publication(rt, "latest")
             if pub:
                 return pub["publication_id"]
+        if rt == "weekly" and scope == "latest":
+            # "the latest week" is a different week every Monday; the edition is of a named week
+            from ..scheduling.tasks import previous_calendar_week
+
+            return previous_calendar_week()[0].isoformat()
         return scope
 
     def _own_item(self, claim: Claim, plan: list[CH.PlannedReport], quality) -> Item:

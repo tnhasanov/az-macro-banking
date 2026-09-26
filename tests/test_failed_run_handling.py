@@ -230,12 +230,13 @@ def test_the_manual_workflow_applies_the_same_publish_gate(manual):
     assert "steps.run.outputs.publish == 'yes'" in steps["Publish what the dashboard reads"]["if"]
 
 
-def test_the_scheduled_workflow_is_still_the_only_one_with_a_schedule():
-    """If a second scheduled trigger appears, two of them will fire and race."""
-    scheduled = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    assert "schedule" in _triggers(scheduled)
+def test_no_workflow_has_a_schedule_of_its_own():
+    """If a second scheduler appears, two of them will fire and race.
+
+    The one scheduler is now the application's tick (web/app/api/cron/tick), which starts
+    source checks and digests as jobs; scheduled.yml lost its cron when that replaced it. So no
+    workflow may carry a `schedule:` trigger at all.
+    """
     for path in pathlib.Path(".github/workflows").glob("*.yml"):
-        if path == WORKFLOW:
-            continue
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert "schedule" not in _triggers(doc), f"{path.name} also has a schedule trigger"
+        assert "schedule" not in _triggers(doc), f"{path.name} has a schedule trigger"

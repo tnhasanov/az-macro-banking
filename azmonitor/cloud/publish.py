@@ -272,17 +272,30 @@ def cmd_readmodel(args) -> int:
     point: a fresh runner has no `outputs/` directory, and building the catalogue from what it can
     see locally would publish an empty archive over a full one.
     """
+    from . import readmodel as RM
+
+    store = OS.store_from_env()
+    fence = _fence()
+    if fence:
+        fence.check("before publishing the read model")
+    conn = RM.connect()
+    try:
+        return _out(refresh_readmodel(conn, store))
+    finally:
+        conn.close()
+
+
+def refresh_readmodel(conn, store) -> dict[str, Any]:
+    """Rebuild the dashboard's projection from the dataset on disk and the catalogue in storage.
+
+    Called by the job worker while it still holds the dataset lease, so a worker with older data
+    can never overwrite the projection a newer one has just published.
+    """
     from ..calc.validate import validate_all
     from ..storage.db import Database
     from . import readmodel as RM
 
     paths = config.paths()
-    store = OS.store_from_env()
-    fence = _fence()
-    if fence:
-        fence.check("before publishing the read model")
-
-    conn = RM.connect()
     db = Database(paths.db_path)
     try:
         RM.ensure_schema(conn)
@@ -308,10 +321,9 @@ def cmd_readmodel(args) -> int:
             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "counts": result, "quality": quality["summary"],
         })
-        return _out(result)
+        return result
     finally:
         db.close()
-        conn.close()
 
 
 def cmd_verify(args) -> int:

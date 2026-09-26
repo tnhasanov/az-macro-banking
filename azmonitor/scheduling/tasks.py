@@ -193,26 +193,53 @@ def _to_utc(local: dt.time) -> str:
 
 
 def workflow_drift() -> list[str]:
-    """Where config/schedule.yaml and the GitHub Actions crons disagree.
+    """Where config/schedule.yaml and the application's scheduler disagree, or a second one exists.
 
-    GitHub cron is UTC only, so the workflow holds the times converted. A conversion is exactly the
-    kind of thing that is right when written and wrong after the next edit, so it is checked rather
-    than trusted.
+    The only scheduler is the Vercel cron tick; the times it starts work at are in
+    web/lib/slots.ts because a Vercel Function cannot read this YAML at request time. Those copies
+    are compared here. And no GitHub workflow may carry a `schedule:` trigger of its own: two
+    schedulers for the same work run it twice, or each assumes the other did and neither does.
     """
+    import json as _json
+    import re as _re
+
     root = Path(__file__).resolve().parents[2]
-    workflow = root / ".github" / "workflows" / "scheduled.yml"
-    if not workflow.exists():
-        return []                       # no worker deployment in this checkout; nothing to compare
-    text = workflow.read_text(encoding="utf-8")
-    have = _utc_cron_times(text)
-    want = {_to_utc(t) for t in _scheduled_times("source-check")} | \
-           {_to_utc(t) for t in _scheduled_times("weekly-digest")}
-    problems = []
-    for t in sorted(want - have):
-        problems.append(f".github/workflows/scheduled.yml has no cron at {t} UTC, which is "
-                        f"{(int(t[:2]) + BAKU_UTC_OFFSET_HOURS) % 24:02d}:{t[3:]} Asia/Baku in "
-                        f"config/schedule.yaml")
-    # the monitor task has no entry in config/schedule.yaml's own times, so it is not compared here
+    problems: list[str] = []
+    workflows = root / ".github" / "workflows"
+    if workflows.exists():
+        for wf in sorted(workflows.glob("*.yml")):
+            if _re.search(r"^\s*schedule:\s*$", wf.read_text(encoding="utf-8"), _re.M):
+                problems.append(f".github/workflows/{wf.name} has a schedule: trigger; the scheduler tick "
+                                f"(web/app/api/cron/tick) is the only scheduler")
+    slots = root / "web" / "lib" / "slots.ts"
+    if not slots.exists():
+        return problems
+    text = slots.read_text(encoding="utf-8")
+    listed = _re.search(r"SOURCE_CHECK_TIMES = \[([^\]]*)\]", text)
+    ts_times = _re.findall(r'"(\d\d:\d\d)"', listed.group(1)) if listed else []
+    want = [t.strftime("%H:%M") for t in _scheduled_times("source-check")]
+    if sorted(ts_times) != sorted(want):
+        problems.append(f"web/lib/slots.ts starts source checks at {ts_times}, config/schedule.yaml at {want}")
+    weekly = _re.search(r'WEEKLY_DIGEST = \{ weekday: (\d), time: "(\d\d:\d\d)" \}', text)
+    cfg = config.schedule_config().get("weekly_digest") or {}
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    if not weekly:
+        problems.append("web/lib/slots.ts no longer states the weekly digest's weekday and time")
+    else:
+        js_weekday = (days.index(str(cfg.get("weekday", "monday")).lower()) + 1) % 7
+        if int(weekly.group(1)) != js_weekday or weekly.group(2) != cfg.get("time"):
+            problems.append(f"web/lib/slots.ts runs the digest on weekday {weekly.group(1)} at {weekly.group(2)}, "
+                            f"config/schedule.yaml on {cfg.get('weekday')} at {cfg.get('time')}")
+    window = _re.search(r"CATCH_UP_MINUTES = (\d+)", text)
+    cfg_window = (config.schedule_config().get("source_checks") or {}).get("catch_up_window_minutes")
+    if window and cfg_window is not None and int(window.group(1)) != int(cfg_window):
+        problems.append(f"web/lib/slots.ts catches up {window.group(1)} minutes, config/schedule.yaml {cfg_window}")
+    vercel = root / "web" / "vercel.json"
+    if vercel.exists():
+        crons = (_json.loads(vercel.read_text(encoding="utf-8")).get("crons") or [])
+        paths = sorted(c.get("path") for c in crons)
+        if paths != ["/api/cron/tick"]:
+            problems.append(f"web/vercel.json should run only the scheduler tick; it runs {paths}")
     return problems
 
 

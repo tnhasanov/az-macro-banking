@@ -9,7 +9,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { definitions, edition } from "@/lib/db";
+import { publicationFor } from "@/lib/appstate";
+import { deliveriesFor } from "@/lib/email/outbox";
+import { viewer } from "@/lib/viewer";
 import { Badge, Card, StatusBadge } from "@/components/ui";
+import { SendToMe } from "@/components/SendToMe";
 import { bytes, dateLong, period, reportTitle } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +29,12 @@ export default async function EditionPage({
     definitions(),
   ]);
   if (!e) notFound();
+  // Editions published through the job pipeline have a publication record: its cause, its
+  // validation and its email history. Earlier archive entries do not, and are shown as they were.
+  const [record, who] = await Promise.all([
+    publicationFor(e.report_type, e.edition, e.version).catch(() => null), viewer(),
+  ]);
+  const sent = record ? await deliveriesFor({ editionId: record.edition_id }).catch(() => []) : [];
 
   const quality = Object.entries(e.quality ?? {});
 
@@ -61,7 +71,44 @@ export default async function EditionPage({
             Downloads are served through this dashboard and require a signed-in session. The
             underlying storage is not publicly readable.
           </div>
+          {record && <SendToMe editionId={record.edition_id} canEmail={Boolean(who?.email)} />}
         </Card>
+
+        {record && (
+          <div className="grid grid-2">
+            <Card title="Why this edition exists" note={`Published ${dateLong(record.published_at)}`}>
+              <table className="data"><tbody>
+                <tr><td>Cause</td><td>{record.cause.replace(/_/g, " ")}</td></tr>
+                {record.supersedes && <tr><td>Revises</td><td>{record.supersedes}</td></tr>}
+                {record.information_cutoff && <tr><td>Information cutoff</td><td>{dateLong(record.information_cutoff)}</td></tr>}
+                {record.job_id && <tr><td>Produced by</td><td><Link href={`/jobs/${record.job_id}`}>{record.job_id}</Link></td></tr>}
+              </tbody></table>
+              {record.limitations.length > 0 && (
+                <ul style={{ margin: "10px 0 0", paddingLeft: 18, fontSize: 13 }}>
+                  {record.limitations.map((l, i) => <li key={i}>{l}</li>)}
+                </ul>
+              )}
+            </Card>
+            <Card title="Validation before publication">
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {(record.validation?.checks ?? []).map((c) => (
+                  <li key={c.id}>{c.ok ? "✓" : "✗"} {c.id.replace(/_/g, " ")}: {c.detail}</li>
+                ))}
+              </ul>
+              {sent.length > 0 && (
+                <>
+                  <div className="stat-label" style={{ marginTop: 12 }}>Email</div>
+                  <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 13 }}>
+                    {sent.map((d) => (
+                      <li key={d.delivery_id}>{d.purpose.replace(/_/g, " ")}: {d.status}
+                        {d.status_reason ? ` (${d.status_reason})` : ""}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </Card>
+          </div>
+        )}
 
         {e.summary?.length > 0 && (
           <Card title="Findings"

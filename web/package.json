@@ -9,21 +9,23 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts"
+    "test": "node --test --experimental-strip-types --import ./tests/register.mjs tests/*.test.ts"
   },
   "dependencies": {
+    "@vercel/blob": "2.8.0",
+    "jose": "5.9.6",
     "next": "15.5.25",
+    "postgres": "3.4.5",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "postgres": "3.4.5",
     "recharts": "2.15.0",
-    "jose": "5.9.6",
-    "@vercel/blob": "2.8.0"
+    "resend": "6.30.0"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
     "@types/react": "19.0.2",
     "@types/react-dom": "19.0.2",
+    "standardwebhooks": "1.1.1",
     "typescript": "5.7.2"
   },
   "overrides": {

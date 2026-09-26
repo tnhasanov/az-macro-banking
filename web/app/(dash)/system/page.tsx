@@ -1,10 +1,9 @@
 /**
  * System monitoring.
  *
- * Run history, data quality, locks and delivery state. The delivery table is read-only on purpose:
- * a delivery whose outcome is uncertain is resolved by a person at the command line against the
- * real ledger, never by a button here. A dashboard that could mark a send as done would be able to
- * lose an email.
+ * Run history, data quality, locks and the engine's own delivery records. Jobs have their own page
+ * (/jobs) and the email ledger its own section in Settings, where an uncertain delivery is settled
+ * explicitly by a person rather than retried blindly.
  */
 import {
   deliveries, isPopulated, jobRuns, lastRunPerTask, locks, meta, qualityChecks,
@@ -14,11 +13,14 @@ import { bakuTime, dateLong, sinceNow } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
-/** The schedule, in the clock it is written in. Kept beside the runs so a miss is obvious. */
+/**
+ * The schedule, in the clock it is written in. The scheduler tick (every 15 minutes) starts each of
+ * these once, as a job; monitoring runs inside every tick rather than as a task of its own.
+ */
 const SCHEDULE = [
   { task: "source-check", local: "09:15, 13:15, 17:15 Baku", utc: "05:15, 09:15, 13:15 UTC" },
   { task: "weekly-digest", local: "Monday 08:30 Baku", utc: "Monday 04:30 UTC" },
-  { task: "monitor", local: "07:45, 18:45 Baku", utc: "03:45, 14:45 UTC" },
+  { task: "monitoring", local: "every tick (15 min)", utc: "every tick (15 min)" },
 ];
 
 export default async function SystemPage() {

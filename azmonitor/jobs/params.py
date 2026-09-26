@@ -53,7 +53,8 @@ def normalise(report_type: str, raw: dict[str, Any] | None) -> dict[str, Any]:
     """
     if report_type not in REPORT_TYPES:
         raise InvalidRequest("unknown_report", f"There is no report type called {report_type!r}.")
-    raw = dict(raw or {})
+    # An empty field is an absent field: a form sends "" for a control left alone.
+    raw = {k: v for k, v in (raw or {}).items() if v not in (None, "")}
     extra = sorted(set(raw) - ALLOWED_KEYS)
     if extra:
         raise InvalidRequest("unknown_parameter", f"Unexpected parameter(s): {', '.join(extra)}.")

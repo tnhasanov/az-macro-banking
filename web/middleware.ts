@@ -12,9 +12,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { readSession, SESSION_COOKIE } from "./lib/auth";
 
-const PUBLIC_PATHS = ["/login", "/api/auth/login"];
-/** Authenticated by bearer secret inside the handler rather than by a session cookie. */
-const SELF_AUTHENTICATING = ["/api/cron/"];
+const PUBLIC_PATHS = ["/login", "/api/auth/login", "/unsubscribe"];
+/**
+ * Authenticated inside the handler rather than by a session cookie: the scheduler by a bearer
+ * secret, the email provider's webhook by its signature, an unsubscribe link by a signed token.
+ */
+const SELF_AUTHENTICATING = ["/api/cron/", "/api/webhooks/", "/api/unsubscribe"];
 
 export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;

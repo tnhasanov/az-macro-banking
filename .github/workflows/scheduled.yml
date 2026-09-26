@@ -1,30 +1,18 @@
 name: scheduled
 
-# The reporting engine, run on a schedule.
+# The engine's original task runner, kept for manual operation only.
 #
-# It lives here rather than in a Vercel Function because of two hard limits, measured rather than
-# assumed (see docs/vercel-architecture.md): the PowerPoint-to-PDF step needs LibreOffice, which is
-# 243 MB on top of 419 MB of Python dependencies, against a 500 MB Python bundle limit; and a full
-# source refresh takes about twelve minutes, which only fits inside Vercel's beta 1800-second
-# duration. A GitHub Actions runner has six hours, apt, and — for a public repository — no cost.
+# It no longer has a schedule. Scheduled work — the three daily source checks and the Monday
+# digest — is started by the application's scheduler tick (web/app/api/cron/tick) and runs through
+# report-job.yml, the same pipeline a request from the dashboard uses, with durable jobs, leases,
+# publication records and the email ledger. Two schedulers for the same work is how a report is
+# produced twice, or, when each assumes the other covered it, not at all; `schedule_drift` fails
+# CI if a `schedule:` trigger reappears here.
 #
-# Times are UTC because cron is always UTC. Asia/Baku is UTC+4 all year, with no daylight saving, so
-# the conversion is a fixed four hours and the local times in config/schedule.yaml are exact:
-#
-#   09:15 Baku = 05:15 UTC     13:15 Baku = 09:15 UTC     17:15 Baku = 13:15 UTC
-#   Mon 08:30 Baku = Mon 04:30 UTC
-#   07:45 Baku = 03:45 UTC     18:45 Baku = 14:45 UTC
-#
-# `monitor schedule check` compares these against config/schedule.yaml and CI fails if they drift.
+# Dispatch this by hand only to run a task the old way (for example a dry run of the readiness
+# rules). It shares the dataset lease with report jobs, so the two never overlap.
 
 on:
-  schedule:
-    - cron: "15 5 * * *"      # source check  - 09:15 Asia/Baku
-    - cron: "15 9 * * *"      # source check  - 13:15 Asia/Baku
-    - cron: "15 13 * * *"     # source check  - 17:15 Asia/Baku
-    - cron: "30 4 * * 1"      # weekly digest - Monday 08:30 Asia/Baku
-    - cron: "45 3 * * *"      # monitor       - 07:45 Asia/Baku
-    - cron: "45 14 * * *"     # monitor       - 18:45 Asia/Baku
   workflow_dispatch:
     inputs:
       task:
@@ -121,15 +109,8 @@ jobs:
       - name: Which task
         id: task
         run: |
-          # A scheduled run knows which task it is from the cron line that fired. A dispatched run
-          # is told. Anything else is a bug worth failing on rather than guessing about.
-          case "${{ github.event.schedule }}" in
-            "15 5 * * *"|"15 9 * * *"|"15 13 * * *") TASK=source-check ;;
-            "30 4 * * 1")                            TASK=weekly-digest ;;
-            "45 3 * * *"|"45 14 * * *")              TASK=monitor ;;
-            "")                                      TASK="${{ inputs.task }}" ;;
-            *) echo "::error::unrecognised cron schedule '${{ github.event.schedule }}'"; exit 1 ;;
-          esac
+          # Only ever dispatched by hand now; the task is whatever was asked for.
+          TASK="${{ inputs.task }}"
           echo "task=$TASK" >> "$GITHUB_OUTPUT"
           echo "trigger=${{ inputs.trigger || 'schedule' }}" >> "$GITHUB_OUTPUT"
           echo "Running $TASK (local time now: $(date -Is))"

@@ -45,7 +45,17 @@ export async function POST(request: Request) {
   }
 
   const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  if (throttled(ip)) {
+  // The shared limit, held in Postgres, when the database is reachable; the per-instance map below
+  // is the fallback so a database outage does not also remove the brake.
+  let shared: boolean | null = null;
+  try {
+    const { ensureSchema, withinLimit } = await import("@/lib/appstate");
+    await ensureSchema();
+    shared = await withinLimit(`login:${ip}`, MAX_ATTEMPTS * 3, WINDOW_MS / 1000);
+  } catch {
+    shared = null;
+  }
+  if (shared === false || throttled(ip)) {
     return NextResponse.json(
       { error: "Too many attempts. Wait fifteen minutes and try again." },
       { status: 429 },

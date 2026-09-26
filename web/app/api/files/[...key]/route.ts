@@ -71,6 +71,11 @@ export async function GET(
     return NextResponse.json({ error: "No such report file." }, { status: 404 });
   }
 
+  // Local integration only: the worker wrote to a directory, so the dashboard reads that directory.
+  // Never in production, where the only store is the private Blob store.
+  const local = await (await import("@/lib/blob")).localDownload(key, known.name, CONTENT_TYPES[extension]);
+  if (local) return local;
+
   // Two credentials open a private store, and which one this deployment has depends on how the
   // store was connected. Connecting it to a project gives the project OIDC: Vercel injects a
   // short-lived, auto-rotating token and `BLOB_STORE_ID` naming the store, and the SDK pairs them

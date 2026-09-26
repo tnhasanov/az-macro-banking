@@ -505,6 +505,9 @@ CREATE INDEX IF NOT EXISTS ix_changes_pending ON source_changes (environment, de
 -- until someone turns it on, separately from whether anyone is emailed about what they produce.
 ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS auto_checks_enabled BOOLEAN NOT NULL DEFAULT false;
 
+-- The message headers composed with the body (List-Unsubscribe on subscription email), frozen with it.
+ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS headers JSONB NOT NULL DEFAULT '{}'::jsonb;
+
 -- Fixed-window request counters. A generate request starts a runner; a login attempt costs a
 -- PBKDF2 derivation; both are worth bounding per signed-in user and per address.
 CREATE TABLE IF NOT EXISTS request_throttle (
