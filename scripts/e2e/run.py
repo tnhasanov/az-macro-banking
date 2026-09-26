@@ -605,6 +605,9 @@ def main() -> int:
     ap.add_argument("--only", nargs="*", help="run only these journeys, e.g. --only J8")
     args = ap.parse_args()
     started = time.time()
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
+                           capture_output=True, text=True).stdout.strip()
     previous = {}
     if args.resume:
         previous = json.loads((E2E / "report.json").read_text()).get("journeys", {}) if (E2E / "report.json").exists() else {}
@@ -628,6 +631,7 @@ def main() -> int:
             stop(web)
     summary = {"ran_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                "minutes": round((time.time() - started) / 60, 1), "database": DB_URL.rsplit("@", 1)[-1],
+               "commit": commit + (" (with uncommitted changes)" if dirty else ""),
                "journeys": REPORT, "resumed_for": args.only if args.resume else None}
     (E2E / "report.json").write_text(json.dumps(summary, indent=2, default=str))
     print(json.dumps({k: v["passed"] for k, v in REPORT.items()}, indent=1))

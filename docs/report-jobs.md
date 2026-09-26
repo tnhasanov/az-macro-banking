@@ -166,6 +166,11 @@ worker records every announcement produced outside Production as suppressed.
 | restore after data loss | the dataset in Blob is versioned by pointer; `python -m azmonitor.cloud.publish restore` fetches the current one, and every published edition is re-applied from Postgres by the next worker |
 | run a job by hand | `AZMONITOR_DATABASE_URL=... python -m azmonitor.jobs run --job-id job_...` (it claims like any worker) |
 
+Version numbers continue from the dataset's own edition history and are never reused. The seeded
+dataset already records the editions generated during development (39 of Monthly 2026-07, for
+example), so the first cloud edition of a period can be `v40` rather than `v1`; the end-to-end run
+shows exactly that.
+
 ## Monitoring
 
 Every tick records what needs a person in the `scheduler_tick` read-model entry, shown on Settings,

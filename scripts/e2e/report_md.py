@@ -24,9 +24,11 @@ def main() -> int:
     lines = [
         "# End-to-end run: the sixteen checks",
         "",
-        f"Run {data['ran_at']} on the development machine, {data['minutes']} minutes, against a dedicated "
-        f"database ({data['database']}). Produced by `python scripts/e2e/run.py`; regenerate this page with "
-        "`python scripts/e2e/report_md.py`.",
+        f"Run {data['ran_at']} in the development environment, {data['minutes']} minutes, against a dedicated "
+        f"database ({data['database']}), code at commit {data.get('commit', 'not recorded')}; "
+        + ("a full run on a freshly created database, object store and mail directory, every check in one pass. " if not data.get("resumed_for")
+           else f"resumed for {', '.join(data['resumed_for'])} on the state of the previous run. ")
+        + "Produced by `python scripts/e2e/run.py`; regenerate this page with `python scripts/e2e/report_md.py`.",
         "",
         "**Real in this run:** the reporting engine (fact pack, grounding, python-pptx, LibreOffice PDF), the live CBA "
         "website (the deposits table downloaded during each source check), Postgres 16, the production build of the "
