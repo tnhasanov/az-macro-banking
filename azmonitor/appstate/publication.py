@@ -19,6 +19,7 @@ are already in storage; it never describes files that might arrive.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -63,7 +64,9 @@ def _decide(settings: dict[str, Any], environment: str, recipient: dict[str, Any
             purpose: str) -> tuple[str, str | None]:
     """Queued, or suppressed with the reason. Pause is not a suppression: paused rows stay queued
     and go out when notifications resume."""
-    if environment != "production":
+    if environment != "production" and not (environment == "test" and os.environ.get("AZMONITOR_TEST_NOTIFICATIONS") == "1"):
+        # "test" is the local end-to-end environment, which sends only to a capture directory
+        # (web/lib/email/provider.ts refuses a real provider anywhere but production).
         return "suppressed", (f"produced in a {environment} deployment; only production emails "
                               "subscribers")
     if not settings.get("auto_email_enabled"):

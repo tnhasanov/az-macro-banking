@@ -138,7 +138,16 @@ class Settings:
         s.save_dataset = os.environ.get("AZMONITOR_SKIP_SAVE") != "1"
         if os.environ.get("AZMONITOR_DATASET_WAIT_SECONDS"):
             s.dataset_wait_seconds = float(os.environ["AZMONITOR_DATASET_WAIT_SECONDS"])
+        # Test hooks for the local end-to-end run; a production job refuses to start with them set.
+        if os.environ.get("AZMONITOR_JOB_LEASE_SECONDS"):
+            s.lease_seconds = int(os.environ["AZMONITOR_JOB_LEASE_SECONDS"])
+        if os.environ.get("AZMONITOR_HEARTBEAT_SECONDS"):
+            s.heartbeat_interval = float(os.environ["AZMONITOR_HEARTBEAT_SECONDS"])
         return s
+
+
+TEST_HOOKS = ("AZMONITOR_SKIP_RESTORE", "AZMONITOR_REFRESH_DATASETS", "AZMONITOR_JOB_LEASE_SECONDS",
+              "AZMONITOR_HEARTBEAT_SECONDS", "AZMONITOR_TEST_NOTIFICATIONS", "AZMONITOR_FETCH_OVERRIDES")
 
 
 def worker_id() -> str:
@@ -233,6 +242,10 @@ class Worker:
     def _run_claimed(self, claim: Claim) -> dict[str, Any]:
         outcome: dict[str, Any] = {"job_id": claim.job_id, "claimed": True, "attempt": claim.attempt}
         try:
+            hooks = [h for h in TEST_HOOKS if os.environ.get(h)]
+            if hooks and claim.environment == "production":
+                raise Outcome("failed", "misconfigured",
+                              f"This worker has test settings ({', '.join(hooks)}) that production never allows.")
             self._check_request(claim)
             J.set_stage(self.conn, claim, "starting", f"worker {self.worker_id}")
             self._hold_dataset(claim)
@@ -358,9 +371,6 @@ class Worker:
         paths = config.paths()
         paths.ensure()
         if self.settings.skip_restore:
-            if claim.environment == "production":
-                raise Outcome("failed", "misconfigured",
-                              "This worker is set to skip restoring the dataset, which production never allows.")
             J.note(self.conn, claim, "restore skipped: working on the dataset already on this machine")
         else:
             J.set_stage(self.conn, claim, "restoring", "downloading the dataset from private storage")

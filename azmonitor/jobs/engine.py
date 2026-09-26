@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from typing import Any
 
 from .. import config
@@ -43,7 +44,10 @@ class Engine:
 
     # ------------------------------------------------------------------ collecting
     def refresh(self) -> dict[str, Any]:
-        return self.pipeline.refresh()
+        # A local end-to-end run may restrict the check to named datasets (the worker refuses this
+        # setting for a production job); everywhere else every configured source is checked.
+        only = [d for d in (os.environ.get("AZMONITOR_REFRESH_DATASETS") or "").split(",") if d.strip()]
+        return self.pipeline.refresh(dataset_ids=only or None)
 
     def validate(self) -> dict[str, Any]:
         from ..calc.validate import validate_all

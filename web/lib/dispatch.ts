@@ -110,8 +110,9 @@ function localDispatcher(): Dispatcher {
     async dispatch(jobId) {
       const root = path.resolve(process.cwd(), "..");
       const python = process.env.AZMONITOR_PYTHON || "python3";
-      mkdirSync(path.join(root, "data", "logs"), { recursive: true });
-      const log = openSync(path.join(root, "data", "logs", `${jobId}.log`), "a");
+      const logs = path.join(process.env.AZMONITOR_DATA_DIR ?? path.join(root, "data"), "..", "logs");
+      mkdirSync(logs, { recursive: true });
+      const log = openSync(path.join(logs, `${jobId}.log`), "a");
       const child = spawn(python, ["-m", "azmonitor.jobs", "run", "--job-id", jobId], {
         cwd: root, detached: true, stdio: ["ignore", log, log], env: process.env,
       });

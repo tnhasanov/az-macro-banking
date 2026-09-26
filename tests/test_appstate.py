@@ -420,3 +420,24 @@ def test_an_unsubscribed_or_suppressed_address_is_never_queued(pg):
     _publish(pg)
     rows = pg.execute("SELECT to_address, status FROM email_outbox").fetchall()
     assert rows == [("bounced@example.az", "suppressed")]
+
+
+def test_reaping_a_dead_worker_releases_the_dataset_lease_it_held(pg):
+    """Otherwise the next job waits up to half an hour for a lease nobody will renew."""
+    from azmonitor.cloud import lock as L
+
+    job_id, _ = J.create_job(pg, kind="report", report_type="monthly",
+                             params={"period": "latest", "refresh": "latest_data"}, trigger="manual",
+                             environment="production", requested_by="owner")
+    claim = J.claim(pg, job_id, worker_id="w1", lease_seconds=60)
+    holder = f"{job_id}.{claim.attempt}/w1"
+    lease = L.DatabaseLease(pg.connect_again(), "azmonitor-run", holder=holder)
+    lease.try_acquire()
+    other = L.DatabaseLease(pg.connect_again(), "azmonitor-run", holder="someone-else")
+    with pytest.raises(L.LeaseNotAcquired):
+        other.try_acquire()
+    pg.execute("UPDATE report_jobs SET lease_expires_at = now() - interval '1 second' WHERE job_id = %s", (job_id,))
+    assert {r["action"] for r in J.reap(pg, "production")} == {"requeued"}
+    other.try_acquire()                              # free at once, not in thirty minutes
+    with pytest.raises(L.LeaseLost):
+        lease.check("saving the dataset")            # and the zombie cannot write

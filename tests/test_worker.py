@@ -567,3 +567,13 @@ def test_two_workers_on_overlapping_jobs_take_turns_on_the_dataset(world):
         spans.append((start, end))
     spans.sort()
     assert spans[0][1] <= spans[1][0]
+
+
+def test_a_production_job_refuses_to_run_with_test_hooks_set(world, monkeypatch):
+    monkeypatch.setenv("AZMONITOR_REFRESH_DATASETS", "cba_deposits")
+    job_id = world.request()
+    world.run(job_id)
+    job = world.job(job_id)
+    assert job["status"] == "failed" and job["error_code"] == "misconfigured"
+    assert "AZMONITOR_REFRESH_DATASETS" in job["error_message"]
+    assert world.engine.generated == []

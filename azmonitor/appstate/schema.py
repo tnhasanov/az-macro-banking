@@ -419,6 +419,12 @@ BEGIN
         VALUES (r.job_id, r.attempt, r.stage, 'failed', 'lease lapsed and attempts are exhausted');
       job_id := r.job_id; action := 'failed'; RETURN NEXT;
     END IF;
+    -- The dead attempt may still hold the dataset lease, which would keep every other job waiting
+    -- for up to half an hour. Its job fence has just moved, so it can no longer publish; and the
+    -- dataset lease is fenced too, so a zombie that wakes up cannot save over its successor.
+    IF to_regclass('job_locks') IS NOT NULL THEN
+      EXECUTE 'DELETE FROM job_locks WHERE holder LIKE $1' USING r.job_id || '.' || r.attempt || '/%';
+    END IF;
   END LOOP;
 
   -- cancellations that never started
