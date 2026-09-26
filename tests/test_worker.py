@@ -577,3 +577,22 @@ def test_a_production_job_refuses_to_run_with_test_hooks_set(world, monkeypatch)
     assert job["status"] == "failed" and job["error_code"] == "misconfigured"
     assert "AZMONITOR_REFRESH_DATASETS" in job["error_message"]
     assert world.engine.generated == []
+
+
+def test_each_attempt_works_in_its_own_directory_and_leaves_nothing_behind(world):
+    """A replaced worker must never share a dataset file with its successor (see _own_workspace)."""
+    import os
+
+    from azmonitor import config
+
+    base = config.paths().data_dir
+    seen = {}
+
+    def look():
+        seen["data"] = os.environ["AZMONITOR_DATA_DIR"]
+
+    world.engine.during_generate = look
+    world.run(world.request())
+    assert seen["data"] != str(base) and f"{base.name}.jobs" in seen["data"]
+    assert os.environ["AZMONITOR_DATA_DIR"] == str(base)            # restored for whatever runs next
+    assert list((base.parent / f"{base.name}.jobs").iterdir()) == []  # and removed

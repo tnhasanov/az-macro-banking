@@ -193,6 +193,21 @@ Blob, the web application's local dispatcher for GitHub Actions, and a capture d
 Its test hooks (`AZMONITOR_REFRESH_DATASETS`, `AZMONITOR_FETCH_OVERRIDES`, short leases, the
 `test` environment) are refused for any production job.
 
+### What the end-to-end run found
+
+Four defects that no unit test had caught, all fixed and each now pinned by a test:
+
+- **A whole deck failed on one empty chart.** The CBA regional tables carry a single month; an
+  edition for any other banking month had no regional rows, python-pptx refused the empty chart and
+  the job failed. The slide now says which month the tables hold (`tests/test_render_guards.py`).
+- **A saved dataset could miss its newest writes.** SQLite runs in WAL mode and the archive held only
+  the main file; the worker's save straight after collecting could leave out what it had just read,
+  and a check that produced nothing never saved again. Saves now checkpoint first
+  (`tests/test_cloud_persistence.py`).
+- **A dead worker blocked every job for half an hour.** It kept the dataset lease; the reaper now
+  releases it with the job (`tests/test_appstate.py`).
+- **"Email me" waited for the next 15-minute tick.** A watched job page now sends its due email at once.
+
 ## Remaining steps to go live (user actions)
 
 Everything below needs access this environment does not have — Vercel, Neon and Resend are not

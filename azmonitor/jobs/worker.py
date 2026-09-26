@@ -33,10 +33,13 @@ that dies stops renewing its lease and the scheduler's reaper takes the job back
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import os
 import re
+import shutil
 import socket
+import tempfile
 import time
 import traceback
 import uuid
@@ -233,11 +236,45 @@ class Worker:
                                          max_seconds=self.settings.heartbeat_max_seconds).start()
             self.heartbeat.add(claim)
             try:
-                return self._run_claimed(claim)
+                with self._own_workspace(claim):
+                    return self._run_claimed(claim)
             finally:
                 self.heartbeat.stop()
         finally:
             self.conn.close()
+
+    @contextlib.contextmanager
+    def _own_workspace(self, claim: Claim):
+        """A data and output directory belonging to this attempt alone: a fresh runner, everywhere.
+
+        On GitHub every job already has its own disk. Anywhere two workers share a machine — the
+        local dispatcher, a developer's laptop — they would otherwise share one dataset directory,
+        and the end-to-end run showed what that costs: a worker that had been paused and replaced
+        woke up, closed its SQLite connection, and checkpointed its stale log into the file its
+        successor was archiving. The stored dataset failed its integrity check from then on. With a
+        directory per attempt, a replaced worker can only damage its own copy, and nothing it holds
+        is ever saved. The directory is removed afterwards; every artefact is in storage by then.
+        """
+        if self.settings.skip_restore:
+            yield
+            return
+        base = config.paths().data_dir
+        root = base.parent / f"{base.name}.jobs"
+        root.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix=f"{claim.job_id}.a{claim.attempt}-", dir=root))
+        saved = {k: os.environ.get(k) for k in ("AZMONITOR_DATA_DIR", "AZMONITOR_OUTPUT_DIR")}
+        os.environ["AZMONITOR_DATA_DIR"] = str(work / "data")
+        os.environ["AZMONITOR_OUTPUT_DIR"] = str(work / "outputs")
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            if os.environ.get("AZMONITOR_KEEP_WORKSPACE") != "1":
+                shutil.rmtree(work, ignore_errors=True)
 
     def _run_claimed(self, claim: Claim) -> dict[str, Any]:
         outcome: dict[str, Any] = {"job_id": claim.job_id, "claimed": True, "attempt": claim.attempt}
