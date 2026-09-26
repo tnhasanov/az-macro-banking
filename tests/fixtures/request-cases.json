@@ -1,0 +1,27 @@
+{
+  "sectors": ["agriculture", "construction", "trade", "transport", "industry"],
+  "cases": [
+    {"report": "monthly", "raw": {}, "ok": {"period": "latest", "refresh": "latest_data"}},
+    {"report": "monthly", "raw": {"period": "latest", "refresh": "check_sources"}, "ok": {"period": "latest", "refresh": "check_sources"}},
+    {"report": "monthly", "raw": {"period": "2026-07", "sector": ""}, "ok": {"period": "2026-07", "refresh": "latest_data"}},
+    {"report": "monthly", "raw": {"period": "2026-13"}, "error": "invalid_period"},
+    {"report": "monthly", "raw": {"period": "July"}, "error": "invalid_period"},
+    {"report": "monthly", "raw": {"sector": "agriculture"}, "error": "unknown_parameter"},
+    {"report": "monthly", "raw": {"refresh": "rm -rf /"}, "error": "invalid_refresh"},
+    {"report": "monthly", "raw": {"branch": "main"}, "error": "unknown_parameter"},
+    {"report": "monthly", "raw": {"publication_id": "policy_decision:5531"}, "error": "unknown_parameter"},
+    {"report": "weekly", "raw": {"period": "2026-09-14"}, "ok": {"period": "2026-09-14", "refresh": "latest_data"}},
+    {"report": "weekly", "raw": {"period": "2026-09-16"}, "error": "invalid_period"},
+    {"report": "weekly", "raw": {"period": "2026-02-30"}, "error": "invalid_period"},
+    {"report": "sector", "raw": {"sector": "agriculture"}, "ok": {"period": "latest", "refresh": "latest_data", "sector": "agriculture"}},
+    {"report": "sector", "raw": {}, "error": "missing_sector"},
+    {"report": "sector", "raw": {"sector": "../../etc"}, "error": "unknown_sector"},
+    {"report": "decision_update", "raw": {}, "ok": {"publication_id": "latest", "refresh": "latest_data"}},
+    {"report": "decision_update", "raw": {"publication_id": "policy_decision:5531"}, "ok": {"publication_id": "policy_decision:5531", "refresh": "latest_data"}},
+    {"report": "decision_update", "raw": {"publication_id": "monetary_policy_review:2026-08"}, "error": "invalid_publication"},
+    {"report": "mpr_brief", "raw": {"publication_id": "monetary_policy_review:2026-08", "refresh": "check_sources"}, "ok": {"publication_id": "monetary_policy_review:2026-08", "refresh": "check_sources"}},
+    {"report": "mpr_brief", "raw": {"period": "2026-07"}, "error": "unsupported_period"},
+    {"report": "fsr_brief", "raw": {"publication_id": "financial_stability_report:2025-A; DROP TABLE"}, "error": "invalid_publication"},
+    {"report": "annual_report", "raw": {}, "error": "unknown_report"}
+  ]
+}

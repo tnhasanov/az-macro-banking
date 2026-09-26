@@ -1,0 +1,57 @@
+# Distribution profiles: whose identity a report is rendered under, and where it may go.
+#
+# The reporting engine is the same in every profile. It reads the same public sources, applies the
+# same validated metric dictionary, runs the same quality checks and produces the same figures and
+# the same claim-validated narrative. What a profile changes is the cover: the theme, the
+# organisation named in the footer, the audience line — and, consequently, whether the output may
+# be uploaded outside the organisation's own infrastructure.
+#
+# `external_upload: false` is enforced, not advisory. `azmonitor.cloud.publish save` refuses to
+# upload anything while such a profile is active, because the destination in a cloud deployment is
+# personal storage and the branding is not the operator's to put there.
+#
+# Select one with AZMONITOR_PROFILE. Unset means the default below.
+
+# What must never appear inside a file uploaded under a profile that permits external
+# distribution. Checked against the bytes of each artefact, not against the profile that happens to
+# be active when it is uploaded.
+#
+# The distinction matters and was found the hard way: the profile controls how the engine *renders*,
+# so switching to `neutral` makes new output clean, while files rendered earlier under `internal`
+# sit on disk unchanged. Seeding an archive of those under the neutral profile uploaded 95 branded
+# decks, 36 branded workbooks and 95 branded PDFs to personal storage without a single complaint.
+restricted_markers:
+  # Phrases that identify the organisation. Matched in extracted text, case-insensitively.
+  text:
+    - "Azer-Turk Bank"
+    - "Azər-Türk Bank"
+    - "Azerturk"
+  # The brand palette, as it appears in Office XML and as a PDF's content stream draws it.
+  colours: ["6F00B6", "4E0080", "9B59D0", "DDD0EA", "E6DAF1", "F5ECFA"]
+  # A neutral deck embeds no images at all, so any embedded image is a logo until proven
+  # otherwise. Decks and workbooks only: in a PDF every chart is an image.
+  no_embedded_images: true
+
+default: internal
+
+profiles:
+  internal:
+    label: Internal, branded
+    theme: config/theme.yaml
+    organisation_label: Azer-Turk Bank
+    audience_label: For internal discussion
+    external_upload: false
+    note: >-
+      Renders with the bank's logo and brand colours. For use on the bank's own infrastructure.
+      Output must not be uploaded to personal or third-party storage.
+
+  neutral:
+    label: Neutral, externally distributable
+    theme: config/theme.neutral.yaml
+    organisation_label: Azerbaijan Macro & Banking Monitor
+    audience_label: Independent analysis of publicly released data
+    external_upload: true
+    note: >-
+      Renders with no organisation logo and a neutral palette. Contains only figures derived from
+      publications the Central Bank of Azerbaijan and the State Statistical Committee have
+      released publicly, so it carries nothing that is not already public.

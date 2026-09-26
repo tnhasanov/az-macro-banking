@@ -2,7 +2,9 @@
 
 All operating defaults live in config/*.yaml. Environment variables
 AZMONITOR_DATA_DIR and AZMONITOR_OUTPUT_DIR override the persistent locations so a
-cloud runner can mount storage without editing files.
+cloud runner can mount storage without editing files, and AZMONITOR_PROFILE selects
+a distribution profile: which theme reports are rendered with, whose name is on
+them, and whether their output may be uploaded outside the organisation.
 """
 from __future__ import annotations
 
@@ -64,9 +66,35 @@ def _resolve(root: Path, value: str) -> Path:
 
 
 @lru_cache(maxsize=None)
+def profile() -> dict[str, Any]:
+    """The active distribution profile: whose identity reports carry, and where they may go.
+
+    Selected by AZMONITOR_PROFILE, defaulting to the one named in config/distribution.yaml. An
+    unknown name is an error rather than a fallback: silently rendering under the branded profile
+    because a deployment misspelled "neutral" is exactly the mistake this is here to prevent.
+    """
+    cfg = load_yaml(CONFIG_DIR / "distribution.yaml")
+    profiles = cfg.get("profiles") or {}
+    name = os.environ.get("AZMONITOR_PROFILE") or cfg.get("default") or "internal"
+    if name not in profiles:
+        raise KeyError(
+            f"unknown distribution profile {name!r}; config/distribution.yaml defines "
+            f"{sorted(profiles)}"
+        )
+    return {"name": name, **profiles[name]}
+
+
+@lru_cache(maxsize=None)
 def settings() -> dict[str, Any]:
     cfg = load_yaml(CONFIG_DIR / "settings.yaml")
     cfg.setdefault("paths", {})
+    # The profile owns the identity a report is published under, so it wins over the file. Applied
+    # here, once, rather than at each of the places that render a footer.
+    active = profile()
+    report = cfg.setdefault("report", {})
+    for key in ("organisation_label", "audience_label"):
+        if active.get(key):
+            report[key] = active[key]
     return cfg
 
 
@@ -106,7 +134,13 @@ def delivery_config() -> dict[str, Any]:
 
 @lru_cache(maxsize=None)
 def theme() -> dict[str, Any]:
-    return load_yaml(_resolve(ROOT, settings()["report"].get("theme", "config/theme.yaml")))
+    """The presentation theme the active profile selects.
+
+    The profile decides, not settings.yaml, so that choosing a profile cannot leave a deployment
+    with a neutral organisation label and a branded logo — a combination that would be worse than
+    either alone.
+    """
+    return load_yaml(_resolve(ROOT, profile()["theme"]))
 
 
 @lru_cache(maxsize=None)

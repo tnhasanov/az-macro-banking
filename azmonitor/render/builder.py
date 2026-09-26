@@ -318,6 +318,12 @@ class Deck:
     def add_bar_chart(self, slide, x, y, w, h, categories: Sequence[str], series: Sequence[dict[str, Any]], *, stacked: bool = False, horizontal: bool = False,
                       number_format: str = "0.0", legend: bool = True, data_labels: bool = False, gap_width: int = 60, skip: int | None = None,
                       point_colors: Sequence[str | None] | None = None, label_font: float | None = None, overlap: int | None = None):
+        if not categories or not any(v is not None for s in series for v in s["values"]):
+            # An empty category chart is not valid Office XML, and python-pptx raises on it; one slide
+            # without data used to fail the whole deck. Say what is missing in the chart's place.
+            self.add_text(slide, x, y, w, min(h, 0.8), "No figures are available for this period.", size=9,
+                          color=self.C.get("muted"))
+            return None
         cd = CategoryChartData()
         cd.categories = list(categories)
         for s in series:

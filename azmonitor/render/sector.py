@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
+from ..util import progress
 from .. import config
 from ..facts import FactPackBuilder
 from ..narrative.fmt import money, num, plabel
@@ -25,9 +27,31 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     if not scfg:
         raise ValueError(f"unknown sector {sector}; configured: {list(config.reports_config()['sector']['sectors'])}")
     as_of_d = parse_as_of(as_of)
+    progress.stage("calculating", f"building the fact pack for the {sector} review")
     b = FactPackBuilder(db, as_of_d, lang=lang)
     fp = b.build()
     fp["report_type"] = "sector"
+
+    # An edition is the review of one sector for one banking month. It used to be keyed by the date
+    # of the run, which made every day a new edition of the same data; and there was no check at all
+    # for an unchanged one, so every trigger produced a new version.
+    banking_period = (fp.get("edition") or {}).get("banking_period") or as_of_d.isoformat()
+    edition = f"{sector}_{str(banking_period)[:7]}"
+    fingerprint = hashlib.sha256(f"sector|{sector}|{fp.get('fact_pack_hash')}|{lang}".encode()).hexdigest()[:24]
+    same_edition = [e for e in db.editions("sector") if e["edition_period"] == edition]
+    prior = [e for e in same_edition if e["status"] == "generated"]
+    if prior and not force:
+        from ..reports import previous_fingerprint
+
+        last = previous_fingerprint(prior[-1])
+        if last and last.get("fingerprint") == fingerprint:
+            if own:
+                db.close()
+            return {"status": "unchanged", "sector": sector, "edition": edition,
+                    "existing_edition_id": prior[-1]["edition_id"], "version": prior[-1]["version"],
+                    "fingerprint": fingerprint,
+                    "note": "every input of the last review of this sector and month is unchanged"}
+    progress.stage("rendering", "slides")
     theme = dict(config.theme())
     theme["_root"] = str(config.ROOT)
     d = Deck(theme, lang)
@@ -51,10 +75,10 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     s = d.new_slide()
     d.add_rect(s, 0, 0, 4.85, 7.5, C["primary"], None, radius=None)
     d.add_rect(s, 4.85, 0, 0.09, 7.5, C["gold"], None, radius=None)
-    d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("sector_review", lang).upper(), size=9, color="DDD0EA", bold=True)
+    d.add_text(s, 0.56, 1.1, 4.0, 0.3, config.term("sector_review", lang).upper(), size=9, color=C["cover_text"], bold=True)
     d.add_text(s, 0.56, 1.5, 4.1, 1.4, f"{label}: activity, credit and banking questions", size=24, bold=True, color=C["white"])
-    d.add_text(s, 0.56, 3.0, 4.0, 1.0, f"As of {fp['as_of']} · {config.term('draft_label', lang)} · banking data to {plabel(fp['edition'].get('banking_period'), 'month_end_stock')}", size=11, color="DDD0EA")
-    d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{config.settings()['report'].get('organisation_label')}  |  {config.settings()['report'].get('audience_label')}", size=9, color="DDD0EA")
+    d.add_text(s, 0.56, 3.0, 4.0, 1.0, f"As of {fp['as_of']} · {config.term('draft_label', lang)} · banking data to {plabel(fp['edition'].get('banking_period'), 'month_end_stock')}", size=11, color=C["cover_text"])
+    d.add_text(s, 0.6, 6.62, 4.0, 0.3, f"{config.settings()['report'].get('organisation_label')}  |  {config.settings()['report'].get('audience_label')}", size=9, color=C["cover_text"])
     if d.logo_path:
         s.shapes.add_picture(d.logo_path, d.prs.slide_width - d.prs.slide_width * 0.46, d.prs.slide_height * 0.15, width=d.prs.slide_width * 0.16)
     tiles = [_kpi(gdp_share, f"{label}: share of nominal GDP (YTD)") if gdp_share and gdp_share.get("latest") else ("n/a", "Share of GDP", "not published for this mapping"),
@@ -172,29 +196,33 @@ def generate_sector(as_of: str | None, sector: str, lang: str, force: bool = Fal
     d.add_table(s, 8.5, 1.5, 4.4, 3.0, ["Dataset", "Document", "Published"], rows, col_widths=[1.6, 2.0, 0.8], font_size=7.5, align=["l", "l", "l"])
     d.add_footer(s, src, d.page)
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    edition = f"{sector}_{as_of_d.isoformat()}"
-    version = len([e for e in db.editions("sector") if e["edition_period"] == edition]) + 1
+    version = len(same_edition) + 1
     out = paths.output_dir / "sector" / edition / f"v{version}_{ts}"
     out.mkdir(parents=True, exist_ok=True)
     pptx_path = d.save(out / f"AZ_Sector_Review_{sector}_{as_of_d.isoformat()}_v{version}.pptx")
     pdf_info: dict[str, Any] = {"status": "skipped"}
     if soffice_available():
         try:
+            progress.detail("PDF")
             pdf = convert_to_pdf(pptx_path, out)
             pdf_info = {"status": "ok", "path": str(pdf)}
             previews(pdf, out / "previews")
         except Exception as exc:
             pdf_info = {"status": "failed", "reason": str(exc)}
     manifest = {"report_type": "sector", "sector": sector, "edition": edition, "version": version, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "files": {"pptx": str(pptx_path), "pdf": pdf_info},
-                "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page}
+                "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page, "edition_fingerprint": {"fingerprint": fingerprint},
+                "reporting_periods": fp.get("edition") or {}, "quality_summary": (fp.get("quality") or {}).get("summary") or {}}
     manifest["manifest_path"] = str(out / "manifest.json")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     (out / "fact_pack.json").write_text(json.dumps(fp, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     db.add_edition({"edition_id": f"sector:{edition}:v{version}", "report_type": "sector", "edition_period": edition, "version": version, "generated_at": manifest["generated_at"], "as_of": as_of_d.isoformat(),
-                    "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"sector": sector})})
+                    "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"sector": sector}),
+                    "fingerprint": fingerprint, "scope_key": edition,
+                    "fingerprint_detail": json.dumps({"fingerprint": fingerprint, "fact_pack_hash": fp.get("fact_pack_hash")})})
     from ..reports import _update_latest
 
     _update_latest(paths, "sector", out, manifest)
     if own:
         db.close()
-    return {"status": "generated", "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": d.page, "sector": sector}
+    return {"status": "generated", "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": d.page, "sector": sector,
+            "edition": edition, "version": version, "edition_id": f"sector:{edition}:v{version}", "fingerprint": fingerprint}

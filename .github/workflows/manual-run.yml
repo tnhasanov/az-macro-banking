@@ -1,0 +1,280 @@
+name: manual run
+
+# Running the reporting worker by hand, without switching the schedule on.
+#
+# GitHub will not let you dispatch a workflow that only exists on a side branch. A workflow file is
+# registered from the default branch: until it is there, it has no id, it does not appear in the
+# Actions list, and `POST /actions/workflows/{id}/dispatches` has nothing to resolve. Confirmed
+# against this repository — the API lists `checks.yml` and nothing else, while `scheduled.yml` sits
+# on claude/vercel-deployment and is invisible.
+#
+# That creates the problem this file solves. The obvious fix — put `scheduled.yml` on the default
+# branch — also switches on its `schedule:` triggers, because those fire from the default branch and
+# nowhere else. Merging to get a button would start unattended operation as a side effect.
+#
+# So this is a separate, manual-only workflow. It has no `schedule:` block and never will, so its
+# presence on the default branch cannot start anything. It checks out whichever branch you name and
+# runs that branch's engine, which means the cloud worker can be exercised end to end while
+# `scheduled.yml` stays unmerged and dormant.
+#
+# Delete it once scheduled.yml is merged and running. It is scaffolding, not architecture.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch to run (the engine comes from here, not from the default branch)"
+        required: true
+        default: claude/vercel-deployment
+      task:
+        description: "Which task to run"
+        required: true
+        type: choice
+        options: [source-check, weekly-digest, monitor]
+        default: source-check
+      dry_run:
+        description: "Decide everything, produce and send nothing"
+        type: boolean
+        default: true
+      seed:
+        description: "Instead of a task: check what a dataset seed would upload (uploads nothing)"
+        type: boolean
+        default: false
+
+# One run at a time, shared with the scheduled workflow, so a manual run cannot overlap a scheduled
+# one once both exist. The engine's database lease would catch it anyway; this keeps the history
+# readable.
+concurrency:
+  group: azmonitor-engine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Baku
+      AZMONITOR_PROFILE: neutral
+      AZMONITOR_DATA_DIR: ${{ github.workspace }}/.state/data
+      AZMONITOR_OUTPUT_DIR: ${{ github.workspace }}/.state/outputs
+      AZMONITOR_RESTORE_CMD: python -m azmonitor.cloud.publish restore
+      AZMONITOR_SAVE_CMD: python -m azmonitor.cloud.publish save
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      # Used only to mint a short-lived Blob credential when no read-write token exists. The
+      # access token identifies the project; BLOB_STORE_ID names the store the token is for, which
+      # an OIDC token does not carry by itself.
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}
+      # Bumped whenever this file changes in a way a run depends on. See the revision check below.
+      WORKFLOW_REVISION: "2"
+      AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
+      AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
+      AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: The workflow that ran is the one this branch expects
+        # This has already gone wrong once, silently and for the length of a whole run.
+        #
+        # `workflow_dispatch` runs the workflow file from the ref chosen in the dropdown, while the
+        # engine comes from the `ref` input. Those are usually different: the file is registered on
+        # the default branch, the code lives on a feature branch. So dispatching with an older copy
+        # of this file on the default branch runs an older workflow against newer code, and the
+        # only symptom was a run that finished green having skipped the steps that authenticate.
+        #
+        # Comparing the revision the running file declares against the one the checked-out branch
+        # declares turns that into a failure in two seconds, naming the fix.
+        run: |
+          want=$(grep -m1 -E '^ *WORKFLOW_REVISION:' .github/workflows/manual-run.yml | tr -dc '0-9')
+          if [ -z "$want" ]; then
+            echo "::error::${{ inputs.ref }} has no WORKFLOW_REVISION in .github/workflows/manual-run.yml"
+            exit 1
+          fi
+          if [ "$want" != "$WORKFLOW_REVISION" ]; then
+            echo "::error::this run used revision $WORKFLOW_REVISION of manual-run.yml, but ${{ inputs.ref }} has revision $want. Re-dispatch with 'Use workflow from' set to ${{ inputs.ref }}, or update the copy on the default branch."
+            exit 1
+          fi
+          echo "manual-run.yml revision $WORKFLOW_REVISION matches ${{ inputs.ref }}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tools/blob/package-lock.json
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-impress poppler-utils fonts-open-sans fonts-dejavu-core
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cloud]"
+          npm ci --omit=dev --prefix tools/blob
+
+      - name: Refuse to run if anything would leave the building
+        run: |
+          # This workflow exists for testing, so the two switches that could send something to a
+          # person are checked rather than assumed. Either being on is a stop, not a warning.
+          python - <<'PY'
+          import sys, yaml
+          cfg = yaml.safe_load(open("config/delivery.yaml", encoding="utf-8"))
+          problems = []
+          if cfg.get("enabled"):
+              problems.append("config/delivery.yaml has enabled: true")
+          for name, channel in (cfg.get("channels") or {}).items():
+              if channel.get("enabled"):
+                  problems.append(f"channel {name} is enabled")
+          if problems:
+              print("::error::this workflow will not run while delivery is on: "
+                    + "; ".join(problems))
+              sys.exit(1)
+          print("delivery is disabled; nothing this run produces can reach anyone")
+          PY
+
+      - name: Confirm the distribution profile
+        run: |
+          # The neutral profile is what keeps the bank's logo, palette and name out of anything
+          # uploaded to personal storage. `publish save` refuses under any other profile, but
+          # failing here says why rather than failing later with a storage error.
+          python -c "
+          from azmonitor import config
+          p = config.profile()
+          print(f'profile: {p[\"name\"]}, external upload permitted: {p[\"external_upload\"]}')
+          assert p['external_upload'], f'{p[\"name\"]} may not upload; set AZMONITOR_PROFILE=neutral'
+          "
+
+      - name: Mint a short-lived Blob credential
+        # Only when no read-write token is configured. On a store connected to a Vercel project
+        # that is the normal case rather than a misconfiguration: Vercel keeps the read-write token
+        # as a sensitive variable, and a sensitive variable is write-only by design — no reveal in
+        # the dashboard, no API that returns it — so it cannot be copied into a GitHub secret.
+        #
+        # This used to run `vercel env pull`, which cannot work with a project-scoped access token:
+        # the CLI fetches the *team* alongside the project, a project-scoped token is denied
+        # team-level resources, and the 403 surfaces as "Could not retrieve Project Settings ...
+        # remove the `.vercel` directory", which reads like a linking problem and is not one.
+        #
+        # `POST /v1/projects/{id}/token` is the narrower call — the one @vercel/oidc makes to
+        # refresh a token, and a project resource, so a project-scoped token is the right shape of
+        # credential for it. On refusal the script probes and reports status codes only, so a
+        # failure explains itself rather than needing another run to investigate.
+        if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}
+        run: node tools/blob/vercel-oidc.mjs
+
+      - name: Prove the Blob credential before anything writes
+        run: |
+          # A wrong credential fails on the first call either way. What this catches is the run that
+          # gets far enough to matter first: restore the dataset, spend ten minutes refreshing
+          # sources and rendering, and only then discover it cannot save. One listing, no writes.
+          python -m azmonitor.cloud.publish check
+
+      - name: What a seed would upload
+        if: inputs.seed
+        run: python -m azmonitor.cloud.publish seed --check
+
+      - name: Take the run lease
+        if: ${{ !inputs.seed }}
+        id: lease
+        run: |
+          python - <<'PY'
+          import os, sys
+          from azmonitor.cloud import lock as L, readmodel as RM
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              print("no database configured; relying on the workflow concurrency group alone")
+              sys.exit(0)
+          conn = RM.connect()
+          RM.ensure_schema(conn)
+          lease = L.DatabaseLease(conn, "azmonitor-run", minutes=55,
+                                  detail={"task": os.environ.get("TASK", ""), "manual": True})
+          try:
+              info = lease.try_acquire()
+              print(f"lease held by {info['holder']} until {info['expires_at']} "
+                    f"(fence {info['fence']})")
+              with open(os.environ["GITHUB_ENV"], "a") as fh:
+                  fh.write(f"AZMONITOR_LEASE_HOLDER={info['holder']}\n")
+                  fh.write(f"AZMONITOR_LEASE_FENCE={info['fence']}\n")
+          except L.LeaseNotAcquired as exc:
+              print(f"::notice::{exc}")
+              sys.exit(75)
+          finally:
+              conn.close()
+          PY
+        env:
+          TASK: ${{ inputs.task }}
+        continue-on-error: true
+
+      - name: Run the task
+        if: ${{ !inputs.seed && steps.lease.outcome == 'success' }}
+        id: run
+        run: |
+          set +e
+          python -m azmonitor.cli run-task --task "${{ inputs.task }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Same gate as the scheduled workflow: only a complete, saved dataset may publish.
+          case "$code" in
+            0|2) echo "publish=yes" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "publish=no"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Publish what the dashboard reads
+        if: ${{ !inputs.seed && steps.run.outputs.publish == 'yes' && !inputs.dry_run }}
+        run: |
+          if [ -n "$AZMONITOR_DATABASE_URL" ]; then
+            python -m azmonitor.cloud.publish readmodel
+            python -m azmonitor.cloud.publish record-run --task "${{ inputs.task }}" \
+              --trigger manual --run-id "${{ github.run_id }}.${{ github.run_attempt }}" --published
+            python -m azmonitor.cloud.publish verify
+          fi
+
+      - name: Release the lease
+        if: ${{ always() && !inputs.seed && steps.lease.outcome == 'success' }}
+        run: |
+          python - <<'PY'
+          import os
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              raise SystemExit(0)
+          from azmonitor.cloud import lock as L, readmodel as RM
+          conn = RM.connect()
+          try:
+              L.DatabaseLease(conn, "azmonitor-run",
+                              holder=os.environ.get("AZMONITOR_LEASE_HOLDER") or L.holder_id(),
+                              fence=int(os.environ["AZMONITOR_LEASE_FENCE"])
+                              if os.environ.get("AZMONITOR_LEASE_FENCE") else None).release()
+          finally:
+              conn.close()
+          PY
+
+      - name: What the store and the read model now hold
+        if: ${{ always() && !inputs.seed }}
+        run: python -m azmonitor.cloud.publish status || true
+
+      - name: Fail the job if the run failed
+        if: ${{ always() && !inputs.seed }}
+        run: |
+          if [ "${{ steps.lease.outcome }}" != "success" ]; then
+            echo "another run holds the lease; nothing to do"; exit 0
+          fi
+          case "${{ steps.run.outputs.exit_code }}" in
+            0|2|4) exit 0 ;;
+            "") echo "::error::the task step did not run to completion"; exit 1 ;;
+            *) echo "::error::run-task exited ${{ steps.run.outputs.exit_code }}"; exit 1 ;;
+          esac

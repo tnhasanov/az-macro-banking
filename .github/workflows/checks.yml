@@ -15,6 +15,19 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The job, publication and notification rules live in Postgres (partial unique indexes, row
+    # locks, SQL functions), so they are tested against Postgres, not a stand-in.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: azmon_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AZMONITOR_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/azmon_test
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +39,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,cloud]"
 
       - name: Configuration loads and every configured parser exists
         run: |
@@ -90,7 +103,12 @@ jobs:
 
           d = config.delivery_config()
           assert d.get("enabled") is False, "delivery must be disabled in the committed configuration"
-          assert (d["channels"]["whatsapp"].get("enabled") is False), "WhatsApp must be disabled in the committed configuration"
+          # Every channel, not a named one. This check used to name WhatsApp alone, and `email:
+          # enabled: true` sat in the committed configuration for weeks without CI objecting —
+          # caught in the end by the workflow's own refusal to start, which is a slower place to
+          # find it and one that only a dispatched run reaches.
+          on = [name for name, ch in (d.get("channels") or {}).items() if ch.get("enabled")]
+          assert not on, f"these channels are enabled in the committed configuration: {on}"
 
           # Every recipient is named by an environment variable, never by an address, and every
           # credential is a variable name. A literal address or token here would be committed.
@@ -156,3 +174,52 @@ jobs:
           assert pdf.exists() and pdf.stat().st_size > 50_000
           print(f"rendered {info['n_slides']} slides and converted to PDF")
           PY
+
+  blob-client:
+    # Conformance, not integration: undici's MockAgent answers the requests, so only the transport
+    # is substituted and every request is still built by the real @vercel/blob. It exists because
+    # reading the SDK found two defects no test against our own abstraction could have — multipart
+    # is opt-in and we were not passing it, and BlobNotFoundError does not set `.name`, so the
+    # existence check never matched and the first upload of every edition would have failed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tools/blob/package-lock.json
+      - run: npm ci --prefix tools/blob
+      - run: npm test --prefix tools/blob
+
+  web:
+    # The dashboard: types, the request rules shared with the worker, the job and email ledgers
+    # against Postgres, the routes' authentication and CSRF checks, and a production build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: azmon_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AZMONITOR_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/azmon_test
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx next build

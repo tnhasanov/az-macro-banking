@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -256,3 +257,171 @@ def test_a_late_weekly_digest_still_covers_only_its_own_week(workspace):
 
     assert in_window == ["in"]
     db.close()
+
+
+# ------------------------------------------------- the schedule, written three times
+
+def test_the_baku_to_utc_conversion_holds_all_year(workspace):
+    """GitHub cron is UTC only, so the workflow holds converted times. Asia/Baku has had no
+    daylight saving since 2016, but that is a fact about the world rather than an assumption worth
+    making, so it is checked against the timezone database in both winter and summer."""
+    from zoneinfo import ZoneInfo
+
+    from azmonitor.scheduling.tasks import BAKU_UTC_OFFSET_HOURS
+
+    baku = ZoneInfo("Asia/Baku")
+    for month in (1, 4, 7, 10):
+        for hour in (3, 9, 15, 21):
+            utc = dt.datetime(2026, month, 15, hour, 15, tzinfo=dt.timezone.utc)
+            offset = utc.astimezone(baku).utcoffset().total_seconds() / 3600
+            assert offset == BAKU_UTC_OFFSET_HOURS, (
+                f"Asia/Baku is UTC+{offset} on {utc:%d %b}, not the UTC+{BAKU_UTC_OFFSET_HOURS} the "
+                f"workflow crons assume")
+
+
+def test_the_three_copies_of_the_schedule_agree(workspace):
+    """config/schedule.yaml, the systemd timers and the GitHub crons. A report that silently stops
+    arriving is how this drift is otherwise discovered."""
+    from azmonitor.scheduling.tasks import schedule_drift, workflow_drift
+
+    assert workflow_drift() == []
+    assert schedule_drift() == []
+
+
+# ------------------------------------------------- how a run gets a Blob credential
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+
+def _workflow(name: str) -> str:
+    return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _code(name: str) -> str:
+    """The workflow with its comments removed.
+
+    A test about what a workflow *does* must not match the prose explaining why it stopped doing
+    something else — the comment saying `vercel env pull` cannot work here contains the very string
+    that would prove it still ran.
+    """
+    return "\n".join(l for l in _workflow(name).split("\n") if not l.strip().startswith("#"))
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_a_run_mints_its_own_blob_credential(name):
+    """The read-write token cannot be a GitHub secret, because it cannot be read.
+
+    Opting it into a project connection stores it as a *sensitive* Vercel variable, which is
+    write-only by design: no reveal, no API, and `vercel env pull` returns it empty. So each run
+    mints a short-lived OIDC token instead, and the step that does it must be there in both
+    workflows or the scheduled one fails at the point of saving while the manual one works.
+    """
+    body = _workflow(name)
+    assert "Mint a short-lived Blob credential" in body
+    assert "node tools/blob/vercel-oidc.mjs" in body
+    assert "BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}" in body, \
+        "an OIDC token names no store by itself"
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_the_run_does_not_reach_for_env_pull(name):
+    """`vercel env pull` cannot work with a project-scoped access token, and failed as a linking
+    error rather than an authorisation one.
+
+    The CLI fetches the team alongside the project — `getOrgById` settled in parallel with the
+    project lookup — and a project-scoped token is denied team-level resources by design. The 403
+    surfaces as "Could not retrieve Project Settings ... remove the `.vercel` directory", which
+    sends you looking for a link that was never missing. Minting through the project's own token
+    endpoint asks for nothing at team level.
+    """
+    code = _code(name)
+    assert "env pull" not in code
+    assert "VERCEL_CLI_VERSION" not in code, "no CLI is invoked any more, so none is pinned"
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_minting_is_skipped_when_a_read_write_token_exists(name):
+    """If a readable store-scoped token ever becomes available it is the better credential, and
+    configuring it must not require editing a workflow."""
+    body = _workflow(name)
+    assert "if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}" in body
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_minting_writes_no_file_at_all(name):
+    """`env pull` wrote every non-sensitive variable in the environment to disk, the database URL
+    among them, and the step had to be careful to delete it. Asking only for the token writes
+    nothing, so there is nothing to leak or to clean up."""
+    body = _workflow(name)
+    step = body[body.index("Mint a short-lived Blob credential"):]
+    step = step[step.index("run:"):]
+    step = step[:step.index("- name:")]
+    assert ".env" not in step and "cat " not in step
+
+
+@pytest.mark.parametrize("name", ["manual-run.yml", "scheduled.yml"])
+def test_the_credential_is_proved_before_the_lease_is_taken(name):
+    """Order matters: a run that takes the lease and then fails to authenticate has blocked the
+    next one for the length of the lease for nothing."""
+    body = _workflow(name)
+    assert body.index("Mint a short-lived Blob credential") \
+        < body.index("Prove the Blob credential before anything writes") \
+        < body.index("Take the run lease")
+
+
+# ------------------------------------- the workflow file that ran vs the branch it ran against
+
+def _dispatch_guard_script() -> str:
+    """The `run:` body of the revision check, as bash, with the one Actions expression stubbed."""
+    import yaml
+
+    steps = yaml.safe_load(_workflow("manual-run.yml"))["jobs"]["run"]["steps"]
+    step = next(s for s in steps if s.get("name", "").startswith("The workflow that ran"))
+    return step["run"].replace("${{ inputs.ref }}", "the-branch")
+
+
+def _run_guard(tmp_path, *, branch_revision: str | None, running_revision: str):
+    """Run the guard for real, against a checkout whose workflow declares `branch_revision`."""
+    import subprocess
+
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    line = f'      WORKFLOW_REVISION: "{branch_revision}"\n' if branch_revision else ""
+    (workflows / "manual-run.yml").write_text(f"env:\n      TZ: Asia/Baku\n{line}", encoding="utf-8")
+    return subprocess.run(["bash", "-c", _dispatch_guard_script()], cwd=tmp_path,
+                          capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], "WORKFLOW_REVISION": running_revision})
+
+
+def test_the_running_workflow_matching_the_branch_is_allowed(tmp_path):
+    result = _run_guard(tmp_path, branch_revision="1", running_revision="1")
+    assert result.returncode == 0, result.stderr
+    assert "matches" in result.stdout
+
+
+def test_an_older_workflow_file_stops_the_run_and_names_the_fix(tmp_path):
+    """The failure this exists for: `workflow_dispatch` runs the file from the branch chosen in the
+    dropdown while the engine comes from the `ref` input, so dispatching from a default branch
+    holding an older copy ran an older workflow against newer code — green, and having skipped the
+    steps that authenticate."""
+    result = _run_guard(tmp_path, branch_revision="2", running_revision="1")
+    assert result.returncode == 1
+    assert "::error::" in result.stdout
+    assert "revision 1" in result.stdout and "revision 2" in result.stdout
+    assert "Use workflow from" in result.stdout, "the message has to say how to fix it"
+
+
+def test_a_branch_with_no_revision_marker_is_refused(tmp_path):
+    result = _run_guard(tmp_path, branch_revision=None, running_revision="1")
+    assert result.returncode == 1
+    assert "no WORKFLOW_REVISION" in result.stdout
+
+
+def test_the_check_runs_before_anything_expensive(tmp_path):
+    """Two seconds of checkout, not forty minutes of run, before the mismatch is reported."""
+    import yaml
+
+    names = [s.get("name") or s.get("uses") for s in
+             yaml.safe_load(_workflow("manual-run.yml"))["jobs"]["run"]["steps"]]
+    assert names[0] == "actions/checkout@v4", "the guard needs the checkout to compare against"
+    assert names[1].startswith("The workflow that ran"), "and nothing should precede it after that"

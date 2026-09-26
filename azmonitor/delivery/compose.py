@@ -243,9 +243,13 @@ def _esc(s: str) -> str:
 def _html_body(subject: str, summary: list[str], periods: list[str], notes: list[str],
                links: list[dict[str, str]], facts: dict[str, Any], footer: str) -> str:
     # Deliberately plain: inline styles only, no images, no tracking, nothing that needs to load.
+    # The accent comes from the active theme rather than a literal, so an email sent from a
+    # neutral-profile deployment does not arrive in someone else's brand colour.
+    accent = "#" + config.theme()["colors"]["primary"].lstrip("#")
+    panel = "#" + config.theme()["colors"]["panel"].lstrip("#")
     p = "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.55;color:#1a1a1a"
     out = [f'<div style="{p};max-width:640px">']
-    out.append(f'<h2 style="margin:0 0 4px;font-size:18px;color:#6F00B6">{_esc(subject)}</h2>')
+    out.append(f'<h2 style="margin:0 0 4px;font-size:18px;color:{accent}">{_esc(subject)}</h2>')
     if facts.get("status_label"):
         out.append(f'<div style="color:#666;font-size:12px;margin-bottom:14px">{_esc(facts["status_label"])}'
                    f'{" · version " + str(facts["version"]) if facts.get("version") else ""}</div>')
@@ -257,13 +261,13 @@ def _html_body(subject: str, summary: list[str], periods: list[str], notes: list
         out += [f"<li style='margin-bottom:6px'>{_esc(s)}</li>" for s in summary]
         out.append("</ol>")
     for n in notes:
-        out.append(f'<div style="background:#f6f2fa;border-left:3px solid #6F00B6;padding:8px 12px;margin-bottom:12px;'
+        out.append(f'<div style="background:{panel};border-left:3px solid {accent};padding:8px 12px;margin-bottom:12px;'
                    f'font-size:13px">{_esc(n)}</div>')
     if links:
         out.append('<div style="font-weight:600;margin-bottom:6px">Other files in this edition</div><ul style="margin:0 0 16px;padding-left:20px">')
         for l in links:
             if l.get("url"):
-                out.append(f'<li style="margin-bottom:4px"><a href="{_esc(l["url"])}" style="color:#6F00B6">{_esc(l["name"])}</a></li>')
+                out.append(f'<li style="margin-bottom:4px"><a href="{_esc(l["url"])}" style="color:{accent}">{_esc(l["name"])}</a></li>')
             else:
                 out.append(f'<li style="margin-bottom:4px">{_esc(l["name"])} <span style="color:#888">({_esc(l["file"])})</span></li>')
         out.append("</ul>")

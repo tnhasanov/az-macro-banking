@@ -1,0 +1,343 @@
+name: scheduled
+
+# The engine's original task runner, kept for manual operation only.
+#
+# It no longer has a schedule. Scheduled work — the three daily source checks and the Monday
+# digest — is started by the application's scheduler tick (web/app/api/cron/tick) and runs through
+# report-job.yml, the same pipeline a request from the dashboard uses, with durable jobs, leases,
+# publication records and the email ledger. Two schedulers for the same work is how a report is
+# produced twice, or, when each assumes the other covered it, not at all; `schedule_drift` fails
+# CI if a `schedule:` trigger reappears here.
+#
+# Dispatch this by hand only to run a task the old way (for example a dry run of the readiness
+# rules). It shares the dataset lease with report jobs, so the two never overlap.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Which task to run"
+        required: true
+        type: choice
+        options: [source-check, weekly-digest, monitor]
+        default: source-check
+      dry_run:
+        description: "Decide everything, produce and send nothing"
+        type: boolean
+        default: false
+      trigger:
+        description: "Who asked (recorded in the run history)"
+        required: false
+        default: manual
+
+# One run at a time, across every trigger. The engine's lease would catch an overlap anyway and
+# refuse the second run, but refusing it here costs nothing and keeps the history readable.
+# Deliberately not cancel-in-progress: a run half way through publishing must finish, not be killed.
+concurrency:
+  group: azmonitor-engine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Baku
+      # This worker uploads to personal object storage, so it renders under the neutral
+      # distribution profile: no organisation logo, no brand colours, a neutral footer. The
+      # figures, the narrative and the edition fingerprint are identical either way — the profile
+      # changes the cover and nothing else. `publish save` refuses to upload under any profile
+      # that does not permit external distribution, so removing this line stops the run rather
+      # than quietly publishing someone else's branding.
+      AZMONITOR_PROFILE: neutral
+      AZMONITOR_DATA_DIR: ${{ github.workspace }}/.state/data
+      AZMONITOR_OUTPUT_DIR: ${{ github.workspace }}/.state/outputs
+      # Persistence goes through the engine's own hooks, inside its lock.
+      AZMONITOR_RESTORE_CMD: python -m azmonitor.cloud.publish restore
+      AZMONITOR_SAVE_CMD: python -m azmonitor.cloud.publish save
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      # Used only to mint a short-lived Blob credential when no read-write token exists. The
+      # access token identifies the project; BLOB_STORE_ID names the store the token is for, which
+      # an OIDC token does not carry by itself.
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}
+      AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
+      AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
+      AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
+      AZMONITOR_GRAPH_TENANT_ID: ${{ secrets.AZMONITOR_GRAPH_TENANT_ID }}
+      AZMONITOR_GRAPH_CLIENT_ID: ${{ secrets.AZMONITOR_GRAPH_CLIENT_ID }}
+      AZMONITOR_GRAPH_CLIENT_SECRET: ${{ secrets.AZMONITOR_GRAPH_CLIENT_SECRET }}
+      AZMONITOR_GRAPH_SENDER: ${{ secrets.AZMONITOR_GRAPH_SENDER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Private Blob goes through @vercel/blob, the SDK Vercel maintains, because the dataset is
+      # ~260 MB and multipart upload, retries and the error taxonomy are not worth re-deriving.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tools/blob/package-lock.json
+
+      - name: Blob client
+        run: npm ci --omit=dev --prefix tools/blob
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          # libreoffice-impress: the PPTX -> PDF step. poppler: slide previews.
+          # fonts-dejavu-core: full Azerbaijani coverage, so ə ğ ı ö ş ü are not boxes.
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-impress poppler-utils fonts-open-sans fonts-dejavu-core
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cloud]"
+
+      - name: Which task
+        id: task
+        run: |
+          # Only ever dispatched by hand now; the task is whatever was asked for.
+          TASK="${{ inputs.task }}"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "trigger=${{ inputs.trigger || 'schedule' }}" >> "$GITHUB_OUTPUT"
+          echo "Running $TASK (local time now: $(date -Is))"
+
+      - name: Configuration and timers agree with the schedule
+        run: python -m azmonitor.cli schedule check
+
+      - name: Mint a short-lived Blob credential
+        # Only when no read-write token is configured. On a store connected to a Vercel project
+        # that is the normal case rather than a misconfiguration: Vercel keeps the read-write token
+        # as a sensitive variable, and a sensitive variable is write-only by design — no reveal in
+        # the dashboard, no API that returns it — so it cannot be copied into a GitHub secret.
+        #
+        # This used to run `vercel env pull`, which cannot work with a project-scoped access token:
+        # the CLI fetches the *team* alongside the project, a project-scoped token is denied
+        # team-level resources, and the 403 surfaces as "Could not retrieve Project Settings ...
+        # remove the `.vercel` directory", which reads like a linking problem and is not one.
+        #
+        # `POST /v1/projects/{id}/token` is the narrower call — the one @vercel/oidc makes to
+        # refresh a token, and a project resource, so a project-scoped token is the right shape of
+        # credential for it. On refusal the script probes and reports status codes only, so a
+        # failure explains itself rather than needing another run to investigate.
+        if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}
+        run: node tools/blob/vercel-oidc.mjs
+
+      - name: Prove the Blob credential before anything writes
+        run: |
+          # A wrong or expired credential fails on the first call either way. What this catches is
+          # the run that gets far enough to matter first: restore the dataset, spend ten minutes
+          # refreshing sources and rendering, and only then discover it cannot save. It reads one
+          # listing and writes nothing.
+          python -m azmonitor.cloud.publish check
+
+      - name: Take the run lease
+        id: lease
+        run: |
+          # A second worker must not process the same dataset. The lease is held for the length of
+          # the job and released at the end, whatever happened. The fence token it returns is
+          # carried by every later step, which presents it before writing anything persistent — so
+          # a job that overruns its lease is refused rather than racing the run that replaced it.
+          python - <<'PY'
+          import json, os, sys
+          from azmonitor.cloud import lock as L, readmodel as RM
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              print("no database configured; relying on the workflow concurrency group alone")
+              sys.exit(0)
+          conn = RM.connect()
+          RM.ensure_schema(conn)
+          lease = L.DatabaseLease(conn, "azmonitor-run", minutes=55,
+                                  detail={"task": os.environ.get("TASK", "")})
+          try:
+              info = lease.try_acquire()
+              print(f"lease held by {info['holder']} until {info['expires_at']} "
+                    f"(fence {info['fence']})")
+              with open(os.environ["GITHUB_ENV"], "a") as fh:
+                  fh.write(f"AZMONITOR_LEASE_HOLDER={info['holder']}\n")
+                  fh.write(f"AZMONITOR_LEASE_FENCE={info['fence']}\n")
+          except L.LeaseNotAcquired as exc:
+              print(f"::notice::{exc}")
+              sys.exit(75)          # EX_TEMPFAIL: another run is doing the work, this is not a failure
+          finally:
+              conn.close()
+          PY
+        env:
+          TASK: ${{ steps.task.outputs.task }}
+        continue-on-error: true
+
+      - name: Run the task
+        if: steps.lease.outcome == 'success'
+        id: run
+        run: |
+          # The exit code is captured rather than allowed to end the job here, because the steps
+          # that follow have to run even when this fails: the lease must be released and the
+          # failure must be recorded. What the code must NOT do is decide nothing — every branch
+          # below is explicit about it.
+          set +e
+          python -m azmonitor.cli run-task --task "${{ steps.task.outputs.task }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          # Which outcomes leave a dataset that is complete, saved, and safe to publish from?
+          #
+          #   0 ok              the cycle finished and the dataset was saved
+          #   2 partial         some companion input was missing; the dataset is still complete
+          #                     and saved, and the edition says it is partial
+          #   3 failed          processing failed part way; the dataset on disk is mid-cycle
+          #   4 skipped_locked  another run owns the dataset; it will publish, this one must not
+          #   5 failed_restore  the dataset was never restored. Publishing indicators from what is
+          #                     on disk would replace the dashboard's figures with an empty set.
+          #                     This is the one that turns a bad morning into data loss.
+          #   6 failed_save     outputs exist locally but are not in the store; publishing would
+          #                     advertise reports that cannot be downloaded
+          case "$code" in
+            0|2) echo "publish=yes" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "publish=no"  >> "$GITHUB_OUTPUT" ;;
+          esac
+          case "$code" in
+            0) echo "outcome=ok" >> "$GITHUB_OUTPUT" ;;
+            2) echo "outcome=partial" >> "$GITHUB_OUTPUT" ;;
+            3) echo "outcome=failed" >> "$GITHUB_OUTPUT" ;;
+            4) echo "outcome=skipped_locked" >> "$GITHUB_OUTPUT" ;;
+            5) echo "outcome=failed_restore" >> "$GITHUB_OUTPUT" ;;
+            6) echo "outcome=failed_save" >> "$GITHUB_OUTPUT" ;;
+            *) echo "outcome=failed" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Publish what the dashboard reads
+        # Gated on the *task* succeeding, not on holding the lease. Holding the lease only means
+        # this worker was allowed to try.
+        if: steps.lease.outcome == 'success' && steps.run.outputs.publish == 'yes' && !inputs.dry_run
+        run: |
+          if [ -n "$AZMONITOR_DATABASE_URL" ]; then
+            python -m azmonitor.cloud.publish readmodel
+            python -m azmonitor.cloud.publish record-run \
+              --task "${{ steps.task.outputs.task }}" \
+              --trigger "${{ steps.task.outputs.trigger }}" \
+              --run-id "${{ github.run_id }}.${{ github.run_attempt }}" \
+              --published
+            # Every catalogued edition must reference a file that is really there.
+            python -m azmonitor.cloud.publish verify
+          else
+            echo "no database configured; the read model was not published"
+          fi
+
+      - name: Record a run that did not publish
+        # A failed cycle that left no trace looks exactly like a cycle that never happened. This is
+        # what the monitoring task and the System page read to tell "nothing to report" from
+        # "the engine is down".
+        if: always() && steps.lease.outcome == 'success' && steps.run.outputs.publish != 'yes' && !inputs.dry_run
+        run: |
+          if [ -n "$AZMONITOR_DATABASE_URL" ]; then
+            python -m azmonitor.cloud.publish record-run \
+              --task "${{ steps.task.outputs.task }}" \
+              --trigger "${{ steps.task.outputs.trigger }}" \
+              --run-id "${{ github.run_id }}.${{ github.run_attempt }}" \
+              --status "${{ steps.run.outputs.outcome || 'failed' }}" \
+              --error "run-task exited ${{ steps.run.outputs.exit_code }}; the read model was not refreshed" \
+            || echo "::warning::the failed run could not be recorded"
+          fi
+
+      - name: Release the lease
+        if: always() && steps.lease.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import os
+          if not os.environ.get("AZMONITOR_DATABASE_URL"):
+              raise SystemExit(0)
+          from azmonitor.cloud import lock as L, readmodel as RM
+          conn = RM.connect()
+          try:
+              L.DatabaseLease(conn, "azmonitor-run",
+                              holder=os.environ.get("AZMONITOR_LEASE_HOLDER") or L.holder_id(),
+                              fence=int(os.environ["AZMONITOR_LEASE_FENCE"])
+                              if os.environ.get("AZMONITOR_LEASE_FENCE") else None).release()
+          finally:
+              conn.close()
+          PY
+
+      - name: Run summary
+        if: always()
+        run: |
+          # The job summary is what an operator reads first, so it says what happened rather than
+          # making them open the log.
+          {
+            echo "## ${{ steps.task.outputs.task }}"
+            case "${{ steps.run.outputs.outcome }}" in
+              ok)             echo "Outcome: **ok** — the dashboard was refreshed from this run." ;;
+              partial)        echo "Outcome: **partial** — some companion input was missing; the edition says so, and the dashboard was refreshed." ;;
+              failed_restore) echo "Outcome: **failed_restore** — the dataset could not be restored, so this run never had one. The dashboard was left alone; the last good dataset is still in the store." ;;
+              failed_save)    echo "Outcome: **failed_save** — this run produced output but could not save it. The dashboard was not updated, because it would have listed reports that cannot be downloaded." ;;
+              failed)         echo "Outcome: **failed** — processing stopped part way. The dashboard was not updated." ;;
+              skipped_locked) echo "Outcome: **skipped_locked** — another run owns the dataset and will publish." ;;
+            esac
+            echo ""
+            if [ "${{ steps.lease.outcome }}" != "success" ]; then
+              echo "Skipped: another run held the lease."
+            elif [ -f "$AZMONITOR_DATA_DIR/state/last_${{ steps.task.outputs.task }}.json" ]; then
+              python - <<'PY'
+          import json, os, pathlib
+          task = os.environ["TASK"].replace("-", "_")
+          p = pathlib.Path(os.environ["AZMONITOR_DATA_DIR"]) / "state" / f"last_{task}.json"
+          s = json.loads(p.read_text())
+          print(f"Status: **{s.get('status')}** at {s.get('local_time')} (Asia/Baku)\n")
+          steps = s.get("steps") or {}
+          if steps.get("refresh"):
+              changed = steps["refresh"].get("changed_datasets") or []
+              print(f"- Sources refreshed; {len(changed)} dataset(s) changed"
+                    + (f": {', '.join(changed[:6])}" if changed else ""))
+          if steps.get("validate"):
+              v = steps["validate"]
+              print(f"- Quality: {v.get('checks')} checks, {v.get('failed')} failed "
+                    f"({v.get('critical')} critical, {v.get('warning')} warning)")
+          for item in s.get("produced") or []:
+              print(f"- {item.get('report_type')}: **{item.get('status')}**")
+          if steps.get("readiness"):
+              print("\n<details><summary>Readiness</summary>\n")
+              for name, r in steps["readiness"].items():
+                  print(f"- `{name}`: {r.get('state')} — {r.get('note', 'all rules met')}")
+              print("\n</details>")
+          if s.get("error"):
+              print(f"\n**Error:** {s['error']}")
+          PY
+            else
+              echo "No run summary was written."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TASK: ${{ steps.task.outputs.task }}
+
+      - name: Fail the job if the run failed
+        if: always()
+        run: |
+          # The lease being held by another run is not this job's failure.
+          if [ "${{ steps.lease.outcome }}" != "success" ]; then
+            echo "another run holds the lease; nothing to do"
+            exit 0
+          fi
+          case "${{ steps.run.outputs.exit_code }}" in
+            0|2|4)
+              echo "run-task finished: ${{ steps.run.outputs.outcome }}"
+              exit 0 ;;
+            "")
+              echo "::error::the task step did not run to completion, so no outcome was recorded"
+              exit 1 ;;
+            *)
+              echo "::error::run-task exited ${{ steps.run.outputs.exit_code }} (${{ steps.run.outputs.outcome }}); the dashboard was not updated from this run"
+              exit 1 ;;
+          esac

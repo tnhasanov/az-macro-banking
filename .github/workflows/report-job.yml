@@ -1,0 +1,140 @@
+name: report-job
+
+# Runs exactly one job from the application's job table, and nothing else.
+#
+# The web application dispatches this workflow with a job id when someone asks for a report, and
+# the scheduler tick (a Vercel cron, the system's only scheduler) creates source-check and digest
+# jobs that are dispatched the same way. The request itself — which report, which period, whether
+# to check the sources — is read from the database by the worker and validated again there; the
+# only input here is an identifier in a fixed shape.
+#
+# There is deliberately no `schedule:` and no `concurrency:` group. Scheduling lives in one place
+# (web/app/api/cron/tick). And GitHub keeps at most one *pending* run per concurrency group,
+# cancelling the rest, which would silently drop requests people are waiting on; jobs are instead
+# serialised by the dataset lease in Postgres, which queues rather than cancels.
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id (job_ followed by 26 characters). The request is read from the database."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Longer than the worker's own ceiling (its lease stops renewing after 100 minutes), so a
+    # wedged job loses its lease and is recovered before the runner is killed.
+    timeout-minutes: 110
+    env:
+      TZ: Asia/Baku
+      JOB_ID: ${{ inputs.job_id }}
+      # Personal storage takes only the neutral profile; the worker refuses to publish branded files.
+      AZMONITOR_PROFILE: neutral
+      AZMONITOR_DATA_DIR: ${{ github.workspace }}/.state/data
+      AZMONITOR_OUTPUT_DIR: ${{ github.workspace }}/.state/outputs
+      AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}
+
+    steps:
+      - name: The input is a job id and nothing else
+        run: |
+          if [[ ! "$JOB_ID" =~ ^job_[0-9a-hjkmnp-tv-z]{26}$ ]]; then
+            echo "::error::'job_id' is not a job id; refusing to run"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tools/blob/package-lock.json
+
+      - name: Blob client
+        run: npm ci --omit=dev --prefix tools/blob
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          # LibreOffice renders the PDF; poppler draws previews; DejaVu covers Azerbaijani letters.
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-impress poppler-utils fonts-open-sans fonts-dejavu-core
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cloud]"
+
+      - name: Mint a short-lived Blob credential
+        # Only when no read-write token is configured: see scheduled.yml for why a project-connected
+        # store's token cannot be copied into a GitHub secret, and what this call asks for instead.
+        if: ${{ !env.BLOB_READ_WRITE_TOKEN && env.VERCEL_TOKEN }}
+        run: node tools/blob/vercel-oidc.mjs
+
+      - name: Prove the Blob credential before anything writes
+        run: python -m azmonitor.cloud.publish check
+
+      - name: Application-state schema is current
+        # Additive, numbered migrations under an advisory lock; a no-op when already applied.
+        run: python -m azmonitor.appstate migrate
+
+      - name: Run the job
+        id: run
+        run: |
+          set +e
+          python -m azmonitor.jobs run --job-id "$JOB_ID" | tee "$RUNNER_TEMP/job.json"
+          code=${PIPESTATUS[0]}
+          set -e
+          # 0: the job reached a recorded outcome — published, reused, unchanged, waiting, blocked,
+          #    failed or requeued; the job page says which. 3: another worker holds it, or it had
+          #    already finished; nothing to do. Anything else: the worker broke before recording.
+          case "$code" in
+            0) echo "outcome=recorded" >> "$GITHUB_OUTPUT" ;;
+            3) echo "::notice::the job was not claimed (finished, cancelled or held by another run)"
+               echo "outcome=not_claimed" >> "$GITHUB_OUTPUT" ;;
+            4) echo "::warning::this runner lost the job to another after its lease lapsed; it wrote nothing further"
+               echo "outcome=replaced" >> "$GITHUB_OUTPUT" ;;
+            *) echo "outcome=crashed" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Job \`$JOB_ID\`"
+            echo ""
+            if [ -f "$RUNNER_TEMP/job.json" ]; then
+              python - <<'PY'
+          import json, os
+          try:
+              r = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "job.json")))
+          except Exception:
+              raise SystemExit(0)
+          print(f"- status: **{r.get('status')}**")
+          if r.get("message"):
+              print(f"- {r['message']}")
+          for item in r.get("items") or []:
+              print(f"- {item.get('report_type')} ({item.get('scope')}): **{item.get('status')}**"
+                    + (f" — {item.get('edition_id')}" if item.get("edition_id") else ""))
+          for w in r.get("waiting") or []:
+              print(f"- {w.get('report_type')} ({w.get('scope')}): waiting for data")
+          PY
+            else
+              echo "The worker did not write a result."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

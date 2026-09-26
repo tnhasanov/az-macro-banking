@@ -36,6 +36,23 @@ class Fetched:
     from_cache: bool = False
 
 
+def _override_for(url: str) -> Path | None:
+    """End-to-end test hook: AZMONITOR_FETCH_OVERRIDES names a JSON file mapping a source URL to a
+    local file, so a test can simulate a source republishing a corrected file. The job worker
+    refuses to run a production job with it set."""
+    import json as _json
+    import os as _os
+
+    mapping = _os.environ.get("AZMONITOR_FETCH_OVERRIDES")
+    if not mapping:
+        return None
+    try:
+        target = (_json.loads(Path(mapping).read_text(encoding="utf-8")) or {}).get(url)
+    except (OSError, ValueError):
+        return None
+    return Path(target) if target else None
+
+
 class Fetcher:
     def __init__(self, http_cfg: dict[str, Any], raw_dir: Path, offline: bool = False):
         self.cfg = http_cfg
@@ -56,6 +73,14 @@ class Fetcher:
     def get(self, url: str, *, allow_html: bool = True, max_mb: float | None = None) -> Fetched:
         if self.offline:
             raise FetchError(f"offline mode: {url}")
+        override = _override_for(url)
+        if override is not None:
+            content = override.read_bytes()
+            log.warning("serving %s from the local override %s (end-to-end test hook)", url, override)
+            return Fetched(url=url, final_url=url, content=content, status=200, content_type=None,
+                           last_modified=None, etag=None,
+                           retrieved_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                           sha256=hashlib.sha256(content).hexdigest())
         retries = int(self.cfg.get("retries", 3))
         backoff = float(self.cfg.get("backoff_seconds", 2))
         timeout = float(self.cfg.get("timeout_seconds", 90))

@@ -14,15 +14,25 @@ from openpyxl.utils import get_column_letter
 from .. import config
 from ..storage.db import Database
 
-HEADER_FILL = PatternFill("solid", fgColor="6F00B6")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
+
+
+# Read from the active theme rather than fixed here, so a neutral profile does not stamp a brand
+# colour onto the workbook after the deck has carefully avoided one. A function rather than a
+# module constant because the theme is chosen by the distribution profile at run time.
+def _header_fill() -> PatternFill:
+    return PatternFill("solid", fgColor=config.theme()["colors"]["table_header"])
+
+
+def _header_colour() -> str:
+    return config.theme()["colors"]["primary"]
 
 
 def _sheet(wb: Workbook, name: str, header: list[str], rows: list[list[Any]], widths: list[int] | None = None):
     ws = wb.create_sheet(name[:31])
     ws.append(header)
     for c in ws[1]:
-        c.fill = HEADER_FILL
+        c.fill = _header_fill()
         c.font = HEADER_FONT
         c.alignment = Alignment(vertical="center", wrap_text=True)
     for r in rows:
@@ -38,7 +48,7 @@ def build_workbook(fp: dict[str, Any], nar: dict[str, Any], db: Database, out_pa
     ws = wb.active
     ws.title = "Index"
     ws["A1"] = config.term("report_title", fp.get("lang", "en"))
-    ws["A1"].font = Font(bold=True, size=14, color="6F00B6")
+    ws["A1"].font = Font(bold=True, size=14, color=_header_colour())
     ws["A2"] = f"Edition {fp['edition'].get('edition_month')} · as-of {fp['as_of']} (Asia/Baku) · generated {fp['generated_at']} · fact pack {fp.get('fact_pack_hash')}"
     ws["A3"] = f"Information-set mode: {fp.get('information_set_mode')} · narrative mode: {nar.get('mode')}"
     ws["A5"] = "Sheets"
