@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from .. import config
+from ..util import progress
 from ..facts import FactPackBuilder
 from ..narrative.fmt import plabel
 from ..storage.db import Database, utcnow
@@ -74,7 +76,8 @@ def publications_slide(d, C, fp: dict[str, Any], db: Database, since_iso: str, s
 
 
 def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool = False,
-                    db: Database | None = None, until: str | None = None) -> dict[str, Any]:
+                    db: Database | None = None, until: str | None = None,
+                    produce_when_empty: bool | None = None) -> dict[str, Any]:
     """The digest for a window.
 
     `until` closes the window at the end of a named day. Without it the window runs to now, which is
@@ -105,23 +108,43 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
     new_docs = [dict(d) for d in db.all_documents()
                 if (d["first_seen_at"] or "") >= since_iso and d["status"] in ("parsed", "stored")
                 and (not end_stamp or (d["first_seen_at"] or "") <= end_stamp)]
-    if not vint and not force:
+    produce_when_empty = force if produce_when_empty is None else produce_when_empty
+    if not vint and not produce_when_empty:
         status = {"status": "no_update", "since": since_iso, "as_of": as_of_d.isoformat(), "at": utcnow(), "note": "no new observations or revisions since the last digest; previous deck remains current"}
         (paths.state_dir / "weekly_status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
         if own:
             db.close()
         return status
+    # In window mode an edition is the window, so the digest for one week is one edition however
+    # many times it is asked for; a run date would make every request a different edition.
+    edition = f"week-{since_iso}" if until_iso else as_of_d.isoformat()
+    fingerprint = hashlib.sha256(json.dumps(
+        {"window": [since_iso, until_iso], "vintages": sorted(v["vintage_id"] for v in vint),
+         "documents": sorted(x["doc_id"] for x in new_docs), "lang": lang}, sort_keys=True).encode()).hexdigest()[:24]
+    same_edition = [e for e in db.editions("weekly") if e["edition_period"] == edition]
+    prior = [e for e in same_edition if e["status"] == "generated"]
+    if prior and not force:
+        from ..reports import previous_fingerprint
+
+        last = previous_fingerprint(prior[-1])
+        if last and last.get("fingerprint") == fingerprint:
+            if own:
+                db.close()
+            return {"status": "unchanged", "edition": edition, "existing_edition_id": prior[-1]["edition_id"],
+                    "version": prior[-1]["version"], "fingerprint": fingerprint,
+                    "note": "the digest for this window already covers exactly these releases"}
+    progress.stage("calculating", "collecting the week's releases and revisions")
     b = FactPackBuilder(db, as_of_d, lang=lang)
     fp = b.build()
     fp["report_type"] = "weekly"
     changed_datasets = sorted({v["dataset_id"] for v in vint})
+    progress.stage("rendering", "slides")
     theme = dict(config.theme())
     theme["_root"] = str(config.ROOT)
     d = Deck(theme, lang)
     C = theme["colors"]
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    edition = as_of_d.isoformat()
-    version = len([e for e in db.editions("weekly") if e["edition_period"] == edition]) + 1
+    version = len(same_edition) + 1
     out = paths.output_dir / "weekly" / edition / f"v{version}_{ts}"
     out.mkdir(parents=True, exist_ok=True)
     src_line = f"Source: CBA and SSC documents first seen after {since_label}; retrieved {fp['generated_at'][:10]}; cutoff {fp['as_of']} (Asia/Baku)."
@@ -208,6 +231,7 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
     pdf_info: dict[str, Any] = {"status": "skipped"}
     if soffice_available():
         try:
+            progress.detail("PDF")
             pdf = convert_to_pdf(pptx_path, out)
             pdf_info = {"status": "ok", "path": str(pdf)}
             previews(pdf, out / "previews")
@@ -215,16 +239,19 @@ def generate_weekly(as_of: str | None, since: str | None, lang: str, force: bool
             pdf_info = {"status": "failed", "reason": str(exc)}
     manifest = {"report_type": "weekly", "edition": edition, "version": version, "since": since_iso,
                 "window": {"start": since_iso, "end": until_iso}, "generated_at": utcnow(), "as_of": as_of_d.isoformat(), "new_documents": [x["doc_id"] for x in new_docs],
-                "changed_datasets": changed_datasets, "files": {"pptx": str(pptx_path), "pdf": pdf_info}, "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page}
+                "changed_datasets": changed_datasets, "files": {"pptx": str(pptx_path), "pdf": pdf_info}, "fact_pack_hash": fp.get("fact_pack_hash"), "n_slides": d.page,
+                "edition_fingerprint": {"fingerprint": fingerprint}, "reporting_periods": {"window_start": since_iso, "window_end": until_iso or as_of_d.isoformat()}}
     manifest["manifest_path"] = str(out / "manifest.json")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     (out / "fact_pack.json").write_text(json.dumps(fp, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     db.add_edition({"edition_id": f"weekly:{edition}:v{version}", "report_type": "weekly", "edition_period": edition, "version": version, "generated_at": manifest["generated_at"], "as_of": as_of_d.isoformat(),
-                    "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"since": since_iso})})
+                    "snapshot_id": None, "status": "generated", "path": str(out), "manifest_path": str(out / "manifest.json"), "anchors": json.dumps({"since": since_iso}),
+                    "fingerprint": fingerprint, "scope_key": edition, "fingerprint_detail": json.dumps({"fingerprint": fingerprint})})
     from ..reports import _update_latest
 
     _update_latest(paths, "weekly", out, manifest)
     (paths.state_dir / "weekly_status.json").write_text(json.dumps({"status": "generated", "path": str(out), "at": manifest["generated_at"], "since": since_iso}, indent=2), encoding="utf-8")
     if own:
         db.close()
-    return {"status": "generated", "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": d.page, "since": since_iso, "new_documents": len(new_docs), "changed_datasets": changed_datasets}
+    return {"status": "generated", "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": d.page, "since": since_iso, "new_documents": len(new_docs), "changed_datasets": changed_datasets,
+            "edition": edition, "version": version, "edition_id": f"weekly:{edition}:v{version}", "fingerprint": fingerprint}

@@ -15,6 +15,7 @@ from .ingest.fetch import FetchError, Fetcher
 from .parsers.base import Observation, ParseResult, ParserError
 from .parsers.registry import get_parser
 from .storage.db import Database, utcnow
+from .util import progress
 from .util.log import get_logger, setup_logging
 from .util.periods import ym
 
@@ -192,9 +193,12 @@ class Pipeline:
         failed = [c for c in checks if not c["ok"]]
         if failed:
             st["warnings"].extend(f"check {c['type']} {c['total']} {c['period_end']}: diff {c['diff']:.3f}" for c in failed[:5])
+        pubs_before = len(st.get("new_publications") or [])
         if result.publication or result.passages or result.decisions:
             self._store_publication(result, d, rec, doc_id, dsid, st)
+        new_publication = len(st.get("new_publications") or []) > pubs_before
         materiality = self._materiality_for(ds)
+        latest_before = self._latest_period(dsid)
         stats = self.db.store_observations(dsid, doc_id, result.observations, materiality=materiality, published_at=rec["published_at"])
         st["new_obs"] += stats["n_new"]
         st["revisions"] += stats["n_revisions"]
@@ -210,6 +214,26 @@ class Pipeline:
                                   message=f"{stats['n_new']} new, {stats['n_revisions']} revised, {stats['n_unchanged']} unchanged")
         if stats["n_revisions"]:
             log.info("%s: %d revisions detected (vintage %s)", dsid, stats["n_revisions"], stats["vintage_id"])
+        # What changed, per document, for azmonitor/changes.py to classify. Recorded for every
+        # document that was downloaded and parsed, including the ones that changed nothing: "the
+        # bytes changed and the data did not" is itself a classification.
+        original = ((ds.get("parse") or {}).get("original_language")) or None
+        language = (d.extra or {}).get("language")
+        pub = self.db.get_publication(rec["publication_id"]) if rec.get("publication_id") else None
+        st.setdefault("changes", []).append({
+            "dataset_id": dsid, "source_id": sid, "document_id": doc_id, "document_url": d.document_url,
+            "replaced": bool(replaced), "publication_id": rec.get("publication_id"), "pub_type": ds.get("pub_type"),
+            "language": language, "original_language": original,
+            "is_translation": bool(language and original and language != original),
+            "new_publication": new_publication,
+            "published_at": (pub["published_at"] if pub is not None and "published_at" in pub.keys() else None) or rec.get("published_at"),
+            "translation_available_at": pub["translation_available_at"] if pub is not None and "translation_available_at" in pub.keys() else None,
+            "first_seen_at": rec.get("first_seen_at"), "retrieved_at": rec.get("retrieved_at"),
+            "n_new": stats["n_new"], "n_revisions": stats["n_revisions"],
+            "new_periods": stats["new_periods"], "revised_periods": stats["revised_periods"],
+            "latest_before": latest_before.isoformat() if latest_before else None,
+            "decisions": list(st.get("decisions") or []),
+        })
 
     # ------------------------------------------------------------- publications
     def _publication_extra(self, row, ds: dict[str, Any]) -> dict[str, Any]:
@@ -370,7 +394,11 @@ class Pipeline:
         self.db.start_run(run_id, "refresh")
         history_start = history_start or self.settings.get("history_start", "2020-01")
         stats: dict[str, Any] = {}
+        progress.detail("discovering documents on the source sites")
         docs = self.discover(source_ids, history_start=history_start)
+        wanted = [(sid, ds) for sid, _, ds in config.iter_datasets()
+                  if not (source_ids and sid not in source_ids) and not (dataset_ids and ds["id"] not in dataset_ids)]
+        total, done = len(wanted), 0
         for sid, scfg, ds in config.iter_datasets():
             if source_ids and sid not in source_ids:
                 continue
@@ -383,6 +411,8 @@ class Pipeline:
                 self.db.set_dataset_state(ds["id"], source_id=sid, last_checked_at=utcnow(), status="not_discovered")
                 continue
             # dependent datasets (regional snapshots) after their companions: process in config order, companions listed first
+            done += 1
+            progress.detail(f"dataset {done} of {total}: {ds['id']}")
             for d in selected:
                 self.process_document(d, sid, ds, stats)
         from .publications.review import review_publication_series

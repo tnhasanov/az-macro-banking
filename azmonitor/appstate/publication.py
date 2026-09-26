@@ -29,7 +29,9 @@ from .jobs import Claim, LeaseLost, _guarded, _rows
 # Why an edition exists, and whether that is news to anyone. A manual request or a forced
 # regeneration is the requester's business; new official data is everyone's.
 ANNOUNCED_CAUSES = ("new_data", "revision", "new_publication", "weekly")
-CAUSES = ANNOUNCED_CAUSES + ("manual_request", "admin_force")
+# coverage_refresh: the report changed because of an event another report in the same batch
+# announces (a policy decision refreshes the monthly's policy slide; the decision update is the news).
+CAUSES = ANNOUNCED_CAUSES + ("manual_request", "admin_force", "coverage_refresh")
 
 
 class PublicationConflict(RuntimeError):
