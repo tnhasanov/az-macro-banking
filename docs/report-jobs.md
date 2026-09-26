@@ -195,7 +195,7 @@ Its test hooks (`AZMONITOR_REFRESH_DATASETS`, `AZMONITOR_FETCH_OVERRIDES`, short
 
 ### What the end-to-end run found
 
-Four defects that no unit test had caught, all fixed and each now pinned by a test:
+Five defects that no unit test had caught, all fixed and each now pinned by a test:
 
 - **A whole deck failed on one empty chart.** The CBA regional tables carry a single month; an
   edition for any other banking month had no regional rows, python-pptx refused the empty chart and
@@ -207,6 +207,11 @@ Four defects that no unit test had caught, all fixed and each now pinned by a te
 - **A dead worker blocked every job for half an hour.** It kept the dataset lease; the reaper now
   releases it with the job (`tests/test_appstate.py`).
 - **"Email me" waited for the next 15-minute tick.** A watched job page now sends its due email at once.
+- **Two workers on one machine could corrupt the stored dataset.** A replaced worker that woke up
+  checkpointed its stale SQLite log into the file its successor was archiving; later restores
+  failed their integrity check (and correctly refused to run). Each attempt now works in its own
+  directory, so the fresh-runner property holds everywhere, not only on GitHub
+  (`tests/test_worker.py::test_each_attempt_works_in_its_own_directory_and_leaves_nothing_behind`).
 
 ## Remaining steps to go live (user actions)
 
