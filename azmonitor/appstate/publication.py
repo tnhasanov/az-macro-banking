@@ -88,7 +88,7 @@ def commit(conn, claim: Claim, *, record: dict[str, Any], catalog_entry: dict[st
 
     with conn.transaction():
         with conn.cursor() as cur:
-            _guarded(cur, claim, f"publishing {edition_id}")
+            live = _guarded(cur, claim, f"publishing {edition_id}")
 
             cur.execute("SELECT edition_id, job_id FROM publication_records WHERE edition_id = %s "
                         "OR (report_type = %s AND edition = %s AND version = %s)",
@@ -167,20 +167,23 @@ def commit(conn, claim: Claim, *, record: dict[str, Any], catalog_entry: dict[st
                         if status == "queued":
                             announced_to.add(r["email"].lower())
 
-            if claim.notify_requester and claim.requester_email \
-                    and claim.requester_email.lower() not in announced_to:
+            requester = live.get("requester_email")
+            if live.get("notify_requester") and requester and requester.lower() not in announced_to:
                 delivery_id = new_id("dlv")
                 cur.execute(
                     """INSERT INTO email_outbox(delivery_id, environment, edition_id, job_id, to_address,
                            purpose, status, idempotency_key)
                        VALUES (%s,%s,%s,%s,%s,'manual_request','queued',%s)""",
-                    (delivery_id, env, edition_id, claim.job_id, claim.requester_email, delivery_id))
+                    (delivery_id, env, edition_id, claim.job_id, requester, delivery_id))
                 summary["notifications"].append({"recipient": "requester", "purpose": "manual_request",
                                                  "status": "queued"})
 
             if change_ids:
-                cur.execute("UPDATE source_changes SET handled_by_job = %s WHERE change_id = ANY(%s)",
-                            (claim.job_id, change_ids))
+                # Attribution only. A change is closed by the check that planned it, once every report
+                # it affects has answered: the monthly publishing does not settle a change the sector
+                # review is still waiting on.
+                cur.execute("UPDATE source_changes SET handled_by_job = coalesce(handled_by_job, %s) "
+                            "WHERE change_id = ANY(%s)", (claim.job_id, change_ids))
 
             if record.get("fingerprint"):
                 cur.execute(
@@ -210,23 +213,24 @@ def commit(conn, claim: Claim, *, record: dict[str, Any], catalog_entry: dict[st
     return summary
 
 
-def queue_requester_email(conn, claim: Claim, edition_id: str) -> bool:
-    """The requester asked to be emailed and the answer is an edition that already existed."""
-    if not (claim.notify_requester and claim.requester_email):
+def queue_requester_email(cur, claim: Claim, edition_id: str, live: dict[str, Any]) -> bool:
+    """The requester asked to be emailed and the answer is an edition that already existed.
+
+    Called inside the transaction that finishes the job (see jobs.finish), with the row as it is
+    now, so a request to be emailed made while the job ran is honoured and the email and the job's
+    outcome are recorded together.
+    """
+    if not (live.get("notify_requester") and live.get("requester_email")):
         return False
     delivery_id = new_id("dlv")
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO email_outbox(delivery_id, environment, edition_id, job_id, to_address, purpose,
-                   status, idempotency_key)
-               SELECT %s,%s,%s,%s,%s,'manual_request','queued',%s
-                WHERE EXISTS (SELECT 1 FROM publication_records WHERE edition_id = %s)""",
-            (delivery_id, claim.environment, edition_id, claim.job_id, claim.requester_email, delivery_id,
-             edition_id))
-        queued = cur.rowcount == 1
-    if not conn.autocommit:
-        conn.commit()
-    return queued
+    cur.execute(
+        """INSERT INTO email_outbox(delivery_id, environment, edition_id, job_id, to_address, purpose,
+               status, idempotency_key)
+           SELECT %s,%s,%s,%s,%s,'manual_request','queued',%s
+            WHERE EXISTS (SELECT 1 FROM publication_records WHERE edition_id = %s)""",
+        (delivery_id, claim.environment, edition_id, claim.job_id, live["requester_email"], delivery_id,
+         edition_id))
+    return cur.rowcount == 1
 
 
 def published(conn, report_type: str, edition: str | None = None) -> list[dict[str, Any]]:

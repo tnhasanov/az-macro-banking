@@ -484,6 +484,36 @@ BEGIN
   END LOOP;
 END $$;
 """),
+
+    (5, "pending changes, automatic checks and request throttling", """
+-- A change is work until a report has answered it. Recording the answer on the change itself makes
+-- unhandled changes a durable queue: a check that found new data but could not produce the report
+-- (the monthly still waiting for its companion tables, a quality failure, a runner lost mid-render)
+-- leaves them pending, and the next check plans from everything still pending rather than only from
+-- what it happened to download itself.
+ALTER TABLE source_changes ADD COLUMN IF NOT EXISTS handled_at TIMESTAMPTZ;
+ALTER TABLE source_changes ADD COLUMN IF NOT EXISTS handling TEXT;
+UPDATE source_changes SET handled_at = detected_at, handling = 'published'
+ WHERE handled_by_job IS NOT NULL AND handled_at IS NULL;
+UPDATE source_changes SET handled_at = detected_at, handling = 'not_productive'
+ WHERE handled_at IS NULL
+   AND classification NOT IN ('new_publication','new_observations','substantive_revision');
+CREATE INDEX IF NOT EXISTS ix_changes_pending ON source_changes (environment, detected_at)
+  WHERE handled_at IS NULL;
+
+-- Whether the scheduler may start source checks and digests on its own in this environment. Off
+-- until someone turns it on, separately from whether anyone is emailed about what they produce.
+ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS auto_checks_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- Fixed-window request counters. A generate request starts a runner; a login attempt costs a
+-- PBKDF2 derivation; both are worth bounding per signed-in user and per address.
+CREATE TABLE IF NOT EXISTS request_throttle (
+  bucket            TEXT NOT NULL,
+  window_start      TIMESTAMPTZ NOT NULL,
+  hits              INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (bucket, window_start)
+);
+"""),
 ]
 
 LATEST = max(v for v, _, _ in MIGRATIONS)

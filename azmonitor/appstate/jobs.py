@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,10 @@ STAGES = ("queued", "starting", "waiting_for_dataset", "restoring", "collecting"
 
 class LeaseLost(RuntimeError):
     """This worker no longer owns the job. Stop, and write nothing more."""
+
+
+class JobCancelled(RuntimeError):
+    """Someone asked for this job to stop. Raised at the next stage boundary, never mid-write."""
 
 
 @dataclass
@@ -176,10 +181,16 @@ class Heartbeat:
     a deck takes minutes — during which the lease must still be renewed.
     """
 
-    def __init__(self, connect, *, interval: float = 30.0, lease_seconds: int = 300):
+    def __init__(self, connect, *, interval: float = 30.0, lease_seconds: int = 300,
+                 max_seconds: float | None = None):
         self._connect = connect
         self.interval = interval
         self.lease_seconds = lease_seconds
+        # A renewer in a background thread would keep a wedged job's lease alive for ever, which is
+        # exactly what a lease exists to prevent. So it stops renewing after a ceiling longer than
+        # any honest run: a job still going then loses its lease and is recovered like a dead one.
+        self.max_seconds = max_seconds
+        self._started = 0.0
         self._claims: dict[str, Claim] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -198,6 +209,12 @@ class Heartbeat:
     def _run(self) -> None:
         conn = None
         while not self._stop.wait(self.interval):
+            if self.max_seconds is not None and time.monotonic() - self._started > self.max_seconds:
+                with self._lock:
+                    for c in self._claims.values():
+                        c.lost.set()
+                    self._claims.clear()
+                break
             try:
                 if conn is None or conn.closed:
                     conn = self._connect()
@@ -222,6 +239,7 @@ class Heartbeat:
             conn.close()
 
     def start(self) -> "Heartbeat":
+        self._started = time.monotonic()
         self._thread = threading.Thread(target=self._run, name="job-heartbeat", daemon=True)
         self._thread.start()
         return self
@@ -234,15 +252,22 @@ class Heartbeat:
 
 # ------------------------------------------------------------------ reporting
 
-def _guarded(cur, claim: Claim, what: str) -> None:
-    """Lock the job row and confirm this worker still owns it, or raise LeaseLost."""
+def _guarded(cur, claim: Claim, what: str) -> dict[str, Any]:
+    """Lock the job row and confirm this worker still owns it, or raise LeaseLost.
+
+    Returns the fields a person can change while the job runs — asking to be emailed when a job
+    they found already running finishes — so the caller acts on the row as it is now, not as it was
+    when the job was claimed.
+    """
     claim.check(what)
-    cur.execute("SELECT fence, status FROM report_jobs WHERE job_id = %s FOR UPDATE", (claim.job_id,))
+    cur.execute("SELECT fence, status, notify_requester, requester_email, cancel_requested "
+                "FROM report_jobs WHERE job_id = %s FOR UPDATE", (claim.job_id,))
     row = cur.fetchone()
     if not row or int(row[0]) != claim.fence or row[1] != "running":
         claim.lost.set()
         raise LeaseLost(f"{claim.job_id} moved on before {what} "
                         f"(fence {row[0] if row else None}, status {row[1] if row else None})")
+    return {"notify_requester": bool(row[2]), "requester_email": row[3], "cancel_requested": bool(row[4])}
 
 
 def set_stage(conn, claim: Claim, stage: str, detail: str | None = None) -> None:
@@ -250,7 +275,9 @@ def set_stage(conn, claim: Claim, stage: str, detail: str | None = None) -> None
         raise ValueError(f"unknown stage {stage!r}")
     with conn.transaction():
         with conn.cursor() as cur:
-            _guarded(cur, claim, f"stage {stage}")
+            live = _guarded(cur, claim, f"stage {stage}")
+            if live["cancel_requested"]:
+                raise JobCancelled(f"{claim.job_id} was cancelled before {stage}")
             cur.execute(
                 """UPDATE report_jobs SET stage = %s, stage_detail = %s,
                           stage_started_at = CASE WHEN stage IS DISTINCT FROM %s THEN now()
@@ -290,7 +317,14 @@ def finish(conn, claim: Claim, status: str, *, result: dict[str, Any] | None = N
         raise ValueError(f"{status!r} is not a terminal status")
     with conn.transaction():
         with conn.cursor() as cur:
-            _guarded(cur, claim, f"finishing as {status}")
+            live = _guarded(cur, claim, f"finishing as {status}")
+            if status == "reused" and edition_id:
+                # The answer is an edition that already exists: the requester's email, if they asked
+                # for one, is queued in the same transaction that says so.
+                from .publication import queue_requester_email
+
+                result = {**(result or {}),
+                          "requester_email_queued": queue_requester_email(cur, claim, edition_id, live)}
             cur.execute(
                 """UPDATE report_jobs SET status = %s, stage = CASE WHEN %s IN ('failed','blocked','cancelled')
                                                                  THEN stage ELSE 'complete' END,

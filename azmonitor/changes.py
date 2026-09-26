@@ -229,13 +229,17 @@ def record(conn, changes: Iterable[Change], *, batch_id: str, environment: str) 
             cur.execute(
                 """INSERT INTO source_changes(change_id, batch_id, environment, classification, source_id,
                        dataset_id, publication_id, document_id, published_at, translation_available_at,
-                       first_seen_at, retrieved_at, language, periods, affects, notifiable, detail)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       first_seen_at, retrieved_at, language, periods, affects, notifiable, detail,
+                       handled_at, handling)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                           CASE WHEN %s THEN NULL ELSE now() END,
+                           CASE WHEN %s THEN NULL ELSE 'not_productive' END)
                    ON CONFLICT (change_id) DO NOTHING""",
                 (ch.change_id, batch_id, environment, ch.classification, ch.source_id, ch.dataset_id,
                  ch.publication_id, ch.document_id, _day(ch.published_at), _day(ch.translation_available_at),
                  ch.first_seen_at, ch.retrieved_at, ch.language, Jsonb(ch.periods), Jsonb(ch.affects),
-                 ch.notifiable, Jsonb({**ch.detail, "reason": ch.reason})))
+                 ch.notifiable, Jsonb({**ch.detail, "reason": ch.reason}),
+                 ch.classification in PRODUCTIVE, ch.classification in PRODUCTIVE))
             n += cur.rowcount
     if not conn.autocommit:
         conn.commit()
@@ -247,3 +251,59 @@ def summarise(changes: Iterable[Change]) -> dict[str, int]:
     for ch in changes:
         out[ch.classification] = out.get(ch.classification, 0) + 1
     return out
+
+
+def pending(conn, *, environment: str, max_age_days: int = 35) -> list[Change]:
+    """Every productive change no report has answered yet, oldest first.
+
+    Changes older than `max_age_days` are closed as expired rather than planned: a monthly that has
+    waited five weeks for a companion table is superseded by the next month's release, and planning
+    from a stale change would announce old data as news.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE source_changes SET handled_at = now(), handling = 'expired'
+                WHERE environment = %s AND handled_at IS NULL
+                  AND detected_at < now() - make_interval(days => %s)""",
+            (environment, max_age_days))
+        cur.execute(
+            """SELECT change_id, classification, dataset_id, source_id, publication_id, document_id,
+                      published_at, translation_available_at, first_seen_at, retrieved_at, language,
+                      periods, affects, notifiable, detail
+                 FROM source_changes
+                WHERE environment = %s AND handled_at IS NULL
+                ORDER BY detected_at, change_id""",
+            (environment,))
+        rows = cur.fetchall()
+    if not conn.autocommit:
+        conn.commit()
+    out: list[Change] = []
+    for r in rows:
+        detail = dict(r[14] or {})
+        out.append(Change(
+            change_id=r[0], classification=r[1], dataset_id=r[2], source_id=r[3], publication_id=r[4],
+            document_id=r[5], pub_type=None,
+            published_at=r[6].isoformat() if r[6] else None,
+            translation_available_at=r[7].isoformat() if r[7] else None,
+            first_seen_at=r[8].isoformat() if r[8] else None,
+            retrieved_at=r[9].isoformat() if r[9] else None,
+            language=r[10], periods=list(r[11] or []), affects=list(r[12] or []), notifiable=bool(r[13]),
+            reason=str(detail.pop("reason", "")), detail=detail))
+    return out
+
+
+def mark_handled(conn, change_ids: Iterable[str], *, job_id: str | None, handling: str) -> int:
+    """Close changes a report has answered: published, or found to change nothing."""
+    ids = list(change_ids)
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE source_changes SET handled_at = now(), handling = %s,
+                      handled_by_job = coalesce(handled_by_job, %s)
+                WHERE change_id = ANY(%s) AND handled_at IS NULL""",
+            (handling, job_id, ids))
+        n = cur.rowcount
+    if not conn.autocommit:
+        conn.commit()
+    return n

@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import tarfile
 import tempfile
@@ -476,7 +477,11 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
     """
     store = store or store_from_env()
     data_dir = Path(data_dir)
-    stamp = stamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    # Seconds alone are not unique: a source check saves once after collecting and again after
+    # publishing, and a fast run does both inside one second. The second upload then collided with
+    # the first (objects are never overwritten) and the save failed. The suffix keeps keys unique
+    # while still sorting by time.
+    stamp = stamp or f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(3)}"
 
     if fence:
         fence.check("before uploading the dataset")
