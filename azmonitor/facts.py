@@ -541,6 +541,12 @@ class FactPackBuilder:
         self._register_inputs("cba.hh_savings.region.total", {"region": "national"})
         slides["M17"] = {"rows": reg_rows, "national": {"loans": _f(nat_l["value"]) if nat_l else None, "deposits": _f(nat_d["value"]) if nat_d else None, "period": bp.isoformat() if bp else None},
                          "note": "Loans: banks only, by booking region (CBA table 2.10). Deposits: household savings by region (CBA table 2.14). Baku includes head-office bookings."}
+        if not any(r["loans"] is not None for r in reg_rows):
+            held = self.store.latest_any("cba.loans.region.total")
+            slides["M17"]["unavailable"] = (
+                f"The CBA regional tables carry a single month, and the month held ({held[0].isoformat() if held else 'none'}) "
+                f"is not this edition's banking month ({bp.isoformat() if bp else 'unknown'}). No regional figures are shown "
+                f"rather than figures for a different month.")
         # --- M18 next releases (expected dates from CBA schedule lags)
         nxt = []
         for sid, scfg, ds in config.iter_datasets():

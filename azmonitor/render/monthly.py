@@ -613,6 +613,13 @@ class MonthlyRenderer(PolicyStabilitySlides):
         def main(s, x, y, w, h):
             self._caption(s, x, y, w, "Loans and household savings by economic region, share of national total (%), excluding Baku")
             rr = [r for r in rows if not r["region"].startswith("Bakı") and r.get("loan_share") is not None]
+            if not rr:
+                # The regional tables carry one month each; an edition for another banking month has
+                # none, and says so rather than drawing an empty chart.
+                self.d.add_text(s, x, y + 0.35, w, 0.9, f.get("unavailable") or
+                                "The regional tables do not cover this edition's banking month.",
+                                size=10, color=self.C["muted"])
+                return
             cats = [r["region"].replace(" iqtisadi rayonu", "") for r in rr]
             self.d.add_bar_chart(s, x, y + 0.25, w * 0.55 - 0.1, h - 0.25, cats, [{"name": "Loan share", "values": [r["loan_share"] for r in rr], "color": self.SC["loans"]},
                                                                                 {"name": "Savings share", "values": [r["deposit_share"] for r in rr], "color": self.SC["deposits"]}],
