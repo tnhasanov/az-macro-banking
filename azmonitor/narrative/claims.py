@@ -346,6 +346,51 @@ def direction_ok(text: str, written: TextNumber, claim: ResolvedClaim) -> str | 
     return None
 
 
+# A figure for one segment of the market, recognised from its metric id, and the words a sentence
+# uses when it describes that segment. A segment figure written as though it described the whole
+# banking sector is a wrong claim even when the number is right: the consumer-loan NPL ratio of
+# 3.7% presented as "the banking-sector NPL ratio" was exactly that defect.
+SEGMENTS = (
+    ("consumer", "consumer-loan", re.compile(r"\bconsumer", re.IGNORECASE)),
+    ("mortgage", "mortgage", re.compile(r"\bmortgage", re.IGNORECASE)),
+    ("business", "business-loan", re.compile(r"\bbusiness", re.IGNORECASE)),
+    (".hh.", "household", re.compile(r"\bhousehold", re.IGNORECASE)),
+    (".nfc.", "non-financial corporate", re.compile(r"\bnon-?financial corporat", re.IGNORECASE)),
+    (".fin.", "financial corporate", re.compile(r"(?<!non-)(?<!non)\bfinancial corporat", re.IGNORECASE)),
+)
+SECTOR_WIDE = re.compile(r"\b(banking[- ]sector|sector[- ]wide|system[- ]wide|overall|headline|aggregate|"
+                         r"all banks|whole (?:banking )?(?:sector|system)|total (?:loan|credit) portfolio)\b",
+                         re.IGNORECASE)
+
+
+def segment_of(metric_ref: str) -> tuple[str, re.Pattern] | None:
+    ref = metric_ref.lower()
+    for token, name, words in SEGMENTS:
+        if token in ref or ref.endswith(token.strip(".")) or f"_{token.strip('.')}" in ref:
+            return name, words
+    return None
+
+
+def scope_ok(text: str, written: "TextNumber", claim: ResolvedClaim) -> str | None:
+    """A segment's figure must not be described as the whole sector's (definition and population)."""
+    seg = segment_of(claim.ref.metric_ref)
+    if seg is None:
+        return None
+    name, words = seg
+    before = text[max(0, written.start - 90):written.start]
+    # only the clause the number belongs to: cut at the last sentence or clause boundary
+    cut = max(before.rfind(". "), before.rfind("; "), before.rfind(": "))
+    clause = before[cut + 1:] if cut >= 0 else before
+    # The description nearest the number is the one that names it: "consumer lending grew, and
+    # the overall NPL ratio was 3.7%" calls the 3.7% overall, whatever came earlier in the clause.
+    wide = [m.end() for m in SECTOR_WIDE.finditer(clause)]
+    seg = [m.end() for m in words.finditer(clause)]
+    if wide and (not seg or max(wide) > max(seg)):
+        return (f"{written.written} is the {name} figure ({claim.ref.metric_ref}) but the text presents it as "
+                f"describing the whole sector")
+    return None
+
+
 def claim_for(entry: dict[str, Any] | None, which: str = "latest") -> str | None:
     """The claim id for a fact-pack entry's latest value, prior value or change."""
     if not entry:
