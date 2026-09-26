@@ -8,18 +8,28 @@ service is used inside its free allowance at this workload. `costs.md` shows the
 
 For the reasoning behind this shape, read [`vercel-architecture.md`](vercel-architecture.md).
 
+> **Scheduling and email changed.** Reports are now produced by durable jobs: requested from the
+> dashboard or started by a single Vercel cron tick, run by `report-job.yml`, published in one
+> transaction with their email intents, and emailed through Resend. GitHub Actions has no schedule
+> of its own any more and the watchdog is gone. [`report-jobs.md`](report-jobs.md) describes the
+> jobs, the environment matrix, setup and operations; stages F and G below are replaced by it.
+> The Blob credential, seeding and dataset sections here are unchanged and still apply.
+
 ```
-   Vercel Cron ─────► /api/cron/<task>  (watchdog: dispatches only an occurrence that was missed)
-                              │
-   GitHub Actions cron ───────┴──► scheduled.yml
-                                        │  takes the database lease, carries its fence token
-                                        │  restores the dataset from private Blob
-                                        │  refresh → validate → readiness → report → deliver
-                                        │  saves the dataset and any new editions + catalogue
-                                        │  publishes the read model — only if the task succeeded
-                                        ▼
-                    Neon Postgres  ◄──── read model (27 MB) ────►  Vercel dashboard
-                    Private Blob   ◄──── dataset + archive + catalogue ─┘  (streamed downloads)
+   Browser ──► /api/jobs ─┐          Vercel Cron (every 15 min) ──► /api/cron/tick
+                          ▼                                              │ due checks, reaper,
+                    Neon: report_jobs + job_dispatches ◄─────────────────┘ dispatch, email, monitoring
+                          │ workflow_dispatch(job_id)
+                          ▼
+                    GitHub Actions: report-job.yml ── python -m azmonitor.jobs run --job-id
+                          │  claims the job (fenced lease, heartbeat), holds the dataset lease
+                          │  restores the dataset from private Blob, [checks sources, classifies]
+                          │  produces → validates → uploads + verifies → publishes (one transaction)
+                          │  saves the dataset, refreshes the read model
+                          ▼
+                    Neon Postgres  ◄── jobs, publications, email ledger, read model ──► Vercel dashboard
+                    Private Blob   ◄── dataset + archive ─────────────────────────────┘ (streamed downloads)
+                    Resend         ◄── email_outbox (sent by the web app) ── signed webhooks ──► /api/webhooks/resend
 ```
 
 ---
@@ -445,29 +455,13 @@ the network tab shows no storage URL and no token.
 the first run is still listed and still downloadable, and `verify` still reports no missing files.
 This is the scenario that used to erase the archive.
 
-### Stage F — scheduling (prepared, not activated)
+### Stage F — jobs, scheduling and email
 
-Everything needed is in the branch. Activating it is two deliberate acts, in this order:
-
-☐ Merge PR #2, which puts `scheduled.yml` on the default branch and **starts the cron schedule**.
-☐ Optionally add the Vercel watchdog as a second opinion: `AZMONITOR_CRON_ENABLED=true` in
-production only, plus a fine-grained PAT with *Actions: write* on this repository and nothing else.
-☐ Delete `manual-run.yml`.
-
-**Not yet done, and not to be done without your say-so.**
-
-### Stage G — email (prepared, not sent)
-
-Two separate switches, deliberately:
-
-☐ Add the four `AZMONITOR_GRAPH_*` secrets.
-☐ Set `enabled: true` in `config/delivery.yaml`.
-
-Then send one edition to the single authorised recipient and confirm the ledger recorded `sent`
-before widening the distribution list. WhatsApp stays disabled throughout; its implementation is
-preserved for later.
-
-**Not yet done. No email can be sent while either switch is off, and both are off.**
+Replaced by [`report-jobs.md`](report-jobs.md): put `report-job.yml` on the default branch, add
+the dispatch token and the Resend configuration to the production deployment, add the owner as a
+recipient, run the controlled checks, then turn on automatic checks and automatic email in
+Settings. `scheduled.yml` keeps only its manual trigger; `config/delivery.yaml` and the Microsoft
+Graph channel are no longer on the path a report takes to an inbox.
 
 ## Operating it
 

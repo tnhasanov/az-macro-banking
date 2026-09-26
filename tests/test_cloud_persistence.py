@@ -653,3 +653,45 @@ def test_the_second_run_on_unchanged_inputs_adds_no_duplicate_edition(tmp_path):
     second = _publish_local_editions(outputs, store, fence=None)
     assert second["editions_uploaded"] == 0, "nothing new to upload"
     assert len(OS.read_catalog(store)) == 1, "and nothing duplicated in the catalogue"
+
+
+def test_a_save_made_while_the_engine_is_open_keeps_its_latest_writes(tmp_path):
+    """The engine writes in WAL mode; the archive must still contain the newest committed rows.
+
+    Found by the end-to-end run: the worker saved straight after collecting, with the engine's
+    connection still open, and the stored dataset lacked the document the check had just read.
+    """
+    from azmonitor.cloud import objectstore as OS
+    from azmonitor.storage.db import Database
+
+    data = tmp_path / "data"
+    db = Database(data / "monitor.sqlite")                 # stays open, as the worker's does
+    db.conn.execute("INSERT INTO documents(doc_id, source_id, dataset_id, document_url, sha256, retrieved_at, "
+                    "first_seen_at) VALUES ('d-new','cba','cba_deposits','u','s','2026-09-26','2026-09-26')")
+    db.conn.commit()
+    assert (data / "monitor.sqlite-wal").stat().st_size > 0   # the row lives in the log for now
+    store = OS.LocalObjectStore(tmp_path / "store")
+    OS.save_dataset(data, store, stamp="20260926T000000Z")
+    db.close()
+
+    fresh = tmp_path / "fresh"
+    OS.restore_dataset(fresh, store)
+    import sqlite3
+
+    assert sqlite3.connect(fresh / "monitor.sqlite").execute(
+        "SELECT count(*) FROM documents WHERE doc_id = 'd-new'").fetchone()[0] == 1
+
+
+def test_a_stale_log_is_not_replayed_onto_a_restored_database(tmp_path):
+    from azmonitor.cloud import objectstore as OS
+    from azmonitor.storage.db import Database
+
+    src = tmp_path / "src"
+    Database(src / "monitor.sqlite").close()
+    store = OS.LocalObjectStore(tmp_path / "store")
+    OS.save_dataset(src, store, stamp="20260926T000000Z")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "monitor.sqlite-wal").write_bytes(b"left behind by an earlier process")
+    OS.restore_dataset(target, store)
+    assert not (target / "monitor.sqlite-wal").exists()

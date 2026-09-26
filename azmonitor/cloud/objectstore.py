@@ -456,6 +456,46 @@ def _tree_fingerprint(paths: Iterable[Path], base: Path) -> str:
     return digest.hexdigest()
 
 
+def _checkpoint_databases(data_dir: Path) -> None:
+    """Fold every SQLite write-ahead log into its database before the database is copied.
+
+    The engine opens its databases in WAL mode, where a committed transaction lives in
+    `<name>-wal` until a checkpoint copies it into the main file. The dataset archive carries the
+    main file only. Saving while a connection was still open — the job worker saves straight after
+    collecting, before it produces anything — therefore archived a database without its newest
+    writes, and a check that went on to produce nothing never saved again: the documents it had
+    just read were lost from the stored dataset. Found by the end-to-end run.
+
+    A TRUNCATE checkpoint from a fresh connection copies the log in and empties it, provided no
+    other connection is mid-transaction. If the log is not empty afterwards the save is refused,
+    because an archive without those writes is not the dataset.
+    """
+    import sqlite3
+
+    for part in MUTABLE_PARTS:
+        db = Path(data_dir) / part
+        wal = db.with_name(db.name + "-wal")
+        if db.suffix != ".sqlite" or not db.exists() or not wal.exists():
+            continue                                   # no log, nothing to fold in
+        con = sqlite3.connect(db, timeout=60)
+        try:
+            busy, _log, _done = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            con.close()
+        if busy or (wal.exists() and wal.stat().st_size > 0):
+            raise StorageError(f"{part} has writes that could not be checkpointed into it; the dataset was not "
+                               f"saved rather than saved without them")
+
+
+def _clear_stale_logs(data_dir: Path) -> None:
+    """A write-ahead log left by an earlier process must not be replayed onto a restored database."""
+    for part in MUTABLE_PARTS:
+        for suffix in ("-wal", "-shm"):
+            stale = Path(data_dir) / f"{part}{suffix}"
+            if stale.exists():
+                stale.unlink()
+
+
 def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str | None = None,
                  fence: "Fence | None" = None) -> dict[str, Any]:
     """Push the working dataset up, then move the pointer.
@@ -485,6 +525,7 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
 
     if fence:
         fence.check("before uploading the dataset")
+    _checkpoint_databases(data_dir)
 
     previous = _current_pointer(store)
     static_fingerprint = _tree_fingerprint([data_dir / p for p in STATIC_PARTS], data_dir)
@@ -583,6 +624,7 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
 
     pointer = json.loads(raw)
     data_dir.mkdir(parents=True, exist_ok=True)
+    _clear_stale_logs(data_dir)
 
     # A pointer written before the dataset was split names one object; one written since names two.
     # Both are restored the same way, so a store seeded earlier keeps working.

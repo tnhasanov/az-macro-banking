@@ -396,14 +396,13 @@ def j8() -> None:
     wb = openpyxl.load_workbook(source)
     ws = wb["2.11"]
     changed = []
-    for r in ws.iter_rows(min_row=7):
-        cell = r[0].value
-        if isinstance(cell, (dt.date, dt.datetime)) and cell.year == 2026 and cell.month == 7:
-            for col in (1, 2, 3):                      # total, households, household AZN demand
-                old = r[col].value
-                r[col].value = round(float(old) + 250.0, 1)
-                changed.append({"column": col, "was": old, "now": r[col].value})
-            break
+    # Months are text ("07") under a row per year; the last "07" in the table is July 2026, the
+    # latest July the file carries (the live file already runs to August 2026).
+    july = [r for r in ws.iter_rows(min_row=7) if str(r[0].value or "").strip() == "07"][-1]
+    for col in (1, 2, 3):                              # total, households, household AZN demand
+        old = july[col].value
+        july[col].value = round(float(old) + 250.0, 1)
+        changed.append({"row": july[0].row, "column": col, "was": old, "now": july[col].value})
     wb.save(corrected)
     shutil.rmtree(work, ignore_errors=True)
     (E2E / "overrides.json").write_text(json.dumps({doc[0]: str(corrected)}))
@@ -525,11 +524,16 @@ def j12() -> None:
     target = q("SELECT delivery_id FROM email_outbox WHERE status = 'accepted' ORDER BY created_at LIMIT 1")[0]["delivery_id"]
     q("UPDATE email_outbox SET status = 'failed', failed_at = now(), last_error = 'simulated: provider returned 422' "
       "WHERE delivery_id = %s", (target,))
-    before = len(captured())
+    # The capture provider files a message under its idempotency key, as Resend treats a repeated
+    # key as the same message; a retry therefore rewrites that one file rather than adding another.
+    capture_file = next((E2E / "mail").glob(f"cap_{target}.json"), None)
+    before_mtime = capture_file.stat().st_mtime if capture_file else 0
+    time.sleep(1)
     r = browser("retryEmail")
     row = q("SELECT status, attempts, idempotency_key FROM email_outbox WHERE delivery_id = %s", (target,))[0]
+    resent = capture_file is not None and capture_file.stat().st_mtime > before_mtime
     record("J12", "A failed email is retried on its own from Settings", "local integration (browser + capture provider)",
-           row["status"] == "accepted" and len(captured()) == before + 1,
+           row["status"] == "accepted" and row["attempts"] >= 2 and row["idempotency_key"] == target and resent,
            {"delivery": target, "after_retry": row, "ui": r,
             "note": "provider-level failures, backoff and uncertain sends are covered in web/tests/email-db.test.ts"})
 
@@ -551,10 +555,10 @@ def j14() -> None:
 
 
 def j15() -> None:
-    a = create_job(kind="report", report_type="weekly", params={"period": "latest", "refresh": "latest_data"},
-                   trigger="manual", requested_by="owner", dispatch=False)
+    a = create_job(kind="report", report_type="sector", params={"period": "latest", "refresh": "latest_data",
+                   "sector": "construction"}, trigger="manual", requested_by="owner", dispatch=False)
     b = create_job(kind="report", report_type="sector", params={"period": "latest", "refresh": "latest_data",
-                   "sector": "industry"}, trigger="manual", requested_by="owner", dispatch=False)
+                   "sector": "transport"}, trigger="manual", requested_by="owner", dispatch=False)
     pa, pb = run_worker(a, background=True), run_worker(b, background=True)
     pa.wait(timeout=3600)
     pb.wait(timeout=3600)
@@ -563,7 +567,7 @@ def j15() -> None:
     for j in (a, b):
         ev = q("SELECT at, stage, status FROM job_events WHERE job_id = %s ORDER BY id", (j,))
         start = next(e["at"] for e in ev if e["stage"] == "restoring")
-        end = next(e["at"] for e in ev if e["status"] in ("succeeded", "blocked", "failed"))
+        end = next(e["at"] for e in ev if e["status"] in ("succeeded", "reused", "unchanged", "blocked", "failed"))
         spans.append((start, end))
     spans.sort()
     record("J15", "Two jobs at once take turns on the dataset and both finish", "local integration (two workers, one lease)",
@@ -596,12 +600,22 @@ ORDER = [("J1-J4", j1_to_j4), ("J13", j13), ("J5-J7", j5_to_j7), ("J8", j8), ("J
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true", help="leave the web server running at the end")
+    ap.add_argument("--resume", action="store_true",
+                    help="keep the state of the previous run (database, store, mail) instead of resetting it")
+    ap.add_argument("--only", nargs="*", help="run only these journeys, e.g. --only J8")
     args = ap.parse_args()
     started = time.time()
-    prepare()
+    previous = {}
+    if args.resume:
+        previous = json.loads((E2E / "report.json").read_text()).get("journeys", {}) if (E2E / "report.json").exists() else {}
+    else:
+        prepare()
+    REPORT.update(previous)
     web = start_web(PORT)
     try:
         for name, fn in ORDER:
+            if args.only and name not in args.only:
+                continue
             try:
                 fn()
             except Exception as exc:  # a broken journey is a failed journey, and the run continues
@@ -614,7 +628,7 @@ def main() -> int:
             stop(web)
     summary = {"ran_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                "minutes": round((time.time() - started) / 60, 1), "database": DB_URL.rsplit("@", 1)[-1],
-               "journeys": REPORT}
+               "journeys": REPORT, "resumed_for": args.only if args.resume else None}
     (E2E / "report.json").write_text(json.dumps(summary, indent=2, default=str))
     print(json.dumps({k: v["passed"] for k, v in REPORT.items()}, indent=1))
     return 0 if all(v["passed"] for v in REPORT.values()) else 1

@@ -192,3 +192,39 @@ The end-to-end run substitutes three things and says so in its report: a local d
 Blob, the web application's local dispatcher for GitHub Actions, and a capture directory for Resend.
 Its test hooks (`AZMONITOR_REFRESH_DATASETS`, `AZMONITOR_FETCH_OVERRIDES`, short leases, the
 `test` environment) are refused for any production job.
+
+## Remaining steps to go live (user actions)
+
+Everything below needs access this environment does not have — Vercel, Neon and Resend are not
+reachable from it, and changing the default branch or production deployment is your decision.
+In order:
+
+1. **Blob for the runner — your decision.** The last cloud run stopped here: a token minted outside a
+   deployment is always a *development* token, and the store is connected only to Preview and
+   Production. There are two ways through, and you have ruled out doing either on my initiative:
+   - include *Development* in the store's project connection (Vercel → Storage → the store →
+     Projects → Update Project Connection). You asked earlier that this not be done merely to get
+     round the mismatch; the argument that it does not widen who can reach the store is in
+     cloud-deployment.md ("The environment the token is for"), and the choice is yours; or
+   - issue a store-scoped read-write token yourself and save it as the GitHub secret
+     `BLOB_READ_WRITE_TOKEN` (a credential change, which you asked me not to make).
+   Without one of them no cloud worker can read or write the dataset.
+2. **Workflow on the default branch.** Merge a one-file pull request adding
+   `.github/workflows/report-job.yml` to `main` (GitHub accepts a dispatch only for a workflow that
+   exists on the default branch). Until PR #2 is merged, set `GITHUB_WORKFLOW_REF` to the branch that
+   carries the worker code.
+3. **Production configuration in Vercel** (Production scope only): `GITHUB_DISPATCH_TOKEN`,
+   `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_REF`, `CRON_SECRET`, `RESEND_API_KEY`,
+   `AZMONITOR_EMAIL_FROM`, `RESEND_WEBHOOK_SECRET`, `AZMONITOR_APP_URL`; confirm
+   `AZMONITOR_OWNER_EMAIL` is your address. Preview gets none of the dispatch or email variables.
+4. **Resend.** Verify the sending domain, create the webhook to `/api/webhooks/resend`.
+5. **Deploy to Production** (the Vercel cron runs only on Production deployments).
+6. **Controlled checks in production**, in this order, watching each job page:
+   Settings → add yourself as the owner recipient → *Send a test email to me* (expect `accepted`,
+   then `delivered` once the webhook arrives) → Generate → Monthly Monitor, latest, *Use the latest
+   collected data*, *Email me* (expect a published edition, a PDF download, and your email) →
+   Generate the same again (expect the identical-edition offer) → Generate with *Check sources for
+   updates first* (expect a source check to run and either publish or report no relevant change).
+7. **Activate**: Settings → *Check official sources automatically* and *Email subscribers about new
+   editions*, with you as the only recipient. The next 09:15, 13:15 or 17:15 Baku slot starts the
+   first automatic check; its job appears on the Jobs page.

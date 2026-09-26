@@ -240,6 +240,25 @@ export function JobProgress({ initial, canEmail }: { initial: JobView; canEmail:
         </section>
       )}
 
+      {j.kind === "source_check" && j.result?.changes !== undefined && (
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h3 className="card-title">What the check found</h3>
+              <div className="card-note">Only new publications, new observations and revisions produce reports or email;
+                translations, backfills and unchanged data are recorded and nothing more.</div>
+            </div>
+          </header>
+          {j.result.changes && Object.keys(j.result.changes as Record<string, number>).length > 0 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13.5 }}>
+              {Object.entries(j.result.changes as Record<string, number>).map(([k, v]) => (
+                <li key={k}>{v} × {k.replace(/_/g, " ")}</li>
+              ))}
+            </ul>
+          ) : <p className="muted" style={{ fontSize: 13 }}>No document had changed since the last check.</p>}
+        </section>
+      )}
+
       {Array.isArray(j.result?.waiting) && (j.result.waiting as unknown[]).length > 0 && (
         <section className="card">
           <header className="card-head"><h3 className="card-title">Waiting for data</h3></header>

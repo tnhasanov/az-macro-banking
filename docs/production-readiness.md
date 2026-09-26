@@ -1,5 +1,26 @@
 # Production readiness
 
+## Status after the report-jobs work (2026-09-26)
+
+The two user journeys — request a report in the dashboard, follow it, download it and have it
+emailed; and automatic source checks that publish validated editions and email subscribers — are
+implemented end to end and proven on this machine against the real engine, the live CBA website,
+Postgres, the production build of the dashboard and a real browser. See
+[`report-jobs.md`](report-jobs.md) for how it works and how to run it, and
+[`e2e-report.md`](e2e-report.md) for the sixteen checks and their evidence.
+
+What has **not** happened is a run against the real cloud services. From this environment Vercel,
+Vercel Blob, Neon and Resend are unreachable (connections refused by the network policy; only GitHub
+is reachable), and the last cloud worker run (21 September) stopped at the Blob credential because
+the store is not available to the Development environment the minted token is for. The remaining
+steps are the user actions listed at the end of `report-jobs.md`'s setup section and in the
+handover summary; none of them is a code change.
+
+The rest of this page is the earlier assessment, kept for its record of what was found and fixed.
+
+---
+
+
 **Verdict: the code is materially better than it was, and still nothing has run against the real
 services.** This attempt tried to change that and could not. The reason is worth stating precisely,
 because it is not the one from last time.

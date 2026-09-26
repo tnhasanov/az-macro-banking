@@ -328,7 +328,7 @@ def finish(conn, claim: Claim, status: str, *, result: dict[str, Any] | None = N
             cur.execute(
                 """UPDATE report_jobs SET status = %s, stage = CASE WHEN %s IN ('failed','blocked','cancelled')
                                                                  THEN stage ELSE 'complete' END,
-                          finished_at = now(), lease_expires_at = NULL, result = result || %s,
+                          stage_detail = NULL, finished_at = now(), lease_expires_at = NULL, result = result || %s,
                           edition_id = coalesce(%s, edition_id), error_code = %s, error_message = %s,
                           error_detail = %s
                     WHERE job_id = %s""",

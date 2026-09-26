@@ -5,7 +5,8 @@ shape — and nothing else: what to produce is read from the job row.
 
 Exit codes: 0 when the job reached any recorded outcome (a blocked or failed report is a recorded
 outcome, not a crashed runner), 2 for a malformed invocation, 3 when the job could not be claimed,
-1 when the worker itself broke before it could record anything.
+4 when this worker lost the job to another after its lease lapsed, 1 when the worker itself broke
+before it could record anything.
 """
 from __future__ import annotations
 
@@ -44,7 +45,10 @@ def main(argv: list[str] | None = None) -> int:
                     run_attempt=int(run_attempt) if run_attempt else None, run_url=run_url)
     result = worker.run(args.job_id)
     print(json.dumps(result, indent=2, default=str))
-    return 0 if result.get("claimed") else 3
+    if not result.get("claimed"):
+        return 3
+    # This worker was replaced (its lease lapsed and another took the job); it wrote nothing after that.
+    return 4 if result.get("lease_lost") else 0
 
 
 if __name__ == "__main__":

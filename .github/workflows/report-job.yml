@@ -107,6 +107,8 @@ jobs:
             0) echo "outcome=recorded" >> "$GITHUB_OUTPUT" ;;
             3) echo "::notice::the job was not claimed (finished, cancelled or held by another run)"
                echo "outcome=not_claimed" >> "$GITHUB_OUTPUT" ;;
+            4) echo "::warning::this runner lost the job to another after its lease lapsed; it wrote nothing further"
+               echo "outcome=replaced" >> "$GITHUB_OUTPUT" ;;
             *) echo "outcome=crashed" >> "$GITHUB_OUTPUT"; exit "$code" ;;
           esac
 

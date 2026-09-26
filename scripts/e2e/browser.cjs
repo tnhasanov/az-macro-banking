@@ -122,7 +122,7 @@ const steps = {
     const page = await ctx.newPage();
     await signIn(page);
     await page.goto(`${base}/settings`);
-    const deployment = await page.locator("text=Environment").locator("xpath=..").innerText();
+    const deployment = await page.getByRole("row", { name: /^Environment/ }).innerText();
     await page.click("text=Send a test email to me");
     await page.waitForSelector("text=Test email:", { timeout: 30_000 });
     const result = await page.locator(".notice[role=status]").innerText();
