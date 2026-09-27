@@ -62,6 +62,8 @@ class Fetcher:
         self.session.headers.update({"User-Agent": http_cfg.get("user_agent", "az-macro-banking-monitor/0.1")})
         self._last_request_at = 0.0
         self.page_cache: dict[str, str] = {}
+        # Consecutive URLs per host that failed outright (every retry spent) in this run.
+        self._host_failures: dict[str, int] = {}
 
     # -- low level ---------------------------------------------------------------
     def _space(self) -> None:
@@ -81,6 +83,15 @@ class Fetcher:
                            last_modified=None, etag=None,
                            retrieved_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                            sha256=hashlib.sha256(content).hexdigest())
+        # A host that has stopped answering costs every URL on it its full timeout and retries —
+        # minutes each, which across a source check's thirty-odd files outlasts the runner. After
+        # `host_failures_before_skip` URLs on one host have failed outright in this run, the rest
+        # fail at once; the check records them as errors like any other and the next one retries.
+        host = urlparse(url).netloc.lower()
+        trip = int(self.cfg.get("host_failures_before_skip", 2))
+        if trip and self._host_failures.get(host, 0) >= trip:
+            raise FetchError(f"skipping {url}: {host} failed {self._host_failures[host]} requests in a row "
+                             f"in this run")
         retries = int(self.cfg.get("retries", 3))
         backoff = float(self.cfg.get("backoff_seconds", 2))
         timeout = float(self.cfg.get("timeout_seconds", 90))
@@ -106,6 +117,7 @@ class Fetcher:
                 ctype = r.headers.get("Content-Type")
                 if not allow_html and ctype and "text/html" in ctype.lower():
                     raise FetchError(f"expected a file but received HTML (soft 404?) for {url}")
+                self._host_failures[host] = 0
                 return Fetched(
                     url=url, final_url=r.url, content=content, status=r.status_code, content_type=ctype,
                     last_modified=r.headers.get("Last-Modified"), etag=r.headers.get("ETag"),
@@ -120,6 +132,11 @@ class Fetcher:
                     time.sleep(sleep)
                     continue
                 break
+        # Only a host that did not answer counts against it; a file it answered with the wrong
+        # thing (a soft 404, an oversize download) says nothing about the host.
+        if isinstance(last_exc, requests.RequestException) or (
+                isinstance(last_exc, FetchError) and str(last_exc).startswith("HTTP 5")):
+            self._host_failures[host] = self._host_failures.get(host, 0) + 1
         raise FetchError(f"giving up on {url}: {last_exc}")
 
     def get_text(self, url: str) -> str:

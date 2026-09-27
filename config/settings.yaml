@@ -32,6 +32,8 @@ http:
   timeout_seconds: 90
   retries: 3
   backoff_seconds: 2
+  # After this many URLs on one host fail outright in a run, the rest of that host fails at once.
+  host_failures_before_skip: 2
   min_interval_seconds: 1.0
   max_download_mb: 60
 
