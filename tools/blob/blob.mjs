@@ -32,13 +32,13 @@
  * `check` is the one command that writes nothing anywhere: it proves the credential opens the
  * store, so a run that is going to fail on authentication fails before it spends an hour.
  */
-import { createReadStream, createWriteStream, realpathSync } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { fileURLToPath } from "node:url";
 import { put, get, head, list, del, BlobNotFoundError, BlobPreconditionFailedError } from "@vercel/blob";
+import { isEntryPoint } from "./entry.mjs";
 
 const ACCESS = "private";
 const NOT_FOUND = 3;
@@ -301,26 +301,6 @@ async function cmdCheck() {
   });
 }
 
-/**
- * Was this file named on the command line, rather than imported?
- *
- * Compared as real paths. On Windows a path is case-insensitive and the drive letter's case depends
- * on who spelled it, so a comparison of URLs built from two spellings of the same file can differ
- * — and a helper that decides it was merely imported runs nothing and exits 0, which reads as a
- * successful upload of nothing.
- */
-function invokedDirectly() {
-  if (!process.argv[1]) return false;
-  let entry;
-  try {
-    entry = realpathSync(process.argv[1]);
-  } catch {
-    return false;
-  }
-  const self = fileURLToPath(import.meta.url);
-  return process.platform === "win32" ? entry.toLowerCase() === self.toLowerCase() : entry === self;
-}
-
 const COMMANDS = {
   put: cmdPut, get: cmdGet, head: cmdHead, list: cmdList, del: cmdDel, check: cmdCheck,
 };
@@ -328,7 +308,7 @@ const COMMANDS = {
 const [command, ...rest] = process.argv.slice(2);
 // Imported rather than executed — by a test reaching for `advice` — so there is no command line to
 // read and nothing to run.
-const invoked = invokedDirectly();
+const invoked = isEntryPoint(import.meta.url);
 const run = invoked ? COMMANDS[command] : null;
 if (invoked && !run) {
   fail(`unknown command ${command ?? "(none)"}; expected one of ${Object.keys(COMMANDS).join(", ")}`);

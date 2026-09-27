@@ -32,6 +32,7 @@
  * value. Exits 1 with a message naming exactly what was missing.
  */
 import { readFileSync, appendFileSync } from "node:fs";
+import { isEntryPoint } from "./entry.mjs";
 
 /** The variables we take. BLOB_READ_WRITE_TOKEN is deliberately not among them: see above. */
 const WANTED = ["VERCEL_OIDC_TOKEN", "BLOB_STORE_ID"];
@@ -112,4 +113,4 @@ function main(file) {
   }) + "\n");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main(process.argv[2]);
+if (isEntryPoint(import.meta.url)) main(process.argv[2]);

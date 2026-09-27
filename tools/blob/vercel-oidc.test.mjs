@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 /** undici resolved from here, because the preload below lives in a temp directory. */
 const UNDICI = import.meta.resolve("undici");
 
@@ -50,7 +50,8 @@ async function mint(replies, { env = {}, githubEnv = null } = {}) {
     }
   `);
   try {
-    const { stdout } = await run(process.execPath, ["--import", preload, SCRIPT], {
+    // A URL, not a path: on Windows `--import C:\…` is read as a URL whose scheme is `c:`.
+    const { stdout } = await run(process.execPath, ["--import", pathToFileURL(preload).href, SCRIPT], {
       env: {
         PATH: process.env.PATH, VERCEL_TOKEN: TOKEN, VERCEL_PROJECT_ID: PROJECT,
         VERCEL_ORG_ID: TEAM, ...(githubEnv ? { GITHUB_ENV: githubEnv } : {}), ...env,
