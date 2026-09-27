@@ -5,8 +5,6 @@ import importlib.util
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from azmonitor.storage.db import Database
 
 ROOT = Path(__file__).resolve().parents[1]
