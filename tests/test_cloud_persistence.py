@@ -639,6 +639,74 @@ def test_a_worker_that_lost_its_lease_cannot_move_the_pointer(tmp_path):
     assert current["mutable"]["key"] == good["mutable"]["key"], "the stale worker moved the pointer"
 
 
+def test_a_worker_that_resumes_after_its_successor_saved_cannot_write_over_it(tmp_path):
+    """The gap a lease check alone leaves: checked, then paused, then resumed after a successor saved.
+
+    The pointer moves by compare-and-set against the version the worker restored from, so the
+    resumed worker is refused whether it arrives before its uploads (caught early, nothing sent) or
+    between its last ownership check and the pointer write (caught by the store itself).
+    """
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    OS.save_dataset(_dataset_on_disk(tmp_path / "seed"), store, stamp="20260920T000000Z")
+    stale = tmp_path / "stale"
+    restored = OS.restore_dataset(stale, store)
+    base = restored["pointer_etag"]
+    assert base, "a restore says which version of the pointer it read"
+
+    successor = OS.restore_dataset(tmp_path / "successor", store)
+    (tmp_path / "successor" / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"newer" * 900)
+    newer = OS.save_dataset(tmp_path / "successor", store, stamp="20260920T010000Z",
+                            based_on=successor["pointer_etag"])
+
+    (stale / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"stale" * 900)
+    with pytest.raises(OS.Conflict):
+        OS.save_dataset(stale, store, stamp="20260920T020000Z", based_on=base)
+    assert json.loads(store.get(OS.POINTER_KEY))["mutable"]["key"] == newer["mutable"]["key"]
+    assert not store.exists("dataset/state-20260920T020000Z.tar.gz"), "refused before uploading"
+
+
+def test_the_pointer_write_itself_refuses_a_version_that_moved_after_the_last_check(tmp_path):
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    OS.save_dataset(_dataset_on_disk(tmp_path / "seed"), store, stamp="20260920T000000Z")
+    mine = OS.restore_dataset(tmp_path / "mine", store)
+
+    class SuccessorSavesDuringTheLastCheck:
+        """Ownership still looks fine at the last check, and the pointer moves straight after."""
+
+        def check(self, what):
+            if "pointer" in what:
+                other = OS.restore_dataset(tmp_path / "other", store)
+                OS.save_dataset(tmp_path / "other", store, stamp="20260920T010000Z",
+                                based_on=other["pointer_etag"])
+
+    (tmp_path / "mine" / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"mine" * 900)
+    with pytest.raises(OS.Conflict):
+        OS.save_dataset(tmp_path / "mine", store, stamp="20260920T020000Z",
+                        fence=SuccessorSavesDuringTheLastCheck(), based_on=mine["pointer_etag"])
+    current = json.loads(store.get(OS.POINTER_KEY))
+    assert current["mutable"]["key"] == "dataset/state-20260920T010000Z.tar.gz", "the successor's save stands"
+
+
+def test_a_dataset_built_on_an_empty_store_cannot_replace_one_saved_meanwhile(tmp_path):
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    empty = OS.restore_dataset(tmp_path / "first", store)
+    assert empty["restored"] is False and empty["pointer_etag"] is None
+    OS.save_dataset(_dataset_on_disk(tmp_path / "other"), store, stamp="20260920T000000Z", based_on=None)
+    with pytest.raises(OS.Conflict):
+        OS.save_dataset(_dataset_on_disk(tmp_path / "first"), store, stamp="20260920T010000Z", based_on=None)
+
+
+def test_consecutive_saves_by_one_owner_chain_their_versions(tmp_path):
+    """A worker saves after collecting and again after publishing; the second builds on the first."""
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    OS.save_dataset(_dataset_on_disk(tmp_path / "seed"), store, stamp="20260920T000000Z")
+    base = OS.restore_dataset(tmp_path / "w", store)["pointer_etag"]
+    first = OS.save_dataset(tmp_path / "w", store, stamp="20260920T010000Z", based_on=base)
+    (tmp_path / "w" / "monitor.sqlite").write_bytes(b"SQLite format 3\x00" + b"more" * 900)
+    second = OS.save_dataset(tmp_path / "w", store, stamp="20260920T020000Z", based_on=first["etag"])
+    assert second["etag"] and second["etag"] != first["etag"]
+
+
 def test_the_second_run_on_unchanged_inputs_adds_no_duplicate_edition(tmp_path):
     """Runner B restores, finds nothing new, and must not republish what Runner A produced."""
     from azmonitor.cloud.publish import _publish_local_editions
@@ -695,3 +763,49 @@ def test_a_stale_log_is_not_replayed_onto_a_restored_database(tmp_path):
     (target / "monitor.sqlite-wal").write_bytes(b"left behind by an earlier process")
     OS.restore_dataset(target, store)
     assert not (target / "monitor.sqlite-wal").exists()
+
+
+# ----------------------------------------------------------------------------- known-good backups
+
+def _real_dataset(data_dir: Path) -> Path:
+    """A dataset whose databases SQLite itself will vouch for."""
+    from azmonitor.storage.db import Database
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db = Database(data_dir / "monitor.sqlite")
+    db.conn.execute("INSERT INTO documents(doc_id, source_id, dataset_id, document_url, sha256, retrieved_at, "
+                    "first_seen_at) VALUES ('d1','cba','cba_deposits','https://example.az/x','abc',"
+                    "'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')")
+    db.conn.commit()
+    db.close()
+    (data_dir / "raw").mkdir(exist_ok=True)
+    (data_dir / "raw" / "cba_deposits.xlsx").write_bytes(b"PK\x03\x04" + b"r" * 256)
+    return data_dir
+
+
+def test_a_backup_is_verified_before_it_is_recorded_and_restores_intact(tmp_path, monkeypatch):
+    monkeypatch.setenv("AZMONITOR_DATA_DIR", str(tmp_path / "unused"))
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    OS.save_dataset(_real_dataset(tmp_path / "data"), store, stamp="20260926T000000Z")
+
+    record = OS.backup_dataset(store, label="before-cloud-checks")
+    assert record["key"].startswith(OS.BACKUP_PREFIX) and record["key"].endswith("-before-cloud-checks.json")
+    assert record["verification"]["ok"] is True
+    assert record["verification"]["databases"]["monitor.sqlite"]["integrity"] == "ok"
+
+    # the live dataset moves on; the backup still restores the dataset it pinned
+    (tmp_path / "data" / "raw" / "later.xlsx").write_bytes(b"PK\x03\x04later")
+    OS.save_dataset(tmp_path / "data", store, stamp="20260926T010000Z")
+    back = OS.restore_backup(record["key"], tmp_path / "restored", store)
+    assert back["verification"]["ok"] is True
+    assert not (tmp_path / "restored" / "raw" / "later.xlsx").exists(), "it is the pinned dataset, not the live one"
+    assert "dataset/raw-20260926T000000Z.tar.gz" in OS.prune_datasets(store, keep=0)["in_use"]
+
+
+def test_a_corrupt_dataset_is_never_recorded_as_known_good(tmp_path):
+    store = OS.LocalObjectStore(tmp_path / "bucket")
+    data = _dataset_on_disk(tmp_path / "data")          # not a real SQLite file
+    OS.save_dataset(data, store, stamp="20260926T000000Z")
+    with pytest.raises(OS.StorageError, match="failed verification"):
+        OS.backup_dataset(store)
+    assert store.list(OS.BACKUP_PREFIX) == []

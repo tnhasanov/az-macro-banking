@@ -177,6 +177,26 @@ class DatabaseLease:
                 f"refusing {what}: the {self.name} lease expired at {current['expires_at']}; renew "
                 f"it or stop")
 
+    def hold_in(self, conn, what: str = "this write") -> None:
+        """Pin the lease inside `conn`'s current transaction, or raise LeaseLost.
+
+        `check` reads the lease and then the write happens: two moments, with room for a pause in
+        between. This takes a share lock on the lease row in the transaction that is about to
+        write, so the check and the write commit together — a successor cannot take the lease until
+        this transaction ends, and if it already has, the row no longer matches and nothing is
+        written. For writes that live in Postgres; the dataset pointer, in Blob, uses a
+        compare-and-set instead.
+        """
+        with conn.cursor() as cur:
+            row = cur.execute(
+                "SELECT 1 FROM job_locks WHERE name = %s AND holder = %s AND expires_at > now() "
+                "  AND (%s::bigint IS NULL OR fence = %s) FOR SHARE",
+                (self.name, self.holder, self.fence, self.fence)).fetchone()
+        if row is None:
+            conn.rollback()
+            raise LeaseLost(f"refusing {what}: the {self.name} lease is no longer held by {self.holder} "
+                            f"(fence {self.fence}); this worker was replaced and must not write")
+
     def release(self) -> None:
         """Give it back early. A lease that is never released simply expires."""
         with self.conn.cursor() as cur:

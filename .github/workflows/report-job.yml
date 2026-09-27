@@ -80,6 +80,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[cloud]"
 
+      - name: This ref carries the worker
+        # The copy of this file on the default branch exists only so GitHub will accept a dispatch;
+        # the dashboard dispatches the branch it was deployed from. A dispatch of a ref without the
+        # worker (the default branch, before the code is merged) stops here, saying why.
+        run: |
+          if [ ! -f azmonitor/jobs/__main__.py ]; then
+            echo "::error::${{ github.ref_name }} does not contain the job worker; dispatch the branch the dashboard is deployed from"
+            exit 1
+          fi
+          echo "worker code: ${{ github.ref_name }} at $GITHUB_SHA"
+
+      - name: Choose the Blob credential explicitly
+        # A configured store token is used, and required: the SDK on its own would prefer any OIDC
+        # token it found, and the minting step below runs only when no store token exists. The
+        # worker refuses a token that belongs to a different store than BLOB_STORE_ID.
+        run: |
+          if [ -n "$BLOB_READ_WRITE_TOKEN" ]; then mode=read-write; else mode=oidc; fi
+          echo "AZMONITOR_BLOB_AUTH=$mode" >> "$GITHUB_ENV"
+          echo "Blob authentication: $mode"
+
       - name: Mint a short-lived Blob credential
         # Only when no read-write token is configured: see scheduled.yml for why a project-connected
         # store's token cannot be copied into a GitHub secret, and what this call asks for instead.

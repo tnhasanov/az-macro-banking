@@ -66,6 +66,10 @@ class StorageError(RuntimeError):
     """Something went wrong talking to the store. Never raised for "the object is not there"."""
 
 
+class Conflict(StorageError):
+    """A conditional write found the object changed since it was read. Nothing was written."""
+
+
 class ObjectStore:
     """The operations the worker needs, and no more."""
 
@@ -74,6 +78,16 @@ class ObjectStore:
         raise NotImplementedError
 
     def get(self, key: str) -> bytes | None:
+        raise NotImplementedError
+
+    def get_versioned(self, key: str) -> tuple[bytes | None, str | None]:
+        """The object and the version (its ETag) it was read at, from one read."""
+        raise NotImplementedError
+
+    def put_if(self, key: str, data: bytes, *, expected: str | None,
+               content_type: str = "application/octet-stream") -> dict[str, Any]:
+        """Compare-and-set. Write only if the object is still at version `expected`, or, with
+        `expected=None`, only if there is no object yet; otherwise raise `Conflict`."""
         raise NotImplementedError
 
     def exists(self, key: str) -> bool:
@@ -149,6 +163,38 @@ class LocalObjectStore(ObjectStore):
         p = self._path(key)
         return p.read_bytes() if p.exists() else None
 
+    @staticmethod
+    def _etag(data: bytes) -> str:
+        return '"' + hashlib.sha256(data).hexdigest() + '"'
+
+    def get_versioned(self, key):
+        data = self.get(key)
+        return (data, self._etag(data)) if data is not None else (None, None)
+
+    def put_if(self, key, data, *, expected, content_type="application/octet-stream"):
+        import fcntl
+
+        p = self._path(key)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # The lock lives beside the store, not in it, so listings never show it. Workers on one
+        # machine are separate processes, so it has to be a file lock.
+        locks = self.root.parent / f".{self.root.name}.locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        with open(locks / hashlib.sha1(key.encode()).hexdigest(), "a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                current = p.read_bytes() if p.exists() else None
+                if expected is None and current is not None:
+                    raise Conflict(f"{key} was created by another writer; not overwritten")
+                if expected is not None and (current is None or self._etag(current) != expected):
+                    raise Conflict(f"{key} changed since it was read; not overwritten")
+                staged = p.with_name(p.name + ".partial")
+                staged.write_bytes(data)
+                staged.replace(p)
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+        return {"key": key, "size": len(data), "etag": self._etag(data)}
+
     def exists(self, key):
         return self._path(key).exists()
 
@@ -213,9 +259,26 @@ class LocalObjectStore(ObjectStore):
         return None
 
 
-#: Every environment variable that can authenticate to a Blob store, in the order the SDK resolves
-#: them. Named here so the selector, the store and the tests all mean the same set.
+#: Every environment variable that can authenticate to a Blob store. Named here so the selector,
+#: the store and the tests all mean the same set.
 CREDENTIAL_VARS = ("BLOB_READ_WRITE_TOKEN", "VERCEL_OIDC_TOKEN", "BLOB_STORE_ID")
+
+#: The authentication modes a caller can require through ``AZMONITOR_BLOB_AUTH``.
+BLOB_AUTH_MODES = ("read-write", "oidc")
+
+
+def token_store_id(token: str) -> str:
+    """The store a read-write token belongs to, by the SDK's own rule (``vercel_blob_rw_<id>_…``).
+
+    ``@vercel/blob`` 2.8.0 derives the store id this way itself (``parseStoreIdFromReadWriteToken``)
+    to address its requests, so this is the SDK's reading of the token, not a guess at its format.
+    """
+    parts = token.split("_")
+    return parts[3] if len(parts) > 3 else ""
+
+
+def normalise_store_id(store_id: str) -> str:
+    return store_id[len("store_"):] if store_id.startswith("store_") else store_id
 
 
 def blob_credentials(token: str | None = None) -> tuple[str, dict[str, str]]:
@@ -224,24 +287,40 @@ def blob_credentials(token: str | None = None) -> tuple[str, dict[str, str]]:
     A private store takes either of two, and which one is available is decided by where the code
     runs rather than by preference:
 
-    * **OIDC** — ``VERCEL_OIDC_TOKEN`` with ``BLOB_STORE_ID``. Short-lived and rotated by Vercel,
-      and the better credential. It is issued to Vercel's own runtimes, and to the CLI on a linked
-      project; there is no way to obtain one on a GitHub Actions runner, so the worker cannot use
-      it. The dashboard, which runs on Vercel, can and does.
-    * **Read-write token** — ``BLOB_READ_WRITE_TOKEN``. Long-lived and static, and what Vercel
-      documents for code running outside Vercel, a CI job included. It is scoped to a single store,
-      which makes it the *narrower* credential here even though it is the static one: the
-      alternative for CI is a Vercel account token, which reaches the whole account.
+    * **OIDC** — ``VERCEL_OIDC_TOKEN`` with ``BLOB_STORE_ID``. Short-lived and rotated by Vercel.
+      Issued to Vercel's own runtimes; one minted for a runner is a *development* token and reaches
+      only a store connected to the Development environment. The dashboard, on Vercel, uses OIDC.
+    * **Read-write token** — ``BLOB_READ_WRITE_TOKEN``. Long-lived, scoped to one store and to no
+      environment, and what Vercel documents for code running outside Vercel, CI included.
 
-    Resolved in the SDK's own order so this never disagrees with the helper it calls. The value is
-    never logged, and only the name of the kind is returned alongside it.
+    A configured read-write token always wins, and it is the only credential handed to the helper,
+    which passes it to the SDK as an explicit option. Both steps matter: the SDK's own resolver
+    prefers any OIDC token it can find over ``BLOB_READ_WRITE_TOKEN`` in the environment, so a stray
+    OIDC token must never reach it alongside the one this chose.
+
+    ``AZMONITOR_BLOB_AUTH`` (``read-write`` or ``oidc``), when set, is the mode the caller requires:
+    anything else is refused, never fallen back from. A read-write token must belong to the store
+    ``BLOB_STORE_ID`` names when both are set. Values are never logged; only the mode is returned.
     """
+    required = (os.environ.get("AZMONITOR_BLOB_AUTH") or "").strip()
+    if required and required not in BLOB_AUTH_MODES:
+        raise StorageError(f'AZMONITOR_BLOB_AUTH must be "read-write" or "oidc", not "{required}"')
     read_write = (token or os.environ.get("BLOB_READ_WRITE_TOKEN") or "").strip()
-    if read_write:
-        return "read-write token", {"BLOB_READ_WRITE_TOKEN": read_write}
-
     oidc = (os.environ.get("VERCEL_OIDC_TOKEN") or "").strip()
     store_id = (os.environ.get("BLOB_STORE_ID") or "").strip()
+
+    if read_write:
+        if required == "oidc":
+            raise StorageError("AZMONITOR_BLOB_AUTH=oidc, but BLOB_READ_WRITE_TOKEN is set and "
+                               "would be used; unset one of them")
+        if store_id and token_store_id(read_write) != normalise_store_id(store_id):
+            raise StorageError("BLOB_READ_WRITE_TOKEN belongs to a different store than "
+                               "BLOB_STORE_ID names. Create the token on the store this project "
+                               "uses, or correct BLOB_STORE_ID")
+        return "read-write token", {"BLOB_READ_WRITE_TOKEN": read_write}
+    if required == "read-write":
+        raise StorageError("AZMONITOR_BLOB_AUTH=read-write, but BLOB_READ_WRITE_TOKEN is not set")
+
     if oidc and store_id:
         return "oidc", {"VERCEL_OIDC_TOKEN": oidc, "BLOB_STORE_ID": store_id}
     if oidc:
@@ -279,6 +358,7 @@ class VercelBlobStore(ObjectStore):
     HELPER = Path(__file__).resolve().parents[2] / "tools" / "blob" / "blob.mjs"
     NOT_FOUND = 3
     REFUSED = 4
+    CONFLICT = 5
 
     def __init__(self, token: str | None = None, prefix: str = "", *, helper: Path | None = None):
         self.credential, self._credential_env = blob_credentials(token)
@@ -307,7 +387,7 @@ class VercelBlobStore(ObjectStore):
         except OSError as exc:
             raise StorageError(f"could not run the blob helper: {exc}") from exc
 
-        if proc.returncode in (self.NOT_FOUND, self.REFUSED):
+        if proc.returncode in (self.NOT_FOUND, self.REFUSED, self.CONFLICT):
             return proc.returncode, {}
         if proc.returncode != 0:
             # stderr carries the SDK's own message, and the helper's advice where it has any; it
@@ -362,6 +442,29 @@ class VercelBlobStore(ObjectStore):
                 return None
             return dest.read_bytes()
 
+    def get_versioned(self, key):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "payload"
+            code, meta = self._run("get", "--key", self._key(key), "--out", str(dest))
+            if code != 0:
+                return None, None
+            return dest.read_bytes(), meta.get("etag")
+
+    def put_if(self, key, data, *, expected, content_type="application/octet-stream"):
+        full = self._key(key)
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "payload"
+            staged.write_bytes(data)
+            argv = ["put", "--key", full, "--file", str(staged), "--content-type", content_type]
+            if expected is not None:
+                argv += ["--if-match", expected]
+            code, meta = self._run(*argv)
+        if code == self.CONFLICT:
+            raise Conflict(f"{full} changed since it was read; not overwritten")
+        if code == self.REFUSED:
+            raise Conflict(f"{full} was created by another writer; not overwritten")
+        return {"key": full, "size": len(data), "etag": meta.get("etag")}
+
     def get_file(self, key: str, dest: Path) -> bool:
         """Download to a path. False when the object is not there; that is a fact, not an error."""
         code, _ = self._run("get", "--key", self._key(key), "--out", str(dest))
@@ -390,8 +493,16 @@ class VercelBlobStore(ObjectStore):
         empty page rather than an error, so a first run is not mistaken for a failure.
         """
         _, payload = self._run("check", timeout=120)
+        read_write = self.credential == "read-write token"
+        store_named = bool((os.environ.get("BLOB_STORE_ID") or "").strip())
         return {"backend": "vercel-blob", "credential": self.credential,
-                "store_id": payload.get("store_id"), "prefix": self.prefix or None,
+                # Construction refuses a token for another store, so reaching here with both set
+                # means they matched. The store id itself is not reported: workflow logs are public.
+                "token_store_matches_blob_store_id": (True if store_named else None) if read_write
+                else None,
+                "oidc_in_environment_ignored": read_write
+                and bool((os.environ.get("VERCEL_OIDC_TOKEN") or "").strip()),
+                "prefix": self.prefix or None,
                 "reachable": bool(payload.get("reachable")),
                 "store_is_empty": not payload.get("objects_seen")
                 and not payload.get("store_has_more")}
@@ -496,8 +607,12 @@ def _clear_stale_logs(data_dir: Path) -> None:
                 stale.unlink()
 
 
+#: `save_dataset` was not told which pointer version its dataset was built on; it reads it itself.
+UNREAD = object()
+
+
 def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str | None = None,
-                 fence: "Fence | None" = None) -> dict[str, Any]:
+                 fence: "Fence | None" = None, based_on: Any = UNREAD) -> dict[str, Any]:
     """Push the working dataset up, then move the pointer.
 
     The order is the safety property. Each tarball goes to a key nobody is reading yet; only once
@@ -514,6 +629,14 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
     pointer moves. A worker whose lease lapsed mid-upload has been replaced, and the replacement may
     already have written a newer dataset — letting the slow worker move the pointer afterwards would
     silently roll the dataset back to its older copy.
+
+    A check followed by a write still leaves a gap: a worker paused between the two (a suspended
+    machine, a long collection pause) resumes after its successor saved. So the pointer is moved by
+    compare-and-set against `based_on`, the version (ETag) of the pointer the dataset was restored
+    from — `None` meaning it was built from an empty store. If anyone moved the pointer since, the
+    write is refused with `Conflict` and nothing is overwritten. Left unset, the version is read here
+    at the start of the save, which protects a one-off save (seeding, a manual run) the same way
+    over its own duration. The returned pointer carries the new version as `etag`.
     """
     store = store or store_from_env()
     data_dir = Path(data_dir)
@@ -527,7 +650,14 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
         fence.check("before uploading the dataset")
     _checkpoint_databases(data_dir)
 
-    previous = _current_pointer(store)
+    raw_previous, current_etag = store.get_versioned(POINTER_KEY)
+    previous = _parse_pointer(raw_previous)
+    if based_on is UNREAD:
+        based_on = current_etag
+    elif based_on != current_etag:
+        # Fail before uploading hundreds of megabytes that could never be pointed at.
+        raise Conflict("the dataset pointer moved since this dataset was restored; another worker "
+                       "saved a newer dataset, so this one is not saved over it")
     static_fingerprint = _tree_fingerprint([data_dir / p for p in STATIC_PARTS], data_dir)
     reused = (previous or {}).get("static") or {}
     reuse_static = bool(reused.get("fingerprint") == static_fingerprint and reused.get("key")
@@ -571,22 +701,26 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
         if fence:
             fence.check("before moving the dataset pointer")
 
-        store.put(POINTER_KEY, json.dumps(pointer, indent=2).encode(),
-                  content_type="application/json", overwrite=True)
+        written = store.put_if(POINTER_KEY, json.dumps(pointer, indent=2).encode(),
+                               expected=based_on, content_type="application/json")
 
+    pointer["etag"] = written.get("etag")
     log.info("dataset saved: %.1f MB uploaded of %.1f MB total (%d files)",
              pointer["uploaded_bytes"] / 1e6, pointer["bytes"] / 1e6, pointer["files"])
     return pointer
 
 
-def _current_pointer(store: ObjectStore) -> dict[str, Any] | None:
-    raw = store.get(POINTER_KEY)
+def _parse_pointer(raw: bytes | None) -> dict[str, Any] | None:
     if not raw:
         return None
     try:
         return json.loads(raw)
     except ValueError:
         return None
+
+
+def _current_pointer(store: ObjectStore) -> dict[str, Any] | None:
+    return _parse_pointer(store.get(POINTER_KEY))
 
 
 def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[str, Any]:
@@ -604,7 +738,7 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
     """
     store = store or store_from_env()
     data_dir = Path(data_dir)
-    raw = store.get(POINTER_KEY)
+    raw, etag = store.get_versioned(POINTER_KEY)
 
     if not raw:
         # Is the store empty, or has the pointer gone missing from a store that clearly held one?
@@ -620,7 +754,7 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
                 f"AZMONITOR_ALLOW_EMPTY_STORE=yes if this store really is meant to be empty.")
         log.info("no dataset in the store and nothing else in it either; this is a first run")
         return {"restored": False, "reason": "the store holds no dataset pointer yet",
-                "safe_to_backfill": True}
+                "safe_to_backfill": True, "pointer_etag": None}
 
     pointer = json.loads(raw)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -662,7 +796,92 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
                 tf.extractall(data_dir)
 
     log.info("dataset restored: %d object(s), %.1f MB", len(pieces), total / 1e6)
-    return {"restored": True, "safe_to_backfill": False, "objects": len(pieces), **pointer}
+    return {"restored": True, "safe_to_backfill": False, "objects": len(pieces), **pointer,
+            "pointer_etag": etag}
+
+
+BACKUP_PREFIX = "dataset/backups/"
+
+
+def verify_restored(data_dir: Path) -> dict[str, Any]:
+    """SQLite's own integrity check on every database a dataset carries, plus the dataset's counts."""
+    from ..storage.backup import integrity_ok, verify_dataset
+
+    data_dir = Path(data_dir)
+    databases = {}
+    for name in ("monitor.sqlite", "deliveries.sqlite"):
+        path = data_dir / name
+        if path.exists():
+            ok, detail = integrity_ok(path)
+            databases[name] = {"integrity": detail, "ok": ok, "bytes": path.stat().st_size}
+    main = verify_dataset(data_dir / "monitor.sqlite", min_documents=1)
+    ok = bool(main.get("ok")) and all(d["ok"] for d in databases.values())
+    return {"ok": ok, "databases": databases, "counts": main.get("counts", {}),
+            "problems": main.get("problems", [])}
+
+
+def backup_dataset(store: ObjectStore | None = None, *, label: str | None = None) -> dict[str, Any]:
+    """Pin the current dataset as a named, verified backup.
+
+    Dataset archives are immutable and never deleted by this code, so a backup is a record of which
+    ones make up a known-good dataset: the pointer as it stands, written under a key of its own that
+    is never overwritten. It is only written after the dataset it names has been downloaded into a
+    scratch directory, every digest matched, and SQLite's integrity check passed on each database.
+    `prune_datasets` treats every archive a backup names as in use.
+    """
+    import re
+
+    if label is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", label):
+        raise StorageError("a backup label is lower-case letters, digits and hyphens, up to 40")
+    store = store or store_from_env()
+    raw, etag = store.get_versioned(POINTER_KEY)
+    if not raw:
+        raise StorageError("there is no dataset in the store to back up")
+    with tempfile.TemporaryDirectory() as tmp:
+        restored = restore_dataset(Path(tmp) / "data", store)
+        if restored.get("pointer_etag") != etag:
+            raise Conflict("the dataset changed while it was being backed up; run the backup again")
+        check = verify_restored(Path(tmp) / "data")
+    if not check["ok"]:
+        raise StorageError("the current dataset failed verification and was not recorded as a "
+                           "known-good backup: " + "; ".join(check.get("problems") or [])
+                           + "; ".join(f"{k}: {v['integrity']}" for k, v in check["databases"].items()
+                                       if not v["ok"]))
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    key = f"{BACKUP_PREFIX}{stamp}{('-' + label) if label else ''}.json"
+    record = {"backed_up_at": stamp, "label": label, "pointer": json.loads(raw), "pointer_etag": etag,
+              "verification": check}
+    store.put_if(key, json.dumps(record, indent=2, default=str).encode(), expected=None,
+                 content_type="application/json")
+    log.info("dataset backed up as %s", key)
+    return {"key": key, **record}
+
+
+def restore_backup(key: str, data_dir: Path, store: ObjectStore | None = None) -> dict[str, Any]:
+    """Restore a named backup into `data_dir` and verify it, without touching the live pointer."""
+    store = store or store_from_env()
+    raw = store.get(key)
+    if not raw:
+        raise StorageError(f"no backup at {key}")
+    record = json.loads(raw)
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = LocalObjectStore(Path(tmp) / "pointer-only")
+        scratch.put(POINTER_KEY, json.dumps(record["pointer"]).encode(), overwrite=True)
+
+        class _Through(ObjectStore):
+            """The backup's pointer, the store's archives."""
+
+            def get_versioned(self, k):
+                return scratch.get_versioned(k) if k == POINTER_KEY else store.get_versioned(k)
+
+            def get_file(self, k, dest):
+                return store.get_file(k, dest)
+
+            def list(self, prefix):
+                return store.list(prefix)
+
+        restore_dataset(Path(data_dir), _Through())
+    return {"key": key, "verification": verify_restored(Path(data_dir))}
 
 
 def prune_datasets(store: ObjectStore | None = None, keep: int = 7) -> dict[str, Any]:
@@ -677,6 +896,14 @@ def prune_datasets(store: ObjectStore | None = None, keep: int = 7) -> dict[str,
     in_use = {piece.get("key") for piece in
               (pointer.get("mutable"), pointer.get("static")) if isinstance(piece, dict)}
     in_use.add(pointer.get("key"))          # a pointer written before the split
+    for b in store.list(BACKUP_PREFIX):      # and every archive a pinned backup names
+        try:
+            pinned = json.loads(store.get(b["key"]) or b"{}").get("pointer") or {}
+        except ValueError:
+            continue
+        in_use.update(piece.get("key") for piece in (pinned.get("mutable"), pinned.get("static"))
+                      if isinstance(piece, dict))
+        in_use.add(pinned.get("key"))
     in_use.discard(None)
 
     blobs = sorted((b for b in store.list("dataset/") if b["key"].endswith(".tar.gz")),

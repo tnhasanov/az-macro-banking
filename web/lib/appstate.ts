@@ -84,6 +84,8 @@ export interface JobRow {
   attempt: number;
   max_attempts: number;
   worker_id: string | null;
+  app_commit: string | null;
+  worker_commit: string | null;
   lease_expires_at: string | null;
   heartbeat_at: string | null;
   run_id: number | null;
@@ -98,6 +100,15 @@ export interface JobRow {
   error_code: string | null;
   error_message: string | null;
   cancel_requested: boolean;
+}
+
+/**
+ * The commit this deployment was built from (Vercel's system variable), recorded on every job so
+ * the runner can prove it executes the same code. Null outside Vercel, where nothing is enforced.
+ */
+export function appCommit(): string | null {
+  const sha = (process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
 }
 
 export interface CreateJob {
@@ -126,12 +137,12 @@ export async function createJob(c: CreateJob): Promise<{ jobId: string; created:
     const inserted = await tx<{ job_id: string }[]>`
       INSERT INTO report_jobs(job_id, kind, report_type, params, equivalence_key, trigger, environment,
                               parent_job_id, schedule_slot, requested_by, requester_email, notify_requester,
-                              force_reason, status, stage)
+                              force_reason, app_commit, status, stage)
       VALUES (${jobId}, ${c.kind}, ${c.reportType}::text, ${params}::jsonb,
               azm_equivalence_key(${c.kind}::text, ${c.reportType}::text, ${params}::jsonb, ${c.nonce ?? null}::text),
               ${c.trigger}, ${c.environment}, ${c.parentJobId ?? null}::text, ${c.scheduleSlot ?? null}::text,
               ${c.requestedBy}, ${c.requesterEmail ?? null}::text, ${Boolean(c.notifyRequester)},
-              ${c.forceReason ?? null}::text, 'queued', 'queued')
+              ${c.forceReason ?? null}::text, ${appCommit()}::text, 'queued', 'queued')
       ON CONFLICT DO NOTHING
       RETURNING job_id`;
     if (inserted.length === 0) {

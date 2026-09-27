@@ -179,3 +179,19 @@ test("the throttle holds across calls", { skip }, async () => {
   for (let i = 0; i < 4; i += 1) results.push(await A.withinLimit("test:bucket", 3, 3600));
   assert.deepEqual(results, [true, true, true, false]);
 });
+
+test("every job records the commit of the dashboard that created it", { skip }, async () => {
+  const saved = process.env.VERCEL_GIT_COMMIT_SHA;
+  try {
+    process.env.VERCEL_GIT_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+    const { jobId } = await A.createJob({ kind: "report", reportType: "weekly", params: { week: "latest", refresh: "latest_data" },
+      trigger: "manual", environment: "production", requestedBy: "owner" });
+    const [row] = await sql<{ app_commit: string | null }[]>`SELECT app_commit FROM report_jobs WHERE job_id = ${jobId}`;
+    assert.equal(row.app_commit, "0123456789abcdef0123456789abcdef01234567");
+
+    process.env.VERCEL_GIT_COMMIT_SHA = "not-a-commit; drop table";
+    assert.equal(A.appCommit(), null, "anything but a full commit hash is not recorded");
+  } finally {
+    if (saved === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA; else process.env.VERCEL_GIT_COMMIT_SHA = saved;
+  }
+});

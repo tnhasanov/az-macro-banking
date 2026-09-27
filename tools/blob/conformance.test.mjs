@@ -327,3 +327,104 @@ test("nothing else gets unsolicited advice", async () => {
   assert.equal(advice(new Error("Vercel Blob: Access denied, please provide a valid token")), "");
   assert.equal(advice(new Error("ENOTFOUND")), "");
 });
+
+// ------------------------------------------ which credential wins when both are present
+
+/**
+ * The hazard, observed with the real SDK: left to read the environment, @vercel/blob 2.8.0 takes a
+ * valid OIDC token (with BLOB_STORE_ID) in preference to BLOB_READ_WRITE_TOKEN. A runner that holds
+ * the store token and also a freshly minted OIDC token would authenticate with OIDC, and against a
+ * store not connected to Development that is a refusal blamed on the wrong credential.
+ */
+function unexpiredJwt() {
+  const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${part({ alg: "none", typ: "JWT" })}.${part({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+}
+
+async function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return await fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
+test("left to the environment, the SDK prefers OIDC over the read-write token", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  const jwt = unexpiredJwt();
+  await withEnv({ BLOB_READ_WRITE_TOKEN: TOKEN, VERCEL_OIDC_TOKEN: jwt, BLOB_STORE_ID: STORE_ID },
+    () => list({ limit: 1 }));
+  const req = seen.find((s) => s.method === "GET");
+  assert.equal(req.headers.authorization, `Bearer ${jwt}`,
+    "if this ever changes, the SDK's order changed and blob.mjs's comment must follow it");
+});
+
+test("the helper's choice puts the read-write token on the wire even so", async () => {
+  install();
+  const { list } = await import("@vercel/blob");
+  const { credentials } = await import("./blob.mjs?credentials");
+  await withEnv({ BLOB_READ_WRITE_TOKEN: TOKEN, VERCEL_OIDC_TOKEN: unexpiredJwt(), BLOB_STORE_ID: STORE_ID },
+    () => list({ ...credentials(), limit: 1 }));
+  const req = seen.find((s) => s.method === "GET");
+  assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+});
+
+test("a token for another store is refused before any request, and nothing secret is printed", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const env = { ...process.env, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_otherstore_s3cr3t",
+                BLOB_STORE_ID: `store_${STORE_ID}` };
+  delete env.VERCEL_OIDC_TOKEN;
+  const run = spawnSync(process.execPath, [new URL("./blob.mjs", import.meta.url).pathname, "check"],
+                        { env, encoding: "utf8" });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /different store/);
+  assert.ok(!/s3cr3t|otherstore/.test(run.stderr + run.stdout), "neither the token nor its store may be printed");
+});
+
+test("a required mode is enforced rather than fallen back from", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const env = { ...process.env, AZMONITOR_BLOB_AUTH: "read-write", VERCEL_OIDC_TOKEN: unexpiredJwt(),
+                BLOB_STORE_ID: STORE_ID };
+  delete env.BLOB_READ_WRITE_TOKEN;
+  const run = spawnSync(process.execPath, [new URL("./blob.mjs", import.meta.url).pathname, "check"],
+                        { env, encoding: "utf8" });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /AZMONITOR_BLOB_AUTH=read-write/);
+});
+
+// ------------------------------------------ compare-and-set on the dataset pointer
+
+test("a conditional write sends the version it read, and a moved object is a typed conflict", async () => {
+  const agent = new MockAgent();
+  agent.disableNetConnect();
+  setGlobalDispatcher(agent);
+  const sent = [];
+  agent.get(API).intercept({ path: (p) => p.startsWith("/api/blob"), method: "PUT" }).reply((req) => {
+    sent.push(req.headers["x-if-match"]);
+    if (req.headers["x-if-match"] !== '"v1"') {
+      return { statusCode: 412, data: { error: { code: "precondition_failed", message: "ETag mismatch" } } };
+    }
+    return { statusCode: 200, data: { url: `${DOWNLOAD}/dataset/current.json`, pathname: "dataset/current.json",
+                                      contentType: "application/json", etag: '"v2"' } };
+  }).persist();
+
+  const { put, BlobPreconditionFailedError } = await import("@vercel/blob");
+  const options = (ifMatch) => ({ access: "private", token: TOKEN, contentType: "application/json",
+                                  addRandomSuffix: false, allowOverwrite: true, ifMatch, cacheControlMaxAge: 0 });
+  const ok = await put("dataset/current.json", "{}", options('"v1"'));
+  assert.equal(ok.etag, '"v2"', "the new version comes back, so consecutive saves can chain");
+  await assert.rejects(() => put("dataset/current.json", "{}", options('"v0"')),
+    (error) => error instanceof BlobPreconditionFailedError);
+  assert.deepEqual(sent, ['"v1"', '"v0"'], "the version travels as x-if-match");
+});
+
+test("the helper maps that conflict to its own exit code and never overwrites unconditionally", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./blob.mjs", import.meta.url), "utf8");
+  assert.match(source, /instanceof BlobPreconditionFailedError[\s\S]{0,120}CONFLICT/);
+  assert.match(source, /allowOverwrite: Boolean\(o\.overwrite \|\| ifMatch\)/);
+  assert.match(source, /\.\.\.\(ifMatch \? \{ ifMatch \} : \{\}\)/);
+});

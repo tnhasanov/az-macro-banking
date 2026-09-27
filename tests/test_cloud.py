@@ -163,7 +163,9 @@ def test_the_store_is_chosen_by_what_is_configured(tmp_path, monkeypatch):
 # Vercel, and which is scoped to one store rather than to an account.
 #
 # These pin the resolution order, because the engine and the Node helper it calls must agree: a
-# disagreement is a run that authenticates one way and reports the other.
+# disagreement is a run that authenticates one way and reports the other. The order is ours, not
+# the SDK's: @vercel/blob 2.8.0 prefers any OIDC token over BLOB_READ_WRITE_TOKEN read from the
+# environment, so the chosen token is the only credential handed down and is passed explicitly.
 
 
 @pytest.fixture
@@ -171,6 +173,7 @@ def _no_blob_credentials(monkeypatch):
     for name in OS.CREDENTIAL_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("AZMONITOR_OBJECT_STORE_DIR", raising=False)
+    monkeypatch.delenv("AZMONITOR_BLOB_AUTH", raising=False)
 
 
 def test_a_read_write_token_is_the_credential_outside_vercel(_no_blob_credentials, monkeypatch):
@@ -189,12 +192,48 @@ def test_oidc_is_taken_when_there_is_no_static_token(_no_blob_credentials, monke
 
 
 def test_a_read_write_token_wins_when_both_are_present(_no_blob_credentials, monkeypatch):
-    """The SDK resolves in this order, so resolving differently here would misreport which
-    credential a run actually used."""
+    """A runner given the store token must use it even if an OIDC token is lying around; the SDK
+    would otherwise choose OIDC (see blob.mjs and the conformance tests)."""
     monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
-    monkeypatch.setenv("BLOB_STORE_ID", "store_abc")
-    assert OS.blob_credentials()[0] == "read-write token"
+    monkeypatch.setenv("BLOB_STORE_ID", "store_storeabc")
+    kind, env = OS.blob_credentials()
+    assert kind == "read-write token"
+    assert env == {"BLOB_READ_WRITE_TOKEN": "vercel_blob_rw_storeabc_secret"}
+
+
+def test_a_token_for_another_store_is_refused(_no_blob_credentials, monkeypatch):
+    """The store a token belongs to is read with the SDK's own rule; a token created on the wrong
+    store would otherwise restore, render and save against a store nobody reads."""
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_otherstore_secret")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_storeabc")
+    with pytest.raises(OS.StorageError, match="different store") as caught:
+        OS.blob_credentials()
+    assert "secret" not in str(caught.value) and "otherstore" not in str(caught.value)
+
+
+def test_the_store_id_is_accepted_with_or_without_its_prefix(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    for named in ("store_storeabc", "storeabc"):
+        monkeypatch.setenv("BLOB_STORE_ID", named)
+        assert OS.blob_credentials()[0] == "read-write token"
+
+
+def test_a_required_mode_is_enforced_not_fallen_back_from(_no_blob_credentials, monkeypatch):
+    monkeypatch.setenv("AZMONITOR_BLOB_AUTH", "read-write")
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.oidc")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_storeabc")
+    with pytest.raises(OS.StorageError, match="BLOB_READ_WRITE_TOKEN is not set"):
+        OS.blob_credentials()
+
+    monkeypatch.setenv("AZMONITOR_BLOB_AUTH", "oidc")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
+    with pytest.raises(OS.StorageError, match="would be used"):
+        OS.blob_credentials()
+
+    monkeypatch.setenv("AZMONITOR_BLOB_AUTH", "whichever")
+    with pytest.raises(OS.StorageError, match="must be"):
+        OS.blob_credentials()
 
 
 def test_half_an_oidc_credential_is_refused_with_the_reason(_no_blob_credentials, monkeypatch):
@@ -224,7 +263,7 @@ def test_only_the_resolved_credential_is_handed_to_the_helper(_no_blob_credentia
     helper.write_text("// not run by this test")
     monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_storeabc_secret")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "ey.stale")
-    monkeypatch.setenv("BLOB_STORE_ID", "store_stale")
+    monkeypatch.setenv("BLOB_STORE_ID", "store_storeabc")
 
     store = OS.VercelBlobStore(helper=helper)
     assert store.credential == "read-write token"

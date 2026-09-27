@@ -83,10 +83,13 @@ class Transient(Exception):
 
 def _transient(exc: BaseException) -> Transient | None:
     from ..cloud.lock import LeaseNotAcquired
-    from ..cloud.objectstore import StorageError
+    from ..cloud.objectstore import Conflict, StorageError
 
     if isinstance(exc, Transient):
         return exc
+    if isinstance(exc, Conflict):
+        return Transient("dataset_moved", "Another worker saved a newer dataset while this one ran. Nothing was "
+                         "overwritten; the job starts again from the newer dataset.")
     if isinstance(exc, StorageError):
         return Transient("storage_unavailable", f"Private storage could not be reached: {exc}")
     if isinstance(exc, LeaseNotAcquired):
@@ -122,6 +125,24 @@ class Item:
     planned: bool = False
     scope: str = ""
 
+
+
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+def worker_commit() -> str | None:
+    """The commit this worker is running: GITHUB_SHA on a runner, the checkout's HEAD locally."""
+    sha = (os.environ.get("GITHUB_SHA") or "").strip().lower()
+    if COMMIT.match(sha):
+        return sha
+    try:
+        import subprocess
+
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2],
+                              capture_output=True, text=True, timeout=10).stdout.strip().lower()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head if COMMIT.match(head) else None
 
 @dataclass
 class Settings:
@@ -180,6 +201,7 @@ class Worker:
         self._detail_at = 0.0
         self._dataset_dirty = False
         self._collected = False
+        self._pointer_etag: str | None = None
         self._produced: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ plumbing
@@ -283,6 +305,7 @@ class Worker:
             if hooks and claim.environment == "production":
                 raise Outcome("failed", "misconfigured",
                               f"This worker has test settings ({', '.join(hooks)}) that production never allows.")
+            self._check_code(claim)
             self._check_request(claim)
             J.set_stage(self.conn, claim, "starting", f"worker {self.worker_id}")
             self._hold_dataset(claim)
@@ -298,8 +321,15 @@ class Worker:
                     self._save_dataset(claim)
                     if self._collected and self.settings.save_dataset and not self.settings.skip_restore:
                         self._refresh_readmodel(claim)
-                except LeaseLost:
-                    raise
+                except LeaseLost as exc:
+                    if claim.lost.is_set():
+                        raise
+                    # The dataset passed to another worker after this one's work was recorded.
+                    # Nothing was written over it; the publications stand and are re-applied to
+                    # the dataset by the next run, like any save that did not happen.
+                    J.note(self.conn, claim, "the dataset lease passed to another worker before this run "
+                           "could save; nothing was overwritten", {"error": str(exc)})
+                    outcome["dataset_save_failed"] = True
                 except Exception as exc:
                     # Every publication is already recorded in Postgres, and the next worker writes
                     # it back into the dataset before it runs (see _sync). What is lost is this
@@ -314,6 +344,15 @@ class Worker:
             return outcome
         except LeaseLost as exc:
             log.warning("%s", exc)
+            if not claim.lost.is_set():
+                # The dataset, not the job, was lost mid-work: stop writing and give the job back.
+                try:
+                    what = J.retry_later(self.conn, claim, error_code="dataset_lost",
+                                         error_message="This run lost its hold on the dataset to another "
+                                                       "worker and stopped writing; the job runs again.")
+                except LeaseLost:
+                    what = "lease_lost"
+                return {**outcome, "status": what, "code": "dataset_lost", "message": str(exc)}
             return {**outcome, "lease_lost": str(exc)}
         except JobCancelled:
             self._finish_quietly(claim, "cancelled", error_code="cancelled",
@@ -349,6 +388,23 @@ class Worker:
             pass
 
     # ------------------------------------------------------------------ the request
+    def _check_code(self, claim: Claim) -> None:
+        """The runner must execute the commit the dashboard that asked for this job was built from.
+
+        GitHub runs whatever commit GITHUB_WORKFLOW_REF points at when the dispatch arrives; the
+        dashboard records the commit it was deployed from on every job it creates. Equal, the job
+        runs; different — the branch moved, or the ref names another branch — it is refused before it
+        touches anything, with both commits on the job page. Unknown on either side (a local run, a
+        deployment without git metadata), it is recorded and not enforced.
+        """
+        mine = worker_commit()
+        app = J.record_worker_commit(self.conn, claim, mine)
+        if app and mine and app != mine:
+            raise Outcome("failed", "code_mismatch",
+                          f"The dashboard that requested this job runs commit {app[:7]}, but the runner checked "
+                          f"out {mine[:7]}. The runner uses the branch in GITHUB_WORKFLOW_REF; it must be the "
+                          "branch the dashboard is deployed from. Retry once both are on the same commit.")
+
     def _check_request(self, claim: Claim) -> None:
         if claim.kind not in ("report", "source_check", "weekly_digest"):
             raise Outcome("failed", "unsupported_job", f"This worker does not run {claim.kind!r} jobs.")
@@ -412,6 +468,10 @@ class Worker:
         else:
             J.set_stage(self.conn, claim, "restoring", "downloading the dataset from private storage")
             res = OS.restore_dataset(paths.data_dir, self.store)
+            # The version of the pointer this dataset came from: the save moves the pointer only if
+            # it still names this one (compare-and-set), so a worker that lost the dataset cannot
+            # write over a newer save even if it resumes after a long pause.
+            self._pointer_etag = res.get("pointer_etag")
             if not res.get("restored"):
                 raise Outcome("failed", "dataset_unavailable",
                               "Private storage holds no dataset yet, so there is nothing to report from. "
@@ -427,7 +487,9 @@ class Worker:
         from ..cloud import objectstore as OS
 
         self._renew_dataset_lease(force=True)
-        saved = OS.save_dataset(config.paths().data_dir, self.store, fence=self.lease)
+        saved = OS.save_dataset(config.paths().data_dir, self.store, fence=self.lease,
+                                based_on=self._pointer_etag)
+        self._pointer_etag = saved.get("etag")
         self._dataset_dirty = False
         try:
             J.note(self.conn, claim, "dataset saved", {"saved_at": saved.get("saved_at"),
@@ -442,9 +504,11 @@ class Worker:
         self._renew_dataset_lease(force=True)
         conn = self.connect()
         try:
-            counts = refresh_readmodel(conn, self.store)
+            counts = refresh_readmodel(conn, self.store, lease=self.lease)
             J.note(self.conn, claim, "dashboard figures refreshed",
                    {k: v for k, v in counts.items() if isinstance(v, (int, float, str))})
+        except LeaseLost:
+            raise
         except Exception as exc:  # the figures lag one run; the reports are already published
             log.exception("the read model could not be refreshed")
             J.note(self.conn, claim, "the dashboard figures could not be refreshed; they update on the next run",

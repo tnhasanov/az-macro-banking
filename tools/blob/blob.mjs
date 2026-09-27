@@ -26,6 +26,7 @@
  *   0  fine
  *   3  the object is not there (a fact, not a failure — `get` and `head` both use it)
  *   4  refused: the object exists and this call may not overwrite it
+ *   5  conflict: `--if-match` named a version the object no longer has (someone else wrote it)
  *   1  anything else
  *
  * `check` is the one command that writes nothing anywhere: it proves the credential opens the
@@ -37,11 +38,12 @@ import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
-import { put, get, head, list, del, BlobNotFoundError } from "@vercel/blob";
+import { put, get, head, list, del, BlobNotFoundError, BlobPreconditionFailedError } from "@vercel/blob";
 
 const ACCESS = "private";
 const NOT_FOUND = 3;
 const REFUSED = 4;
+const CONFLICT = 5;
 
 /**
  * Above this, upload in parts.
@@ -60,25 +62,51 @@ const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
  * A private store takes either credential, and which one is available is decided by where the code
  * runs, not by preference:
  *
- * * **OIDC** — `VERCEL_OIDC_TOKEN` plus `BLOB_STORE_ID`. Short-lived and rotated by Vercel, and the
- *   better credential by some distance. It is issued to Vercel's own runtimes and to the CLI on a
- *   linked project; `@vercel/oidc` reads it from the environment or refreshes it from the CLI's
- *   stored login. Neither exists on a GitHub Actions runner, so the worker cannot use it.
- * * **Read-write token** — `BLOB_READ_WRITE_TOKEN`. Long-lived and static, and what Vercel's own
- *   documentation points to for code running outside Vercel, such as a CI job. It is scoped to one
- *   store, which is why it is the narrower credential here despite being the static one: the
- *   alternative for CI is a Vercel account token, which can reach the whole account.
+ * * **OIDC** — `VERCEL_OIDC_TOKEN` plus `BLOB_STORE_ID`. Short-lived and rotated by Vercel. It is
+ *   issued to Vercel's own runtimes and, for a runner, minted by `vercel-oidc.mjs` as a
+ *   *development* token, which only reaches a store connected to the Development environment.
+ * * **Read-write token** — `BLOB_READ_WRITE_TOKEN`. Long-lived, scoped to one store and to no
+ *   environment, and what Vercel's documentation points to for code running outside Vercel.
  *
- * Resolved in the same order as the SDK's own resolver, so this never disagrees with it. Returned
- * as options to spread into a call rather than as a bare string, because the two credentials are
- * passed under different names.
+ * A configured read-write token always wins, and it is passed to every call as the explicit `token`
+ * option. That matters because the SDK's own resolver (2.8.0, `resolveBlobAuth`) does not work this
+ * way: it takes an explicit `token` first, then *any* OIDC token it can find together with
+ * `BLOB_STORE_ID`, and reads `BLOB_READ_WRITE_TOKEN` from the environment only after that. Left to
+ * the environment, a runner holding the store token plus a stray `VERCEL_OIDC_TOKEN` would silently
+ * authenticate with OIDC. Passed explicitly, the token cannot be overridden; the conformance tests
+ * observe it on the wire with both present.
+ *
+ * `AZMONITOR_BLOB_AUTH` (`read-write` or `oidc`), when set, is the mode the caller requires, and a
+ * different outcome is a refusal rather than a fallback. When the read-write token and
+ * `BLOB_STORE_ID` are both present they must name the same store, checked with the SDK's own rule
+ * for reading a store id out of a token (`vercel_blob_rw_<storeId>_<secret>`,
+ * `parseStoreIdFromReadWriteToken`). Neither value is ever printed.
+ *
+ * Returned as options to spread into a call, because the two credentials go under different names.
  */
-function credentials() {
+export function credentials() {
+  const required = process.env.AZMONITOR_BLOB_AUTH?.trim() || "";
+  if (required && !["read-write", "oidc"].includes(required)) {
+    fail(`AZMONITOR_BLOB_AUTH must be "read-write" or "oidc", not "${required}"`, 1);
+  }
   const rw = process.env.BLOB_READ_WRITE_TOKEN?.trim();
-  if (rw) return { token: rw };
-
   const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim();
   const storeId = process.env.BLOB_STORE_ID?.trim();
+
+  if (rw) {
+    if (required === "oidc") {
+      fail("AZMONITOR_BLOB_AUTH=oidc, but BLOB_READ_WRITE_TOKEN is set and would be used; "
+           + "unset one of them", 1);
+    }
+    if (storeId && tokenStoreId(rw) !== normaliseStoreId(storeId)) {
+      fail("BLOB_READ_WRITE_TOKEN belongs to a different store than BLOB_STORE_ID names. "
+           + "Create the token on the store this project uses, or correct BLOB_STORE_ID", 1);
+    }
+    return { token: rw };
+  }
+  if (required === "read-write") {
+    fail("AZMONITOR_BLOB_AUTH=read-write, but BLOB_READ_WRITE_TOKEN is not set", 1);
+  }
   if (oidcToken && storeId) return { oidcToken, storeId };
   if (oidcToken) {
     fail("VERCEL_OIDC_TOKEN is set but BLOB_STORE_ID is not; OIDC needs the store it names", 1);
@@ -91,9 +119,19 @@ function credentials() {
        + "VERCEL_OIDC_TOKEN with BLOB_STORE_ID (on Vercel)", 1);
 }
 
+/** The store a read-write token belongs to, by the SDK's own rule. Never printed. */
+export function tokenStoreId(token) {
+  const [, , , id = ""] = String(token).split("_");
+  return id;
+}
+
+export function normaliseStoreId(id) {
+  return id.startsWith("store_") ? id.slice("store_".length) : id;
+}
+
 /** Which credential is in use, for a message. Never the credential itself. */
 function credentialKind(creds) {
-  return creds.token ? "read-write token" : "oidc";
+  return creds.token ? "read-write" : "oidc";
 }
 
 function emit(payload) {
@@ -140,10 +178,14 @@ async function exists(key) {
 async function cmdPut(o) {
   if (!o.key || !o.file) fail("put needs --key and --file");
   const size = (await stat(o.file)).size;
+  // `--if-match <etag>` is a compare-and-set: replace the object only if it is still the version
+  // the caller read. The dataset pointer is written this way, so a worker that was paused past its
+  // lease and resumes cannot move the pointer over a newer dataset its successor saved.
+  const ifMatch = typeof o["if-match"] === "string" ? o["if-match"] : undefined;
 
   // An edition version is immutable, so an existing key is refused rather than replaced. Checked
   // here as well as by `allowOverwrite` because the check should be explicit about *why*.
-  if (!o.overwrite) {
+  if (!o.overwrite && !ifMatch) {
     const already = await exists(o.key);
     if (already) {
       fail(`${o.key} already exists and this call may not overwrite it`, REFUSED);
@@ -151,18 +193,32 @@ async function cmdPut(o) {
   }
 
   const multipart = size > MULTIPART_THRESHOLD;
-  const result = await put(o.key, createReadStream(o.file), {
-    access: ACCESS,
-    ...credentials(),
-    contentType: o.contentType || "application/octet-stream",
-    addRandomSuffix: false,
-    allowOverwrite: Boolean(o.overwrite),
-    multipart,
-    // The dataset is replaced wholesale and reports are immutable, so nothing benefits from a
-    // long CDN life; a private blob is fetched through the dashboard anyway.
-    cacheControlMaxAge: 0,
-  });
-  emit({ key: result.pathname, size, multipart, contentType: result.contentType ?? null });
+  let result;
+  try {
+    result = await put(o.key, createReadStream(o.file), {
+      access: ACCESS,
+      ...credentials(),
+      contentType: o.contentType || "application/octet-stream",
+      addRandomSuffix: false,
+      allowOverwrite: Boolean(o.overwrite || ifMatch),
+      ...(ifMatch ? { ifMatch } : {}),
+      multipart,
+      // The dataset is replaced wholesale and reports are immutable, so nothing benefits from a
+      // long CDN life; a private blob is fetched through the dashboard anyway.
+      cacheControlMaxAge: 0,
+    });
+  } catch (error) {
+    if (error instanceof BlobPreconditionFailedError) {
+      fail(`${o.key} changed since it was read; not overwritten`, CONFLICT);
+    }
+    // The existence check above can race another writer; the service's own refusal is the backstop.
+    if (!o.overwrite && !ifMatch && /already exists/i.test(String(error?.message))) {
+      fail(`${o.key} already exists and this call may not overwrite it`, REFUSED);
+    }
+    throw error;
+  }
+  emit({ key: result.pathname, size, multipart, contentType: result.contentType ?? null,
+         etag: result.etag ?? null });
 }
 
 async function cmdGet(o) {
@@ -188,7 +244,8 @@ async function cmdGet(o) {
     fail(`${o.key} was truncated: expected ${expected} bytes, received ${size}`, 1);
   }
   await rename(partial, o.out);
-  emit({ key: o.key, size, contentType: found.blob?.contentType ?? null });
+  // The ETag arrives with the body, so the caller knows exactly which version it read.
+  emit({ key: o.key, size, contentType: found.blob?.contentType ?? null, etag: found.blob?.etag ?? null });
 }
 
 async function cmdHead(o) {
@@ -196,7 +253,7 @@ async function cmdHead(o) {
   const found = await exists(o.key);
   if (!found) process.exit(NOT_FOUND);
   emit({ key: found.pathname, size: found.size, contentType: found.contentType,
-         uploadedAt: found.uploadedAt });
+         uploadedAt: found.uploadedAt, etag: found.etag ?? null });
 }
 
 async function cmdList(o) {
@@ -224,22 +281,20 @@ async function cmdDel(o) {
  * Does the configured credential actually open this store? Reads one object listing and writes
  * nothing.
  *
- * It exists so the credential can be proved before a run that writes. The failure it is aimed at is
- * not a typo — a wrong token fails loudly on the first call either way — but the run that gets far
- * enough to matter before it fails: the worker restores a dataset, spends ten minutes refreshing
- * sources and rendering, and only then discovers it cannot save. A list is the cheapest call that
- * still requires the credential to be valid for this store.
- *
- * The store id is reported only when OIDC names it in the environment. Deriving it from a
- * read-write token means splitting the token on an undocumented internal format, and the SDK does
- * not export its parser; that is exactly the guesswork this helper exists to avoid.
+ * It exists so the credential can be proved before a run that writes: a worker that restores a
+ * dataset and renders for ten minutes should not discover at the end that it cannot save. It says
+ * which mode authenticated, whether the token's store matched `BLOB_STORE_ID`, and whether an OIDC
+ * token in the environment was set aside — never a credential, and never a store id, because
+ * this repository's workflow logs are public.
  */
 async function cmdCheck() {
   const creds = credentials();
   const page = await list({ ...creds, limit: 1 });
+  const storeId = process.env.BLOB_STORE_ID?.trim();
   emit({
     credential: credentialKind(creds),
-    store_id: creds.storeId ?? null,
+    token_store_matches_blob_store_id: creds.token ? (storeId ? true : null) : null,
+    oidc_in_environment_ignored: Boolean(creds.token && process.env.VERCEL_OIDC_TOKEN?.trim()),
     reachable: true,
     objects_seen: page.blobs.length,
     store_has_more: Boolean(page.hasMore),

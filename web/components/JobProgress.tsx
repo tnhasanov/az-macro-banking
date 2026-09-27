@@ -175,6 +175,10 @@ export function JobProgress({ initial, canEmail }: { initial: JobView; canEmail:
               <tr><td>Attempt</td><td>{j.attempt} of {j.max_attempts}</td></tr>
               <tr><td>Last heartbeat</td><td>{j.heartbeat_at ? `${when(j.heartbeat_at)} (${ago(j.heartbeat_age_seconds)})` : "—"}</td></tr>
               <tr><td>Runner</td><td>{j.run_url ? <a href={j.run_url} target="_blank" rel="noreferrer">GitHub Actions run</a> : "—"}</td></tr>
+              <tr><td>Code</td><td className="mono">
+                dashboard {j.app_commit ? j.app_commit.slice(0, 7) : "—"} · runner {j.worker_commit ? j.worker_commit.slice(0, 7) : "—"}
+                {j.app_commit && j.worker_commit && j.app_commit !== j.worker_commit ? " (different)" : ""}
+              </td></tr>
               {j.parent_job_id && <tr><td>Started by</td><td><Link href={`/jobs/${j.parent_job_id}`}>a source check</Link></td></tr>}
             </tbody>
           </table>

@@ -596,3 +596,79 @@ def test_each_attempt_works_in_its_own_directory_and_leaves_nothing_behind(world
     assert seen["data"] != str(base) and f"{base.name}.jobs" in seen["data"]
     assert os.environ["AZMONITOR_DATA_DIR"] == str(base)            # restored for whatever runs next
     assert list((base.parent / f"{base.name}.jobs").iterdir()) == []  # and removed
+
+
+# ----------------------------------------------------------------------------- the code each side runs
+
+def test_a_runner_on_different_code_from_the_dashboard_is_refused_before_it_starts(world, monkeypatch):
+    job_id = world.request()
+    world.conn.execute("UPDATE report_jobs SET app_commit = %s WHERE job_id = %s", ("a" * 40, job_id))
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    world.run(job_id)
+    job = world.job(job_id)
+    assert job["status"] == "failed" and job["error_code"] == "code_mismatch"
+    assert "aaaaaaa" in job["error_message"] and "bbbbbbb" in job["error_message"]
+    assert job["worker_commit"] == "b" * 40
+    assert world.engine.generated == [], "nothing may run on code the dashboard was not built from"
+
+
+def test_a_runner_on_the_dashboards_commit_runs_and_both_are_recorded(world, monkeypatch):
+    job_id = world.request()
+    world.conn.execute("UPDATE report_jobs SET app_commit = %s WHERE job_id = %s", ("c" * 40, job_id))
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    world.run(job_id)
+    job = world.job(job_id)
+    assert job["status"] == "succeeded"
+    assert job["app_commit"] == job["worker_commit"] == "c" * 40
+
+
+# ----------------------------------------------------------------------------- losing the dataset
+
+def test_a_worker_whose_dataset_was_overtaken_cannot_save_over_the_newer_one(world, tmp_path):
+    """Belt and braces under the dataset lease: even if another save lands while this worker still
+    believes it owns the dataset, its own save is refused and the newer dataset stays current."""
+    import json
+
+    from azmonitor.cloud import objectstore as OS
+
+    newer = {}
+
+    def successor_saves():
+        other = tmp_path / "successor"
+        base = OS.restore_dataset(other, world.store)["pointer_etag"]
+        newer.update(OS.save_dataset(other, world.store, stamp="20260926T000000Z-succ", based_on=base))
+
+    world.engine.during_generate = successor_saves
+    job_id = world.request()
+    out = world.run(job_id)
+    # The edition was published under the job's own lease, so it stands; only the save is refused.
+    assert world.job(job_id)["status"] == "succeeded" and out.get("dataset_save_failed") is True
+    current = json.loads(world.store.get(OS.POINTER_KEY))
+    assert current["mutable"]["key"] == newer["mutable"]["key"], "the newer dataset must stay current"
+    notes = [e for e in J.events(world.conn, job_id) if "could not be saved" in (e["message"] or "")]
+    assert notes and "Conflict" in str(notes[0].get("detail") or notes)
+
+
+def test_a_worker_that_lost_the_dataset_lease_mid_run_writes_nothing_back(world):
+    """The dataset lease passes to another worker while this one renders. It notices at its next
+    renewal, publishes nothing, leaves the stored dataset alone, and gives the job back to be run
+    again — rather than failing it as an engine error, which is what the two separate lease
+    exceptions used to do."""
+    import json
+
+    from azmonitor.cloud import objectstore as OS
+
+    before = json.loads(world.store.get(OS.POINTER_KEY))
+
+    def taken():
+        world.conn.execute("UPDATE job_locks SET holder = 'another-worker', fence = fence + 1 "
+                           "WHERE name = 'azmonitor-run'")
+
+    world.engine.during_generate = taken
+    job_id = world.request()
+    out = world.run(job_id)
+    job = world.job(job_id)
+    assert out["status"] == "requeued" and out["code"] == "dataset_lost", out
+    assert job["status"] == "queued" and job["error_code"] == "dataset_lost"
+    assert P.published(world.conn, "monthly") == []
+    assert json.loads(world.store.get(OS.POINTER_KEY)) == before, "the stored dataset must be untouched"

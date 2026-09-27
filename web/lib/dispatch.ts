@@ -44,7 +44,10 @@ export function dispatcher(env: Env = environment()): Dispatcher | { name: "off"
   if (mode === "github") {
     const token = process.env.GITHUB_DISPATCH_TOKEN;
     const repo = process.env.GITHUB_REPOSITORY ?? "";
-    const ref = process.env.GITHUB_WORKFLOW_REF || "main";
+    // The runner executes the branch the dashboard itself was deployed from, unless told otherwise,
+    // and the worker refuses a job whose commit differs from the dashboard's (see the worker's
+    // _check_code). VERCEL_GIT_COMMIT_REF is Vercel's own record of that branch.
+    const ref = process.env.GITHUB_WORKFLOW_REF || process.env.VERCEL_GIT_COMMIT_REF || "main";
     if (!token) return { name: "off", reason: "GITHUB_DISPATCH_TOKEN is not configured" };
     if (!REPO.test(repo)) return { name: "off", reason: "GITHUB_REPOSITORY is not configured as owner/name" };
     if (!REF.test(ref)) return { name: "off", reason: "GITHUB_WORKFLOW_REF is not a branch name" };
@@ -95,7 +98,8 @@ export function githubDispatcher(token: string, repo: string, ref: string,
         return {
           kind: "rejected",
           message: `GitHub refused to start the runner (HTTP ${response.status}). Check that the dispatch token `
-            + `can run ${WORKFLOW} in this repository and that the workflow exists on the ${ref} branch.`,
+            + `can run ${WORKFLOW} in this repository, and that the workflow exists both on the default branch `
+            + `and on ${ref}.`,
         };
       }
       return { kind: "retry", message: `GitHub answered HTTP ${response.status}; the dispatch will be retried` };

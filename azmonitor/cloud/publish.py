@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import os
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
@@ -285,15 +286,21 @@ def cmd_readmodel(args) -> int:
         conn.close()
 
 
-def refresh_readmodel(conn, store) -> dict[str, Any]:
+def refresh_readmodel(conn, store, *, lease=None) -> dict[str, Any]:
     """Rebuild the dashboard's projection from the dataset on disk and the catalogue in storage.
 
-    Called by the job worker while it still holds the dataset lease, so a worker with older data
-    can never overwrite the projection a newer one has just published.
+    Called by the job worker while it still holds the dataset lease. With `lease`, every step that
+    commits first pins the lease in its own transaction (`DatabaseLease.hold_in`), so a worker that
+    lost the dataset — even one that resumes after a long pause — cannot overwrite the projection a
+    newer worker has published: its step finds the lease gone and writes nothing.
     """
     from ..calc.validate import validate_all
     from ..storage.db import Database
     from . import readmodel as RM
+
+    def pinned(what: str) -> None:
+        if lease is not None:
+            lease.hold_in(conn, what)
 
     paths = config.paths()
     db = Database(paths.db_path)
@@ -302,13 +309,17 @@ def refresh_readmodel(conn, store) -> dict[str, Any]:
         catalogue = OS.read_catalog(store)
         broken = [f"{e['report_type']}/{e['edition']}/v{e['version']}"
                   for e in catalogue if e.get("files_missing")]
-        result = {
-            "indicators": RM.publish_indicators(conn, db),
-            "publications": RM.publish_publications(conn, db),
-            "editions": RM.publish_editions(conn, catalogue),
-            "deliveries": RM.publish_deliveries(conn, paths.data_dir / "deliveries.sqlite"),
-            "definitions": RM.publish_definitions(conn),
-        }
+        result = {}
+        pinned("publishing indicators")
+        result["indicators"] = RM.publish_indicators(conn, db)
+        pinned("publishing publications")
+        result["publications"] = RM.publish_publications(conn, db)
+        pinned("publishing editions")
+        result["editions"] = RM.publish_editions(conn, catalogue)
+        pinned("publishing deliveries")
+        result["deliveries"] = RM.publish_deliveries(conn, paths.data_dir / "deliveries.sqlite")
+        pinned("publishing definitions")
+        result["definitions"] = RM.publish_definitions(conn)
         if broken:
             # Reported, not hidden: an edition whose files have gone is a storage problem, and
             # dropping it from the catalogue would make it look like a report nobody ever produced.
@@ -316,7 +327,9 @@ def refresh_readmodel(conn, store) -> dict[str, Any]:
             log.warning("%d catalogued edition(s) reference files the store does not hold: %s",
                         len(broken), ", ".join(broken[:5]))
         quality = validate_all(db, write=False)
+        pinned("publishing quality checks")
         result["quality_checks"] = RM.publish_quality(conn, quality)
+        pinned("recording the refresh")
         RM.set_meta(conn, "last_readmodel_publish", {
             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "counts": result, "quality": quality["summary"],
@@ -570,6 +583,25 @@ def cmd_status(args) -> int:
     return _out(result)
 
 
+def cmd_backup(args) -> int:
+    """Pin the current dataset as a verified backup; with --verify, restore one and check it."""
+    try:
+        if args.verify:
+            with tempfile.TemporaryDirectory() as tmp:
+                result = OS.restore_backup(args.verify, Path(tmp) / "data")
+            result["ok"] = bool(result["verification"]["ok"])
+        else:
+            record = OS.backup_dataset(label=args.label)
+            result = {"ok": True, "key": record["key"], "backed_up_at": record["backed_up_at"],
+                      "verification": record["verification"],
+                      "archives": [p.get("key") for p in (record["pointer"].get("mutable"),
+                                                          record["pointer"].get("static")) if p]}
+    except OS.StorageError as exc:
+        result = {"ok": False, "error": str(exc)}
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result["ok"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="azmonitor.cloud.publish", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -599,6 +631,10 @@ def main(argv: list[str] | None = None) -> int:
                         "history from the first run")
     s.set_defaults(fn=cmd_seed)
     sub.add_parser("status", help="what the store and the read model hold").set_defaults(fn=cmd_status)
+    s = sub.add_parser("backup", help="pin the current dataset as a verified, restorable backup")
+    s.add_argument("--label", help="a short word to recognise it by, e.g. before-cloud-checks")
+    s.add_argument("--verify", metavar="KEY", help="instead: restore this backup to a scratch directory and check it")
+    s.set_defaults(fn=cmd_backup)
     sub.add_parser(
         "check", help="prove the Blob credential opens the store (writes nothing)",
     ).set_defaults(fn=cmd_check)

@@ -75,3 +75,31 @@ test("a preview deployment starts no runner unless told to, and never runs the w
     process.env = saved;
   }
 });
+
+test("without an explicit ref, the runner is dispatched on the branch this deployment was built from", async () => {
+  const saved = { ...process.env };
+  const realFetch = globalThis.fetch;
+  try {
+    process.env.AZMONITOR_DISPATCH_MODE = "github";
+    process.env.GITHUB_DISPATCH_TOKEN = "t";
+    process.env.GITHUB_REPOSITORY = "o/r";
+    delete process.env.GITHUB_WORKFLOW_REF;
+    process.env.VERCEL_GIT_COMMIT_REF = "claude/vercel-deployment";
+    let body: { ref?: string } = {};
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    const d = dispatcher("production");
+    assert.equal(d.name, "github");
+    await (d as { dispatch(id: string): Promise<unknown> }).dispatch("job_x");
+    assert.equal(body.ref, "claude/vercel-deployment");
+
+    process.env.GITHUB_WORKFLOW_REF = "release";
+    await (dispatcher("production") as { dispatch(id: string): Promise<unknown> }).dispatch("job_x");
+    assert.equal(body.ref, "release", "an explicit ref wins");
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env = saved;
+  }
+});

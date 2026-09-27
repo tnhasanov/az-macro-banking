@@ -25,8 +25,10 @@ STAGES = ("queued", "starting", "waiting_for_dataset", "restoring", "collecting"
           "writing_narrative", "rendering", "validating", "uploading", "publishing", "complete")
 
 
-class LeaseLost(RuntimeError):
-    """This worker no longer owns the job. Stop, and write nothing more."""
+# One exception for both leases a worker holds — the job's and the dataset's — so no handler can catch
+# one and let the other through. Which one was lost is on the claim: `claim.lost` is set only for
+# the job's own lease.
+from ..cloud.lock import LeaseLost  # noqa: E402
 
 
 class JobCancelled(RuntimeError):
@@ -268,6 +270,17 @@ def _guarded(cur, claim: Claim, what: str) -> dict[str, Any]:
         raise LeaseLost(f"{claim.job_id} moved on before {what} "
                         f"(fence {row[0] if row else None}, status {row[1] if row else None})")
     return {"notify_requester": bool(row[2]), "requester_email": row[3], "cancel_requested": bool(row[4])}
+
+
+def record_worker_commit(conn, claim: Claim, commit: str | None) -> str | None:
+    """Record the commit this worker runs on the job it holds; return the dashboard's commit."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            _guarded(cur, claim, "recording the worker's commit")
+            cur.execute("UPDATE report_jobs SET worker_commit = %s WHERE job_id = %s RETURNING app_commit",
+                        (commit, claim.job_id))
+            row = cur.fetchone()
+    return row[0] if row else None
 
 
 def set_stage(conn, claim: Claim, stage: str, detail: str | None = None) -> None:

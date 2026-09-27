@@ -206,3 +206,44 @@ def test_a_lease_with_no_fence_recorded_still_checks_holder_and_expiry(clean):
     stranger = L.DatabaseLease(clean, "test-fence", holder="stranger", minutes=30, fence=None)
     with pytest.raises(L.LeaseLost):
         stranger.check("saving the dataset")
+
+
+# --------------------------------------------------------------- the check and the write, together
+
+def test_a_write_pinned_to_the_lease_holds_off_a_successor_until_it_commits(clean):
+    """`check` then write leaves room for a pause; `hold_in` makes them one transaction."""
+    import threading
+    import time
+
+    worker = L.DatabaseLease(clean, name="test-pinned", holder="worker-a", minutes=1)
+    worker.try_acquire()
+    writer = _conn()
+    worker.hold_in(writer, "a read-model step")        # the transaction that will write
+
+    taken = threading.Event()
+
+    def successor():
+        other = _conn()
+        _expire(other, "test-pinned")                   # the pinned worker went quiet
+        L.DatabaseLease(other, name="test-pinned", holder="worker-b", minutes=1).try_acquire()
+        taken.set()
+        other.close()
+
+    threading.Thread(target=successor, daemon=True).start()
+    time.sleep(1.0)
+    assert not taken.is_set(), "the successor must wait for the pinned write to commit"
+    writer.commit()
+    assert taken.wait(10), "and take the lease as soon as it has"
+    writer.close()
+
+
+def test_a_replaced_worker_is_refused_inside_the_transaction_that_would_write(clean):
+    worker = L.DatabaseLease(clean, name="test-pinned", holder="worker-a", minutes=1)
+    worker.try_acquire()
+    _expire(clean, "test-pinned")
+    L.DatabaseLease(clean, name="test-pinned", holder="worker-b", minutes=1).try_acquire()
+
+    writer = _conn()
+    with pytest.raises(L.LeaseLost, match="no longer held by worker-a"):
+        worker.hold_in(writer, "a read-model step")
+    writer.close()

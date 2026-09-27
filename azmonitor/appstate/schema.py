@@ -523,6 +523,14 @@ CREATE TABLE IF NOT EXISTS request_throttle (
   PRIMARY KEY (bucket, window_start)
 );
 """),
+    (6, "the code each side of a job ran", """
+-- Which commit of the dashboard asked for a job, and which commit the runner executed it with. The
+-- runner checks out whatever branch GITHUB_WORKFLOW_REF names; recording both, and refusing a job
+-- whose two differ, is what makes "the worker runs the code the dashboard was deployed from" a fact
+-- checked on every job rather than a configuration hoped to be right.
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS app_commit TEXT;
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS worker_commit TEXT;
+"""),
 ]
 
 LATEST = max(v for v, _, _ in MIGRATIONS)

@@ -68,6 +68,7 @@ export async function jobView(jobId: string, viewerEmail: string | null) {
       requested_at: job.requested_at, started_at: job.started_at, finished_at: job.finished_at,
       attempt: job.attempt, max_attempts: job.max_attempts, next_attempt_at: job.next_attempt_at,
       run_url: job.run_url, parent_job_id: job.parent_job_id, requested_by: job.requested_by,
+      app_commit: job.app_commit, worker_commit: job.worker_commit,
       force_reason: job.force_reason, cancel_requested: job.cancel_requested,
       notify_requester: job.notify_requester,
       error_code: job.error_code, error_message: job.error_message, edition_id: job.edition_id, result,
