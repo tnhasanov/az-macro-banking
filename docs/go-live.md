@@ -23,6 +23,13 @@ failed, the correction step was skipped with that reason, and the production poi
 The same trial found that a log line written after a job's working directory had been removed
 raised instead of being dropped; fixed in `6cf7a5c`.
 
+On 2026-09-27 the fixture version (`--fixture --correction`, commit `f648d67`) passed locally against
+a stand-in store seeded from the bootstrap bundle: the source check read the deposits file served for
+the URL CBA's page listed (discovery was live), classified it `new_observations`, and published
+`monthly:2026-07:v40` (environment `test`); the corrected copy was classified `substantive_revision`
+and published `monthly:2026-07:v41` superseding v40; no email was queued; the production pointer was
+unchanged. This is a local result; the same task still has to run on the real services.
+
 Nothing else has run against Vercel, Blob, Neon or Resend. In particular no report has been
 requested from a deployed dashboard, no runner has been dispatched by one, and no email has been
 sent.
