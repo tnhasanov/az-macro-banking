@@ -441,3 +441,19 @@ def test_reaping_a_dead_worker_releases_the_dataset_lease_it_held(pg):
     other.try_acquire()                              # free at once, not in thirty minutes
     with pytest.raises(L.LeaseLost):
         lease.check("saving the dataset")            # and the zombie cannot write
+
+
+def test_the_preflight_reports_counts_and_switches_and_no_personal_data(pg):  # noqa: F811
+    import json
+
+    from azmonitor.appstate.__main__ import preflight
+
+    add_recipient(pg, "owner.person@example.az", role="owner")
+    J.create_job(pg, kind="report", report_type="monthly", params={"period": "latest", "refresh": "latest_data"},
+                 trigger="manual", environment="production", requested_by="owner.person@example.az",
+                 requester_email="owner.person@example.az", notify_requester=True)
+    out = preflight(pg)
+    assert out["schema_version"] == out["latest_version"] and out["migrations_pending"] == []
+    assert out["jobs_by_status"] == {"production/queued": 1}
+    assert out["recipients"]["owners"] == 1
+    assert "owner.person" not in json.dumps(out, default=str), "public logs must carry no address"

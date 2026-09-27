@@ -30,7 +30,7 @@ on:
         description: "Which task to run"
         required: true
         type: choice
-        options: [source-check, weekly-digest, monitor]
+        options: [preflight, source-check, weekly-digest, monitor]
         default: source-check
       dry_run:
         description: "Decide everything, produce and send nothing"
@@ -71,7 +71,7 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       BLOB_STORE_ID: ${{ secrets.BLOB_STORE_ID }}
       # Bumped whenever this file changes in a way a run depends on. See the revision check below.
-      WORKFLOW_REVISION: "2"
+      WORKFLOW_REVISION: "3"
       AZMONITOR_DATABASE_URL: ${{ secrets.AZMONITOR_DATABASE_URL }}
       AZMONITOR_ARCHIVE_BASE_URL: ${{ secrets.AZMONITOR_ARCHIVE_BASE_URL }}
       AZMONITOR_OWNER_EMAIL: ${{ secrets.AZMONITOR_OWNER_EMAIL }}
@@ -159,6 +159,27 @@ jobs:
           assert p['external_upload'], f'{p[\"name\"]} may not upload; set AZMONITOR_PROFILE=neutral'
           "
 
+      - name: "Preflight: the application database"
+        # Counts and switches only — never an address or a request — because this repository's
+        # workflow logs are public. A dry run reads; otherwise the additive, numbered migrations are
+        # applied under their advisory lock (a no-op when already current) and it reads again.
+        if: inputs.task == 'preflight'
+        run: |
+          python -m azmonitor.appstate preflight
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            python -m azmonitor.appstate migrate
+            python -m azmonitor.appstate preflight
+          fi
+
+      - name: Choose the Blob credential explicitly
+        # A configured store token is used, and required; the SDK on its own would prefer any OIDC
+        # token it found. The client refuses a token that belongs to another store than
+        # BLOB_STORE_ID names.
+        run: |
+          if [ -n "$BLOB_READ_WRITE_TOKEN" ]; then mode=read-write; else mode=oidc; fi
+          echo "AZMONITOR_BLOB_AUTH=$mode" >> "$GITHUB_ENV"
+          echo "Blob authentication: $mode"
+
       - name: Mint a short-lived Blob credential
         # Only when no read-write token is configured. On a store connected to a Vercel project
         # that is the normal case rather than a misconfiguration: Vercel keeps the read-write token
@@ -188,8 +209,24 @@ jobs:
         if: inputs.seed
         run: python -m azmonitor.cloud.publish seed --check
 
+      - name: "Preflight: what the store holds"
+        if: ${{ !inputs.seed && inputs.task == 'preflight' }}
+        run: python -m azmonitor.cloud.publish status
+
+      - name: "Preflight: back up the dataset, restored and checked on this fresh runner"
+        # Downloads the current dataset into an empty directory, checks every digest and SQLite's
+        # integrity on each database, then records an immutable backup naming those archives, and
+        # restores the backup once more to prove it. Writes one small backup record; the dataset
+        # itself is not changed. Skipped on a dry run, and when the store holds no dataset yet.
+        if: ${{ !inputs.seed && inputs.task == 'preflight' && !inputs.dry_run }}
+        run: |
+          set -o pipefail
+          python -m azmonitor.cloud.publish backup --label preflight | tee "$RUNNER_TEMP/backup.json"
+          key=$(python -c "import json,os; print(json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'backup.json')))['key'])")
+          python -m azmonitor.cloud.publish backup --verify "$key"
+
       - name: Take the run lease
-        if: ${{ !inputs.seed }}
+        if: ${{ !inputs.seed && inputs.task != 'preflight' }}
         id: lease
         run: |
           python - <<'PY'
@@ -264,11 +301,11 @@ jobs:
           PY
 
       - name: What the store and the read model now hold
-        if: ${{ always() && !inputs.seed }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' }}
         run: python -m azmonitor.cloud.publish status || true
 
       - name: Fail the job if the run failed
-        if: ${{ always() && !inputs.seed }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' }}
         run: |
           if [ "${{ steps.lease.outcome }}" != "success" ]; then
             echo "another run holds the lease; nothing to do"; exit 0
