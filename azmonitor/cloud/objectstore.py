@@ -232,7 +232,8 @@ class LocalObjectStore(ObjectStore):
         out = []
         for f in sorted(base.rglob("*")):
             if f.is_file():
-                out.append({"key": str(f.relative_to(self.root)), "size": f.stat().st_size,
+                # A key is always spelled with forward slashes, as Blob spells it, whatever the OS.
+                out.append({"key": f.relative_to(self.root).as_posix(), "size": f.stat().st_size,
                             "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f.stat().st_mtime))})
         return out
 
