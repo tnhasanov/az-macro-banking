@@ -301,6 +301,16 @@ export async function identicalEdition(env: Env, reportType: string, params: Par
 
 // ------------------------------------------------------------------ what the worker last saw
 
+/**
+ * The key under which a job of `env` records what it found (the last source check, the data
+ * availability shown on Generate). Production's keys are the plain names; any other environment's
+ * are suffixed, so a preview or test job sharing a database can never change what production shows.
+ * Must match `meta_key` in azmonitor/jobs/worker.py.
+ */
+export function envKey(base: string, env: Env = environment()): string {
+  return env === "production" ? base : `${base}:${env}`;
+}
+
 export async function meta<T>(key: string): Promise<T | null> {
   try {
     const rows = await sql()<{ value: T }[]>`SELECT value FROM meta WHERE key = ${key}`;

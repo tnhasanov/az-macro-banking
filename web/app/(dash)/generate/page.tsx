@@ -6,7 +6,7 @@
  * so "the latest monthly" combines inputs of different months, and the page says which.
  */
 import Link from "next/link";
-import { ensureSchema, environment, meta, recentJobs, type Availability, type SourceCheck } from "@/lib/appstate";
+import { ensureSchema, envKey, environment, meta, recentJobs, type Availability, type SourceCheck } from "@/lib/appstate";
 import { sql } from "@/lib/db";
 import { dispatcher } from "@/lib/dispatch";
 import { viewer } from "@/lib/viewer";
@@ -42,8 +42,8 @@ export default async function GeneratePage() {
   const env = environment();
   const [who, availability, lastCheck, jobs, archived] = await Promise.all([
     viewer(),
-    meta<Availability>("data_availability"),
-    meta<SourceCheck>("last_source_check"),
+    meta<Availability>(envKey("data_availability")),
+    meta<SourceCheck>(envKey("last_source_check")),
     recentJobs(env, 20),
     sql()<{ report_type: string; edition: string; sector: string | null }[]>`
       SELECT DISTINCT report_type, edition, sector FROM publication_records

@@ -115,17 +115,22 @@ The PDF is attached when it is under the attachment limit (10 MB by default), ot
 | `AZMONITOR_OWNER_EMAIL` | Vercel | ✓ | ✓ | the only address "email me" uses |
 | `CRON_SECRET` | Vercel | ✓ | — | cron only runs on Production |
 | `GITHUB_DISPATCH_TOKEN` | Vercel | ✓ | — | fine-grained PAT: this repository, *Actions: read and write*, nothing else |
-| `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_REF` | Vercel | ✓ | — | fixed server-side |
+| `GITHUB_REPOSITORY` | Vercel | ✓ | — | fixed server-side |
+| `GITHUB_WORKFLOW_REF` | Vercel | optional | — | unset: the runner follows the branch the dashboard was deployed from (`VERCEL_GIT_COMMIT_REF`) |
+| `VERCEL_GIT_COMMIT_SHA`, `VERCEL_GIT_COMMIT_REF` | injected by Vercel | ✓ | ✓ | recorded on every job; the worker refuses a job whose runner commit differs |
 | `RESEND_API_KEY` | Vercel | ✓ | **never** | a sending-only key is enough |
 | `AZMONITOR_EMAIL_FROM` | Vercel | ✓ | — | address on the verified domain |
 | `RESEND_WEBHOOK_SECRET` | Vercel | ✓ | — | from the Resend webhook |
 | `AZMONITOR_APP_URL` | Vercel | ✓ | ✓ | absolute URL for email links |
 | `BLOB_STORE_ID`, `VERCEL_OIDC_TOKEN` | injected by Vercel | ✓ (store connected) | per connection | the web reads files with these |
-| `AZMONITOR_DATABASE_URL`, `BLOB_STORE_ID`, `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `BLOB_READ_WRITE_TOKEN` | GitHub secrets | ✓ | — | used by `report-job.yml`; see cloud-deployment.md for the Blob credential |
+| `AZMONITOR_DATABASE_URL`, `BLOB_STORE_ID`, `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `BLOB_READ_WRITE_TOKEN` | GitHub secrets | ✓ | — | used by `report-job.yml`; with `BLOB_READ_WRITE_TOKEN` the worker requires it (`AZMONITOR_BLOB_AUTH=read-write`) and checks it belongs to `BLOB_STORE_ID`'s store; see go-live.md |
 
 Preview deployments start no runner (dispatch is off unless `AZMONITOR_DISPATCH_MODE` is set) and
 send no email whatever keys they hold: the provider refuses to send outside Production, and the
-worker records every announcement produced outside Production as suppressed.
+worker records every announcement produced outside Production as suppressed. A job outside
+Production also never rebuilds the dashboard figures, and records its source-check and availability
+notes under keys suffixed with its environment, so even sharing a database it cannot change what
+Production shows.
 
 ## Setup
 
@@ -135,10 +140,10 @@ worker records every announcement produced outside Production as suppressed.
    tokens): resource owner the repository's owner, *Only select repositories* → this one,
    *Repository permissions → Actions: Read and write*. Put it in Vercel as `GITHUB_DISPATCH_TOKEN`
    (Production only). `report-job.yml` must be on the default branch for GitHub to accept a dispatch
-   of it; `GITHUB_WORKFLOW_REF` names the branch whose code runs.
-3. **Private storage.** Unchanged: the Blob store stays private and connected to the project. The
-   worker keeps using the Blob credential path in cloud-deployment.md; the store must be available
-   to the environment the minted token is for (see "The environment the token is for" there).
+   of it; the runner runs the branch the dashboard was deployed from, or `GITHUB_WORKFLOW_REF`.
+3. **Private storage.** The Blob store stays private and connected to the project. The runner uses
+   the store's own read-write token as the GitHub secret `BLOB_READ_WRITE_TOKEN` (go-live.md, step
+   1); without it, the OIDC path in cloud-deployment.md needs the store connected to Development.
 4. **Email.** In Resend: add and verify the sending domain (DNS records), create a *sending access*
    API key, and create a webhook to `https://<production-domain>/api/webhooks/resend` for
    `email.sent`, `email.delivered`, `email.bounced`, `email.complained`, `email.failed`,
@@ -218,38 +223,7 @@ Five defects that no unit test had caught, all fixed and each now pinned by a te
   directory, so the fresh-runner property holds everywhere, not only on GitHub
   (`tests/test_worker.py::test_each_attempt_works_in_its_own_directory_and_leaves_nothing_behind`).
 
-## Remaining steps to go live (user actions)
+## Going live
 
-Everything below needs access this environment does not have — Vercel, Neon and Resend are not
-reachable from it, and changing the default branch or production deployment is your decision.
-In order:
-
-1. **Blob for the runner — your decision.** The last cloud run stopped here: a token minted outside a
-   deployment is always a *development* token, and the store is connected only to Preview and
-   Production. There are two ways through, and you have ruled out doing either on my initiative:
-   - include *Development* in the store's project connection (Vercel → Storage → the store →
-     Projects → Update Project Connection). You asked earlier that this not be done merely to get
-     round the mismatch; the argument that it does not widen who can reach the store is in
-     cloud-deployment.md ("The environment the token is for"), and the choice is yours; or
-   - issue a store-scoped read-write token yourself and save it as the GitHub secret
-     `BLOB_READ_WRITE_TOKEN` (a credential change, which you asked me not to make).
-   Without one of them no cloud worker can read or write the dataset.
-2. **Workflow on the default branch.** Merge a one-file pull request adding
-   `.github/workflows/report-job.yml` to `main` (GitHub accepts a dispatch only for a workflow that
-   exists on the default branch). Until PR #2 is merged, set `GITHUB_WORKFLOW_REF` to the branch that
-   carries the worker code.
-3. **Production configuration in Vercel** (Production scope only): `GITHUB_DISPATCH_TOKEN`,
-   `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_REF`, `CRON_SECRET`, `RESEND_API_KEY`,
-   `AZMONITOR_EMAIL_FROM`, `RESEND_WEBHOOK_SECRET`, `AZMONITOR_APP_URL`; confirm
-   `AZMONITOR_OWNER_EMAIL` is your address. Preview gets none of the dispatch or email variables.
-4. **Resend.** Verify the sending domain, create the webhook to `/api/webhooks/resend`.
-5. **Deploy to Production** (the Vercel cron runs only on Production deployments).
-6. **Controlled checks in production**, in this order, watching each job page:
-   Settings → add yourself as the owner recipient → *Send a test email to me* (expect `accepted`,
-   then `delivered` once the webhook arrives) → Generate → Monthly Monitor, latest, *Use the latest
-   collected data*, *Email me* (expect a published edition, a PDF download, and your email) →
-   Generate the same again (expect the identical-edition offer) → Generate with *Check sources for
-   updates first* (expect a source check to run and either publish or report no relevant change).
-7. **Activate**: Settings → *Check official sources automatically* and *Email subscribers about new
-   editions*, with you as the only recipient. The next 09:15, 13:15 or 17:15 Baku slot starts the
-   first automatic check; its job appears on the Jobs page.
+The real-cloud verification, what has been verified so far and the exact remaining steps are in
+[`go-live.md`](go-live.md).

@@ -464,6 +464,29 @@ def test_preview_deployments_record_announcements_but_never_queue_them(world):
     assert "preview" in rows[0]["status_reason"]
 
 
+def test_a_non_production_check_never_changes_what_production_shows(world, monkeypatch):
+    """The dashboard's figures and its "last check" and "availability" notes are production's. A
+    preview or test job sharing the database records its notes under its own keys and never rebuilds
+    the figures, so it cannot change what the production dashboard shows."""
+    from azmonitor.jobs import worker as W
+
+    rebuilt = []
+    monkeypatch.setattr(W.Worker, "_refresh_readmodel", lambda self, claim: rebuilt.append(claim.environment))
+    world.changes(cba_deposits=_new_observations())
+    world.run(world.request(None, {}, kind="source_check", trigger="schedule", slot="t1", environment="test"))
+    keys = {r[0] for r in world.conn.execute(
+        "SELECT key FROM meta WHERE key LIKE 'last_source_check%' OR key LIKE 'data_availability%'").fetchall()}
+    assert keys == {"last_source_check:test", "data_availability:test"}
+    assert rebuilt == []
+
+    world.changes(cba_deposits=_new_observations(period="2026-09-30", latest_before="2026-08-31"))
+    world.run(world.request(None, {}, kind="source_check", trigger="schedule", slot="p9"))
+    keys = {r[0] for r in world.conn.execute(
+        "SELECT key FROM meta WHERE key LIKE 'last_source_check%' OR key LIKE 'data_availability%'").fetchall()}
+    assert {"last_source_check", "data_availability"} <= keys
+    assert rebuilt == ["production"]
+
+
 # ----------------------------------------------------------------------------- recovery
 
 def test_a_worker_that_lost_its_lease_cannot_publish(world):

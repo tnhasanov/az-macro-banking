@@ -127,6 +127,11 @@ class Item:
 
 
 
+def meta_key(base: str, environment: str) -> str:
+    """Where a job of `environment` records what it found; see envKey in web/lib/appstate.ts."""
+    return base if environment == "production" else f"{base}:{environment}"
+
+
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -319,7 +324,10 @@ class Worker:
                     self.engine.close()
                 try:
                     self._save_dataset(claim)
-                    if self._collected and self.settings.save_dataset and not self.settings.skip_restore:
+                    # The dashboard's figures are production's: they are not kept per environment,
+                    # so only a production job may rebuild them.
+                    if self._collected and self.settings.save_dataset and not self.settings.skip_restore \
+                            and claim.environment == "production":
                         self._refresh_readmodel(claim)
                 except LeaseLost as exc:
                     if claim.lost.is_set():
@@ -534,7 +542,7 @@ class Worker:
         checks_sources = claim.kind == "source_check" or claim.params.get("refresh") == "check_sources"
         if checks_sources:
             refreshed, quality = self._check_sources(claim)
-        self._publish_availability()
+        self._publish_availability(claim)
 
         pending = CH.pending(self.conn, environment=claim.environment)
         # A productive change that no report is mapped to is recorded, and closed: there is nothing
@@ -616,7 +624,7 @@ class Worker:
         try:
             rm = self.connect()
             try:
-                RM.set_meta(rm, "last_source_check", {
+                RM.set_meta(rm, meta_key("last_source_check", claim.environment), {
                     "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                     "job_id": claim.job_id, "batch_id": batch_id, "changes": summary,
                     "datasets_checked": len(refresh.get("datasets") or {}), "failed_datasets": sorted(failed)})
@@ -628,13 +636,14 @@ class Worker:
         self._save_dataset(claim)
         return {"batch_id": batch_id, "summary": summary, "failed": failed}, quality
 
-    def _publish_availability(self) -> None:
+    def _publish_availability(self, claim: Claim) -> None:
         from ..cloud import readmodel as RM
 
         try:
             rm = self.connect()
             try:
-                RM.set_meta(rm, "data_availability", self.engine.availability(self._today()))
+                RM.set_meta(rm, meta_key("data_availability", claim.environment),
+                            self.engine.availability(self._today()))
             finally:
                 rm.close()
         except Exception:

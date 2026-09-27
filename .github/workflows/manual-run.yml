@@ -30,7 +30,7 @@ on:
         description: "Which task to run"
         required: true
         type: choice
-        options: [preflight, seed-from-sources, source-check, weekly-digest, monitor]
+        options: [preflight, seed-from-sources, isolated-event, source-check, weekly-digest, monitor]
         default: source-check
       dry_run:
         description: "Decide everything, produce and send nothing"
@@ -255,6 +255,22 @@ jobs:
           key=$(python -c "import json,os; print(json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'backup.json')))['key'])")
           python -m azmonitor.cloud.publish backup --verify "$key"
 
+      - name: "Isolated event: a release, then a correction, through the automatic path"
+        # The scheduler's own source-check job, on this runner, against the real database and store,
+        # with a copy of the production dataset under isolated/run-<id>/ in which the newest deposits
+        # month is withdrawn; the live CBA file is then a genuine new release to it, and a corrected
+        # copy of that file a revision. Jobs and publications are environment 'test'; announcements
+        # are recorded as suppressed; the production dataset pointer is compared before and after.
+        # A dry run checks the preconditions only (scripts/cloud/isolated_event.py --plan).
+        if: ${{ !inputs.seed && inputs.task == 'isolated-event' }}
+        run: |
+          prefix="isolated/run-${{ github.run_id }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/cloud/isolated_event.py --prefix "$prefix" --plan
+          else
+            python scripts/cloud/isolated_event.py --prefix "$prefix" --correction
+          fi
+
       - name: "Preflight: what the store holds"
         if: ${{ !inputs.seed && inputs.task == 'preflight' }}
         run: python -m azmonitor.cloud.publish status
@@ -272,7 +288,7 @@ jobs:
           python -m azmonitor.cloud.publish backup --verify "$key"
 
       - name: Take the run lease
-        if: ${{ !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
+        if: ${{ !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' && inputs.task != 'isolated-event' }}
         id: lease
         run: |
           python - <<'PY'
@@ -347,11 +363,11 @@ jobs:
           PY
 
       - name: What the store and the read model now hold
-        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' && inputs.task != 'isolated-event' }}
         run: python -m azmonitor.cloud.publish status || true
 
       - name: Fail the job if the run failed
-        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' && inputs.task != 'isolated-event' }}
         run: |
           if [ "${{ steps.lease.outcome }}" != "success" ]; then
             echo "another run holds the lease; nothing to do"; exit 0

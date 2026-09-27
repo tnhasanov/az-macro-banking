@@ -14,7 +14,7 @@
  * Nothing in the body chooses a command, a repository, a branch, a URL or an email recipient.
  */
 import { NextResponse } from "next/server";
-import { createJob, environment, identicalEdition, meta, recentJobs, type Availability } from "@/lib/appstate";
+import { createJob, envKey, environment, identicalEdition, meta, recentJobs, type Availability } from "@/lib/appstate";
 import { drainDispatches } from "@/lib/dispatch";
 import { handler, jsonBody, Refusal, throttle } from "@/lib/guard";
 import { InvalidRequest, isReportType, normalise, SECTORS } from "@/lib/params";
@@ -81,7 +81,7 @@ export const POST = handler(async (request, caller) => {
 
   const env = environment();
   if (!forceReason && body.generate_anyway !== true) {
-    const availability = await meta<Availability>("data_availability");
+    const availability = await meta<Availability>(envKey("data_availability"));
     const latestPub = availability?.publications?.[reportType]?.[0]?.publication_id ?? null;
     const offer = await identicalEdition(env, reportType, params, latestPub);
     if (offer) {
