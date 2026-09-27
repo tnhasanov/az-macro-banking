@@ -11,7 +11,9 @@ The system is **not operational yet**: the real-cloud journey has not run end to
 | 2026-09-27 04:26 | Application database reachable from a GitHub runner; schema version | manual run [36294299961](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294299961), commit `be0195a`, dry run | reachable; schema version 0, migrations 1–6 pending |
 | 2026-09-27 04:26 | Blob credential chosen explicitly and proved | same run | mode `oidc` (no `BLOB_READ_WRITE_TOKEN` secret); refused: *OIDC is enabled for this project, but not for the "development" environment* |
 | 2026-09-27 04:28 | Application-state migrations on the real Neon database | manual run [36294374181](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294374181), commit `be0195a` | applied 1–6, now version 6; no jobs, publications, email or recipients; no settings rows (automatic checks and email are off by default) |
-| 2026-09-27 04:29 | Building the dataset from the official websites on a runner | manual run [36294459892](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294459892), commit `cb2180b`, dry run | see "Seeding" below |
+| 2026-09-27 04:29 | Building the dataset from the official websites on a runner | manual run [36294459892](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294459892), commit `cb2180b`, dry run | cancelled at the 60-minute limit: `www.cbar.az` and the statistics committee answered, every file on `uploads.cbar.az` timed out (90 s, four times each). Led to the per-host cut-off (`fd55dde`) |
+| 2026-09-27 05:30 | Preflight with the store token | manual run [36297069332](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297069332), commit `fd55dde`, dry run | Neon schema 6, nothing pending, no jobs, recipients or switches; Blob `read-write`, token belongs to `BLOB_STORE_ID`'s store, authenticated; **store empty** (no dataset, no report objects) |
+| 2026-09-27 05:33 | Seed the empty store from the official sources | manual run [36297517710](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297517710), commit `48177b3` | see "Seeding" |
 
 The isolated automatic-path event (`scripts/cloud/isolated_event.py`, below) was tried locally —
 local Postgres, a local copy of the production dataset, the live CBA website — on 2026-09-27
@@ -49,18 +51,19 @@ cannot be done from here.
 
 ## Which code runs where
 
-- The dashboard is whatever Vercel deploys. Each job it creates records its commit
-  (`VERCEL_GIT_COMMIT_SHA`, a Vercel system variable).
-- It dispatches `report-job.yml` on the branch it was deployed from (`VERCEL_GIT_COMMIT_REF`), unless
-  `GITHUB_WORKFLOW_REF` names another. GitHub runs that branch's copy of the workflow at its current
-  head, and the worker records that commit (`GITHUB_SHA`).
-- **The worker refuses a job whose two commits differ**, before it restores anything, with both on
-  the job page (*Code: dashboard abc1234 · runner abc1234*). So the statement "the worker runs the
-  code the dashboard was deployed from" is checked on every job. The one window where they can differ
-  is a push that has not finished deploying; jobs created by the old deployment in that window are
-  refused with a message saying so, and *Retry* from the new one runs.
+- The dashboard is whatever Vercel deploys. Each job it creates records the commit it was built
+  from (`VERCEL_GIT_COMMIT_SHA`, a Vercel system variable), server-side.
+- It dispatches `report-job.yml` on the branch it was deployed from (`VERCEL_GIT_COMMIT_REF`,
+  overridable with `GITHUB_WORKFLOW_REF`). A branch moves, so the runner does not simply run its
+  head: it reads the job's recorded commit, and when that commit is in the branch's history it
+  checks out **that exact commit** and installs it. A commit that is not on the branch is never
+  fetched from anywhere else.
+- The worker records the commit it actually runs (`git rev-parse HEAD`, not the dispatched branch's
+  `GITHUB_SHA`) and refuses a job whose recorded dashboard commit differs from it, before it restores
+  anything. The job page shows both (*Code: dashboard abc1234 · runner abc1234*).
 - `report-job.yml` must also exist on `main` for GitHub to accept a dispatch at all: that is PR #5,
-  one file, no trigger but `workflow_dispatch`.
+  one file, no trigger but `workflow_dispatch`. Its copy on `main` is only the registration; each run
+  uses the copy on the dispatched branch.
 
 ## Private storage: the store token
 
