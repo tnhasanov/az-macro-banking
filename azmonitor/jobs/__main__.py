@@ -24,11 +24,31 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="command", required=True)
     r = sub.add_parser("run", help="claim and run one job")
     r.add_argument("--job-id", required=True)
+    c = sub.add_parser("commit", help="print the dashboard commit a job was requested from (empty if none)")
+    c.add_argument("--job-id", required=True)
     args = ap.parse_args(argv)
 
     if not re.match(JOB_ID_PATTERN, args.job_id):
         print(json.dumps({"error": "not a job id"}))
         return 2
+
+    if args.command == "commit":
+        # Read by the workflow before it runs anything, to check out exactly this commit. Only a full
+        # hexadecimal commit hash is ever printed, whatever the row holds.
+        from ..cloud import readmodel as RM
+
+        conn = RM.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT app_commit FROM report_jobs WHERE job_id = %s", (args.job_id,))
+                row = cur.fetchone()
+        except Exception:  # a database before migration 6 has no commit to give
+            row = None
+        finally:
+            conn.close()
+        sha = (row[0] if row else "") or ""
+        print(sha if re.fullmatch(r"[0-9a-f]{40}", sha) else "")
+        return 0
 
     from .. import config
     from ..cloud import readmodel as RM

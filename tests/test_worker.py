@@ -626,11 +626,14 @@ def test_each_attempt_works_in_its_own_directory_and_leaves_nothing_behind(world
 def test_a_runner_on_different_code_from_the_dashboard_is_refused_before_it_starts(world, monkeypatch):
     job_id = world.request()
     world.conn.execute("UPDATE report_jobs SET app_commit = %s WHERE job_id = %s", ("a" * 40, job_id))
-    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    from azmonitor.jobs import worker as W
+
+    monkeypatch.setattr(W, "worker_commit", lambda: "b" * 40)
     world.run(job_id)
     job = world.job(job_id)
     assert job["status"] == "failed" and job["error_code"] == "code_mismatch"
     assert "aaaaaaa" in job["error_message"] and "bbbbbbb" in job["error_message"]
+    assert "not in the history" in job["error_message"]
     assert job["worker_commit"] == "b" * 40
     assert world.engine.generated == [], "nothing may run on code the dashboard was not built from"
 
@@ -638,7 +641,9 @@ def test_a_runner_on_different_code_from_the_dashboard_is_refused_before_it_star
 def test_a_runner_on_the_dashboards_commit_runs_and_both_are_recorded(world, monkeypatch):
     job_id = world.request()
     world.conn.execute("UPDATE report_jobs SET app_commit = %s WHERE job_id = %s", ("c" * 40, job_id))
-    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    from azmonitor.jobs import worker as W
+
+    monkeypatch.setattr(W, "worker_commit", lambda: "c" * 40)
     world.run(job_id)
     job = world.job(job_id)
     assert job["status"] == "succeeded"
@@ -695,3 +700,26 @@ def test_a_worker_that_lost_the_dataset_lease_mid_run_writes_nothing_back(world)
     assert job["status"] == "queued" and job["error_code"] == "dataset_lost"
     assert P.published(world.conn, "monthly") == []
     assert json.loads(world.store.get(OS.POINTER_KEY)) == before, "the stored dataset must be untouched"
+
+
+def test_the_recorded_commit_is_the_code_checked_out_not_the_dispatched_branch_head(monkeypatch):
+    """The workflow may check out the dashboard's commit behind the branch head; GITHUB_SHA is the
+    head, so it must not be what the job records while there is a checkout to ask."""
+    import subprocess
+
+    from azmonitor.jobs import worker as W
+
+    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    assert W.worker_commit() == head
+
+
+def test_the_workflow_can_read_a_jobs_dashboard_commit(world, capsys, monkeypatch):
+    from azmonitor.cloud import readmodel as RM
+    from azmonitor.jobs.__main__ import main
+
+    job_id = world.request()
+    world.conn.execute("UPDATE report_jobs SET app_commit = %s WHERE job_id = %s", ("d" * 40, job_id))
+    monkeypatch.setattr(RM, "connect", lambda *a, **k: world.conn.connect_again())
+    assert main(["commit", "--job-id", job_id]) == 0
+    assert capsys.readouterr().out.strip() == "d" * 40

@@ -136,18 +136,23 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def worker_commit() -> str | None:
-    """The commit this worker is running: GITHUB_SHA on a runner, the checkout's HEAD locally."""
-    sha = (os.environ.get("GITHUB_SHA") or "").strip().lower()
-    if COMMIT.match(sha):
-        return sha
-    try:
-        import subprocess
+    """The commit whose code this worker is actually running: the checkout's HEAD.
 
+    Not GITHUB_SHA, which is the head of the dispatched branch: the workflow checks out the
+    dashboard's own commit when that differs, and the record must say which code ran. GITHUB_SHA is
+    only the fallback where there is no git checkout to ask.
+    """
+    import subprocess
+
+    try:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2],
                               capture_output=True, text=True, timeout=10).stdout.strip().lower()
     except (OSError, subprocess.SubprocessError):
-        return None
-    return head if COMMIT.match(head) else None
+        head = ""
+    if COMMIT.match(head):
+        return head
+    sha = (os.environ.get("GITHUB_SHA") or "").strip().lower()
+    return sha if COMMIT.match(sha) else None
 
 @dataclass
 class Settings:
@@ -399,9 +404,10 @@ class Worker:
     def _check_code(self, claim: Claim) -> None:
         """The runner must execute the commit the dashboard that asked for this job was built from.
 
-        GitHub runs whatever commit GITHUB_WORKFLOW_REF points at when the dispatch arrives; the
-        dashboard records the commit it was deployed from on every job it creates. Equal, the job
-        runs; different — the branch moved, or the ref names another branch — it is refused before it
+        The dashboard records the commit it was deployed from on every job it creates, and the
+        workflow checks that exact commit out when it is in the dispatched branch's history (see
+        report-job.yml). The worker then compares it with the code it actually runs: equal, the job
+        runs; different — a commit that is not on that branch at all — it is refused before it
         touches anything, with both commits on the job page. Unknown on either side (a local run, a
         deployment without git metadata), it is recorded and not enforced.
         """
@@ -409,9 +415,10 @@ class Worker:
         app = J.record_worker_commit(self.conn, claim, mine)
         if app and mine and app != mine:
             raise Outcome("failed", "code_mismatch",
-                          f"The dashboard that requested this job runs commit {app[:7]}, but the runner checked "
-                          f"out {mine[:7]}. The runner uses the branch in GITHUB_WORKFLOW_REF; it must be the "
-                          "branch the dashboard is deployed from. Retry once both are on the same commit.")
+                          f"The dashboard that requested this job runs commit {app[:7]}, which is not in the "
+                          f"history of the branch the runner was dispatched on (it has {mine[:7]}). "
+                          "GITHUB_WORKFLOW_REF, or the Production branch when it is unset, must be the branch "
+                          "the dashboard is deployed from.")
 
     def _check_request(self, claim: Claim) -> None:
         if claim.kind not in ("report", "source_check", "weekly_digest"):

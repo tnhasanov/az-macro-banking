@@ -53,6 +53,10 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+        with:
+          # The whole history of the dispatched branch, so the dashboard's own commit can be found
+          # on it and checked out below.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -90,6 +94,29 @@ jobs:
             exit 1
           fi
           echo "worker code: ${{ github.ref_name }} at $GITHUB_SHA"
+
+      - name: Run the exact commit the dashboard was deployed from
+        # The dispatch names a branch, which moves. The job row records the dashboard's own commit
+        # (VERCEL_GIT_COMMIT_SHA, written server-side); when it is on this branch's history and not
+        # its head, that commit is checked out and installed, so the code that runs is the code the
+        # dashboard was built from, not whatever was pushed since. A commit that is not on this
+        # branch is not fetched from anywhere: the worker then refuses the job, saying so. The worker
+        # records the commit it actually runs (git HEAD), whichever this was.
+        run: |
+          want=$(python -m azmonitor.jobs commit --job-id "$JOB_ID")
+          have=$(git rev-parse HEAD)
+          if [ -z "$want" ]; then
+            echo "the job records no dashboard commit; running ${{ github.ref_name }} at $have"
+          elif [ "$want" = "$have" ]; then
+            echo "the dashboard's commit is this branch's head: $have"
+          elif git merge-base --is-ancestor "$want" "$have" 2>/dev/null; then
+            git checkout --quiet --detach "$want"
+            pip install --quiet -e ".[cloud]"
+            npm ci --omit=dev --prefix tools/blob
+            echo "checked out the dashboard's commit $want (the branch has moved on to $have)"
+          else
+            echo "::warning::the dashboard's commit $want is not on ${{ github.ref_name }}; the worker will refuse the job"
+          fi
 
       - name: Choose the Blob credential explicitly
         # A configured store token is used, and required: the SDK on its own would prefer any OIDC
