@@ -809,3 +809,41 @@ def test_a_corrupt_dataset_is_never_recorded_as_known_good(tmp_path):
     with pytest.raises(OS.StorageError, match="failed verification"):
         OS.backup_dataset(store)
     assert store.list(OS.BACKUP_PREFIX) == []
+
+
+def test_a_bundle_seeds_an_empty_store_once_and_leaves_a_verified_backup(tmp_path, monkeypatch, capsys):
+    """The bootstrap path: a bundle in the store's own layout, verified, seeded, backed up — once."""
+    import argparse
+
+    from azmonitor.cloud import publish as PUB
+
+    bundle = tmp_path / "bundle"
+    OS.save_dataset(_real_dataset(tmp_path / "data"), OS.LocalObjectStore(bundle), stamp="20260920T093543Z")
+    monkeypatch.setenv("AZMONITOR_OBJECT_STORE_DIR", str(tmp_path / "blob"))
+    monkeypatch.setenv("AZMONITOR_PROFILE", "neutral")
+    monkeypatch.setenv("AZMONITOR_DATA_DIR", str(tmp_path / "unused"))
+    args = lambda: argparse.Namespace(from_bundle=str(bundle), check=False, replace=False,  # noqa: E731
+                                      allow_unexpected=False, with_reports=False)
+
+    assert PUB.cmd_seed(args()) == 0, capsys.readouterr().out
+    store = OS.LocalObjectStore(tmp_path / "blob")
+    assert store.get(OS.POINTER_KEY) is not None
+    assert len(store.list(OS.BACKUP_PREFIX)) == 1
+    assert PUB.cmd_seed(args()) == 4, "a store that holds a dataset is never seeded over"
+
+
+def test_a_damaged_bundle_uploads_nothing(tmp_path, monkeypatch):
+    import argparse
+
+    from azmonitor.cloud import publish as PUB
+
+    bundle = tmp_path / "bundle"
+    saved = OS.save_dataset(_real_dataset(tmp_path / "data"), OS.LocalObjectStore(bundle), stamp="20260920T093543Z")
+    archive = bundle / saved["static"]["key"]
+    archive.write_bytes(archive.read_bytes()[:-10])
+    monkeypatch.setenv("AZMONITOR_OBJECT_STORE_DIR", str(tmp_path / "blob"))
+    monkeypatch.setenv("AZMONITOR_PROFILE", "neutral")
+    code = PUB.cmd_seed(argparse.Namespace(from_bundle=str(bundle), check=False, replace=False,
+                                           allow_unexpected=False, with_reports=False))
+    assert code == 2
+    assert OS.LocalObjectStore(tmp_path / "blob").list("") == []

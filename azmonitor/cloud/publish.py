@@ -429,7 +429,15 @@ def cmd_seed(args) -> int:
     So this refuses to do anything to a store that already holds a dataset, checks the local
     dataset is complete before sending it, and verifies the digest afterwards by reading back what
     the store now has. `--check` does everything except the upload.
+
+    `--from-bundle DIR` seeds from a bootstrap bundle instead of a data directory: a directory in the
+    store's own layout (`dataset/current.json` and the two archives it names), as written by
+    `save_dataset`. It is restored into a scratch directory first — every digest checked against its
+    pointer, SQLite's integrity check on each database — and only a bundle that passes is seeded;
+    afterwards a verified backup of what the store now holds is recorded.
     """
+    if getattr(args, "from_bundle", None):
+        return _seed_from_bundle(args)
     paths = config.paths()
     store = OS.store_from_env()
     result: dict[str, Any] = {"data_dir": str(paths.data_dir), "profile": config.profile()["name"]}
@@ -517,6 +525,43 @@ def cmd_seed(args) -> int:
     return _out(result)
 
 
+def _seed_from_bundle(args) -> int:
+    bundle = Path(args.from_bundle)
+    if not (bundle / OS.POINTER_KEY).is_file():
+        return _out({"seeded": False, "error": f"{bundle} holds no {OS.POINTER_KEY}; it is not a bundle"}, 2)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp) / "data"
+        try:
+            OS.restore_dataset(work, OS.LocalObjectStore(bundle))
+        except OS.StorageError as exc:
+            return _out({"seeded": False, "error": f"the bundle did not restore intact: {exc}"}, 2)
+        check = OS.verify_restored(work)
+        if not check["ok"]:
+            return _out({"seeded": False, "bundle_verification": check,
+                         "error": "the bundle failed verification; nothing was uploaded"}, 2)
+        saved = os.environ.get("AZMONITOR_DATA_DIR")
+        os.environ["AZMONITOR_DATA_DIR"] = str(work)
+        try:
+            args.from_bundle = None
+            code = cmd_seed(args)
+        finally:
+            if saved is None:
+                os.environ.pop("AZMONITOR_DATA_DIR", None)
+            else:
+                os.environ["AZMONITOR_DATA_DIR"] = saved
+        if code != 0 or args.check:
+            return code
+        try:
+            record = OS.backup_dataset(label="bootstrap")
+            verified = OS.restore_backup(record["key"], Path(tmp) / "verify")
+        except OS.StorageError as exc:
+            return _out({"seeded": True, "backup": False, "error": f"seeded, but the backup failed: {exc}"}, 1)
+        ok = bool(verified["verification"]["ok"])
+        return _out({"seeded": True, "backup": record["key"], "backup_restores_intact": ok,
+                     "sqlite": {k: v["integrity"] for k, v in verified["verification"]["databases"].items()},
+                     "counts": verified["verification"]["counts"]}, 0 if ok else 1)
+
+
 def _confidential_strays(data_dir: Path) -> list[str]:
     """Files in the data directory that are not part of the dataset.
 
@@ -527,9 +572,15 @@ def _confidential_strays(data_dir: Path) -> list[str]:
     if not data_dir.exists():
         return []
     expected = set(OS.DATASET_PARTS)
+    # SQLite's own companions to the dataset's databases. Only the named parts are ever archived,
+    # and saving folds any write-ahead log into its database first, so these are never uploaded;
+    # they appear whenever a database has been opened, including by the verification of a bundle.
+    sidecars = {f"{db}{suffix}" for db in expected if db.endswith(".sqlite")
+                for suffix in ("-wal", "-shm", "-journal")}
     strays = []
     for child in sorted(data_dir.iterdir()):
-        if child.name in expected or child.name in ("logs", "backups", "analytics", "snapshots"):
+        if child.name in expected or child.name in sidecars \
+                or child.name in ("logs", "backups", "analytics", "snapshots"):
             continue
         strays.append(child.name)
     return strays
@@ -629,6 +680,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--with-reports", action="store_true",
                    help="also upload the report archive and its catalogue, so the dashboard has "
                         "history from the first run")
+    s.add_argument("--from-bundle", metavar="DIR",
+                   help="seed from a verified bootstrap bundle (dataset/current.json and its two archives)")
     s.set_defaults(fn=cmd_seed)
     sub.add_parser("status", help="what the store and the read model hold").set_defaults(fn=cmd_status)
     s = sub.add_parser("backup", help="pin the current dataset as a verified, restorable backup")
