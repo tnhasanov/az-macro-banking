@@ -15,6 +15,8 @@ import json
 import os
 from typing import Any
 
+from zoneinfo import ZoneInfo
+
 from .. import config
 from ..util.log import get_logger
 from . import params as PR
@@ -22,6 +24,12 @@ from . import params as PR
 log = get_logger("jobs.engine")
 
 PUB_TYPE = {k: v["publication_type"] for k, v in PR.REPORT_TYPES.items() if v.get("publication_type")}
+
+
+BAKU = ZoneInfo("Asia/Baku")
+
+#: Dataset states written after a source was read without error (see pipeline.process_document).
+SUCCESSFUL_CHECK = ("unchanged", "parsed", "stored")
 
 
 class Engine:
@@ -76,6 +84,37 @@ class Engine:
             return None
         return min(ends)[:7]
 
+    def information_date(self) -> str | None:
+        """The information cutoff an edition built now can honestly state.
+
+        The date (Asia/Baku) by which every monthly anchor had last been read successfully from its
+        source, never later than today. Not the generation date: a dataset restored from a snapshot,
+        or one whose sources have been failing, must not present itself as current. A check that
+        failed moves a dataset's last-checked time but not this: for such a dataset the last
+        document actually retrieved stands in, which can only understate it.
+        """
+        from ..util.periods import today_baku
+
+        anchors = [d for ds in (config.reports_config()["monthly"].get("anchors") or {}).values() for d in ds]
+        if not anchors:
+            return None
+        states = self.db.dataset_states()
+        dates = []
+        for dataset_id in anchors:
+            state = states.get(dataset_id)
+            when = state["last_checked_at"] if state is not None and state["status"] in SUCCESSFUL_CHECK else None
+            if not when:
+                row = self.db.conn.execute("SELECT max(retrieved_at) FROM documents WHERE dataset_id = ?",
+                                           (dataset_id,)).fetchone()
+                when = row[0] if row else None
+            if not when:
+                return None
+            moment = dt.datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=dt.timezone.utc)
+            dates.append(moment.astimezone(BAKU).date())
+        return min(min(dates), today_baku()).isoformat()
+
     def availability(self, today: dt.date) -> dict[str, Any]:
         """What the dashboard shows beside the Generate form: the period each report would cover.
 
@@ -99,6 +138,8 @@ class Engine:
                         for p in self.publications(rt)[-12:]][::-1]
         return {
             "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            # When the data was last read from its sources — not when this was computed.
+            "information_date": self.information_date(),
             "monthly": {"edition_month": self.banking_month(), "anchors": roles,
                         "note": "Banking tables, national accounts and prices are published on different "
                                 "calendars; an edition states the period of every input it uses."},
@@ -145,8 +186,8 @@ class Engine:
             from ..reports import generate_monthly
 
             narrative = settings.get("narrative") or {}
-            return generate_monthly(None, narrative.get("provider", "none") != "api", narrative.get("file") or None,
-                                    lang, force=force, db=self.db)
+            return generate_monthly(self.information_date(), narrative.get("provider", "none") != "api",
+                                    narrative.get("file") or None, lang, force=force, db=self.db)
         if report_type == "weekly":
             from ..render.weekly import generate_weekly
 
@@ -155,7 +196,7 @@ class Engine:
         if report_type == "sector":
             from ..render.sector import generate_sector
 
-            return generate_sector(None, request["sector"], lang, force=force, db=self.db)
+            return generate_sector(self.information_date(), request["sector"], lang, force=force, db=self.db)
         if report_type in PUB_TYPE:
             from ..reports import generate_brief
 

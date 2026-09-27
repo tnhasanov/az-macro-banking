@@ -13,7 +13,7 @@ The system is **not operational yet**: the real-cloud journey has not run end to
 | 2026-09-27 04:28 | Application-state migrations on the real Neon database | manual run [36294374181](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294374181), commit `be0195a` | applied 1–6, now version 6; no jobs, publications, email or recipients; no settings rows (automatic checks and email are off by default) |
 | 2026-09-27 04:29 | Building the dataset from the official websites on a runner | manual run [36294459892](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294459892), commit `cb2180b`, dry run | cancelled at the 60-minute limit: `www.cbar.az` and the statistics committee answered, every file on `uploads.cbar.az` timed out (90 s, four times each). Led to the per-host cut-off (`fd55dde`) |
 | 2026-09-27 05:30 | Preflight with the store token | manual run [36297069332](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297069332), commit `fd55dde`, dry run | Neon schema 6, nothing pending, no jobs, recipients or switches; Blob `read-write`, token belongs to `BLOB_STORE_ID`'s store, authenticated; **store empty** (no dataset, no report objects) |
-| 2026-09-27 05:33 | Seed the empty store from the official sources | manual run [36297517710](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297517710), commit `48177b3` | build finished in 20 min thanks to the cut-off: statistics committee and `www.cbar.az` publications collected (237 documents, 7,306 observations, 54 publications; SQLite integrity ok), every CBA table on `uploads.cbar.az` failed (21 datasets); **seeding refused** ("the build reported source errors; not seeding a partial dataset"); store still empty |
+| 2026-09-27 05:33 | Seed the empty store from the official sources | manual run [36297517710](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297517710), commit `48177b3` | build finished in 20 min thanks to the cut-off: statistics committee and `www.cbar.az` publications collected (237 documents, 7,306 observations, 54 publications; SQLite integrity ok), every CBA table on `uploads.cbar.az` failed to download (21 datasets); **seeding refused** ("the build reported source errors; not seeding a partial dataset"); store still empty |
 
 The isolated automatic-path event (`scripts/cloud/isolated_event.py`, below) was tried locally —
 local Postgres, a local copy of the production dataset, the live CBA website — on 2026-09-27
@@ -112,10 +112,31 @@ literal reporting period appears in code or configuration.
 
 ## Seeding
 
-**Blocked on 2026-09-27 by a CBA outage.** `uploads.cbar.az`, which serves every CBA statistical
-table, shares its address with `www.cbar.az` but answers HTTP 503 and does not complete TLS
-handshakes, from GitHub's runners and from the development environment alike, while the main site
-answers. The seed is retried automatically once it recovers.
+**CBA downloads failed from both tested environments on 2026-09-27.** `uploads.cbar.az`, which serves
+every CBA statistical table, did not complete TLS handshakes (and answered HTTP 503 over plain HTTP)
+from GitHub's runners and from the development environment, while `www.cbar.az`, at the same
+address, answered. There is no independent evidence of a general outage; what is known is that
+downloads failed from these two environments. A full backfill is not retried automatically.
+
+**Instead, the store is seeded from the validated local snapshot** — a bootstrap bundle in the store's
+own layout (`dataset/current.json` and the two archives it names), verified before it left the
+development machine and again by `publish seed --from-bundle` before anything is uploaded:
+
+| | |
+|---|---|
+| last successful source check | 2026-09-20 09:35 UTC (not freshly collected) |
+| CBA banking tables and deposits | to end-July 2026 — the monthly edition month is 2026-07 |
+| SSC prices and macro headline | to end-August 2026 |
+| SSC quarterly GDP | to Q1 2026 |
+| documents | 383, every one matching its recorded fingerprint (202 by SHA-256, 181 HTML pages by article fingerprint) |
+| observations, publications | 37,326; 95 |
+| SQLite | `integrity_check` ok on both databases; quality checks: 0 critical, 5 warnings outside the displayed window |
+| excluded | credentials, recipients (the delivery ledger is empty), logs, analytics, local snapshots |
+
+An edition built from it states its information cutoff as the date of the last successful
+collection (2026-09-20), not the day it was generated, and the Generate page shows the same date as
+*Last collected from the sources*. A successful live source refresh remains a separate, outstanding
+check.
 
 The dataset is not in git (about 34 MB of SQLite and 280 MB of downloaded source documents). The
 only built copy is on the development machine, which cannot reach the store, so if the store is

@@ -322,6 +322,8 @@ export async function meta<T>(key: string): Promise<T | null> {
 
 export interface Availability {
   computed_at: string;
+  /** The date by which every monthly source had last been read successfully (Asia/Baku). */
+  information_date?: string | null;
   monthly: { edition_month: string | null; anchors: Record<string, { datasets: string[]; period_end: string | null }>; note: string };
   sector: { edition_month: string | null; sectors: string[] };
   weekly: { latest_complete_week: { start: string; end: string } };

@@ -92,3 +92,35 @@ def test_no_period_is_pinned_anywhere_in_configuration_or_code():
                     and not any(a in line for a in allowed):
                 offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()[:100]}")
     assert offenders == [], "a literal period in code or configuration:\n" + "\n".join(offenders)
+
+
+# ------------------------------------------------------------------------ the stated information cutoff
+
+def _checked(engine, dataset_id, when, status="unchanged"):
+    engine.db.set_dataset_state(dataset_id, source_id=dataset_id.split("_")[0], last_checked_at=when, status=status)
+
+
+def test_the_cutoff_is_the_last_successful_collection_not_the_generation_date(engine):
+    """A snapshot collected on 20 September must not present itself as information to today."""
+    for d in ("cba_loans_by_institution", "cba_deposits", "ssc_macro_headline_html", "ssc_price_bulletin"):
+        _checked(engine, d, "2026-09-20T09:26:00+00:00")
+    _checked(engine, "ssc_price_bulletin", "2026-09-20T09:29:33+00:00")
+    assert engine.information_date() == "2026-09-20"
+
+
+def test_a_failed_check_does_not_move_the_cutoff(engine):
+    """CBA's files could not be downloaded: the check stamps its time, but nothing was collected."""
+    for d in ("cba_loans_by_institution", "cba_deposits", "ssc_macro_headline_html", "ssc_price_bulletin"):
+        _checked(engine, d, "2026-09-27T05:40:00+00:00")
+    engine.db.conn.execute(
+        "INSERT INTO documents(doc_id, source_id, dataset_id, document_url, sha256, retrieved_at, first_seen_at) "
+        "VALUES ('d', 'cba', 'cba_deposits', 'https://example.az/d.xlsx', 'x', '2026-09-18T22:06:47+00:00', "
+        "'2026-09-18T22:06:47+00:00')")
+    engine.db.conn.commit()
+    _checked(engine, "cba_deposits", "2026-09-27T05:40:00+00:00", status="fetch_failed")
+    assert engine.information_date() == "2026-09-19", "the last deposits file actually read, in Baku time"
+
+
+def test_no_cutoff_is_claimed_for_a_source_never_read(engine):
+    _checked(engine, "cba_deposits", "2026-09-20T09:26:00+00:00")
+    assert engine.information_date() is None

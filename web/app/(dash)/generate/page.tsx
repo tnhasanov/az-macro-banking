@@ -92,10 +92,12 @@ export default async function GeneratePage() {
 
           <div className="stack">
             <Card title="Data available now" note={availability
-              ? `As of the last run, ${sinceNow(availability.computed_at)}.` : "Not yet recorded by a run."}>
+              ? `Periods recorded by the last job, ${sinceNow(availability.computed_at)}.` : "Not yet recorded by a run."}>
               {availability ? (
                 <table className="data">
                   <tbody>
+                    <tr><td>Last collected from the sources<span className="sub">every monthly source read successfully by this date</span></td>
+                      <td className="num">{availability.information_date ?? "—"}</td></tr>
                     <tr><td>Monthly Monitor would cover</td><td className="num">{availability.monthly.edition_month ?? "—"}</td></tr>
                     {Object.entries(anchors).map(([role, a]) => (
                       <tr key={role}>
