@@ -13,6 +13,14 @@ The system is **not operational yet**: the real-cloud journey has not run end to
 | 2026-09-27 04:28 | Application-state migrations on the real Neon database | manual run [36294374181](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294374181), commit `be0195a` | applied 1–6, now version 6; no jobs, publications, email or recipients; no settings rows (automatic checks and email are off by default) |
 | 2026-09-27 04:29 | Building the dataset from the official websites on a runner | manual run [36294459892](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294459892), commit `cb2180b`, dry run | see "Seeding" below |
 
+The isolated automatic-path event (`scripts/cloud/isolated_event.py`, below) was tried locally —
+local Postgres, a local copy of the production dataset, the live CBA website — on 2026-09-27
+04:39–04:44 UTC. CBA's download host (`uploads.cbar.az`) did not complete a TLS handshake that
+morning (the main site answered), so the check was requeued as *sources unreachable* rather than
+failed, the correction step was skipped with that reason, and the production pointer was unchanged.
+The same trial found that a log line written after a job's working directory had been removed
+raised instead of being dropped; fixed in `6cf7a5c`.
+
 Nothing else has run against Vercel, Blob, Neon or Resend. In particular no report has been
 requested from a deployed dashboard, no runner has been dispatched by one, and no email has been
 sent.
@@ -161,10 +169,14 @@ database preflight and — with your connected Gmail — in your inbox):
    the job from *Jobs*. Download the PDF, PPTX and workbook. The email arrives with the PDF.
 3. The same request again: the identical-edition offer; no new edition and no email.
 4. Preflight with a new backup (fresh-runner restore of the dataset the run just saved).
-5. Automatic path, isolated: a synthetic release or correction is exercised only against a copy of
-   the dataset in a separate store prefix and a separate database, never the production archive;
-   the local end-to-end run (docs/e2e-report.md) did this; on the real services the first genuine
-   release after activation is the evidence.
+5. Automatic path, isolated (me): manual run, task `isolated-event`, unticked. The scheduler's own
+   source-check job on a runner, against the real database and store, with a copy of the
+   production dataset under `isolated/run-<id>/` in which the newest deposits month is withdrawn:
+   the live CBA file must publish a new edition, and a corrected copy of it a revision. Its jobs
+   and publications are environment `test`, never shown by the production dashboard; its
+   announcements are recorded as suppressed; the production pointer is compared before and after.
+   Needs the CBA download host to be answering. Email on the automatic path is then proven by the
+   first genuine release after activation (step 7), which goes to you alone.
 6. Preview isolation: on a Preview deployment, Settings shows *preview — never emails subscribers*
    and a test email is recorded `suppressed`.
 
