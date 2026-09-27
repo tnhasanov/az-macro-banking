@@ -162,6 +162,12 @@ def main() -> int:
         print(json.dumps(report, indent=2, default=str))
         return 0
 
+    # Logging is set up here, in the base data directory, before any job switches to a working
+    # directory of its own that is removed when the job ends (as the worker's own CLI does).
+    from azmonitor import config
+    from azmonitor.util.log import setup_logging
+
+    setup_logging(config.paths().logs_dir)
     conn = RM.connect()
     try:
         migrate(conn, applied_by="isolated-event")
@@ -180,7 +186,11 @@ def main() -> int:
     first = run_check(f"source_check:{args.prefix}:release", isolated)
     report["release"] = {**first, **describe([first["job_id"]])}
 
-    if args.correction:
+    released = any(p["cause"] == "new_data" for p in report["release"]["publications"])
+    if args.correction and not released:
+        report["correction"] = {"skipped": "the release did not publish, so there is nothing to correct",
+                                "release_job": report["release"]["worker"]}
+    elif args.correction:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "corrected.xlsx"
             fix = corrected_copy(isolated, out)
@@ -194,10 +204,9 @@ def main() -> int:
     report["production_pointer_unchanged"] = after == before
     report["isolated_objects"] = len(isolated.list(""))
     print(json.dumps(report, indent=2, default=str))
-    ok = report["production_pointer_unchanged"] and any(
-        p["cause"] == "new_data" for p in report["release"]["publications"])
+    ok = report["production_pointer_unchanged"] and released
     if args.correction:
-        ok = ok and any(p["cause"] == "revision" for p in report["correction"]["publications"])
+        ok = ok and any(p["cause"] == "revision" for p in report["correction"].get("publications", []))
     return 0 if ok else 1
 
 

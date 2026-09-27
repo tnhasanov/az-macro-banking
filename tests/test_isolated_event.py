@@ -59,3 +59,17 @@ def test_only_an_isolated_prefix_is_accepted():
     assert mod.PREFIX.match("isolated/run-123")
     for bad in ("", "dataset", "isolated/", "isolated/../x", "reports/x", "isolated/Run 1"):
         assert not mod.PREFIX.match(bad), bad
+
+
+def test_a_log_directory_removed_under_the_handler_never_breaks_a_run(tmp_path):
+    import logging
+
+    from azmonitor.util.log import JsonLineHandler
+
+    handler = JsonLineHandler(tmp_path / "work" / "logs" / "monitor.jsonl")
+    import shutil
+
+    shutil.rmtree(tmp_path / "work")
+    record = logging.LogRecord("azmonitor.test", logging.INFO, __file__, 1, "after the directory went", None, None)
+    handler.emit(record)                                    # recreated, not raised
+    assert "after the directory went" in (tmp_path / "work" / "logs" / "monitor.jsonl").read_text()
