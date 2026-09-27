@@ -139,6 +139,13 @@ def corrected_copy(store: OS.ObjectStore, out: Path) -> dict:
     return {"url": url, "period": latest, "cells_changed": changed}
 
 
+def use_overrides(where: Path, mapping: dict[str, str]) -> None:
+    """The fetcher's test hook names a JSON *file* of URL -> local file (ingest/fetch.py)."""
+    path = where / "overrides.json"
+    path.write_text(json.dumps(mapping), encoding="utf-8")
+    os.environ["AZMONITOR_FETCH_OVERRIDES"] = str(path)
+
+
 def run_check(slot: str, store: OS.ObjectStore) -> dict:
     from azmonitor.jobs.worker import Worker
 
@@ -236,7 +243,7 @@ def main() -> int:
     # not also pick up unrelated sources. The worker refuses this setting for production jobs.
     os.environ["AZMONITOR_REFRESH_DATASETS"] = DATASET
     if args.fixture:
-        os.environ["AZMONITOR_FETCH_OVERRIDES"] = json.dumps({u: fixture["file"] for u in fixture["urls"]})
+        use_overrides(fixture_dir, {u: fixture["file"] for u in fixture["urls"]})
     first = run_check(f"source_check:{args.prefix}:release", isolated)
     os.environ.pop("AZMONITOR_FETCH_OVERRIDES", None)
     report["release"] = {**first, **describe([first["job_id"]])}
@@ -249,7 +256,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "corrected.xlsx"
             fix = corrected_copy(isolated, out)
-            os.environ["AZMONITOR_FETCH_OVERRIDES"] = json.dumps({fix["url"]: str(out)})
+            use_overrides(Path(tmp), {fix["url"]: str(out)})
             second = run_check(f"source_check:{args.prefix}:correction", isolated)
             os.environ.pop("AZMONITOR_FETCH_OVERRIDES", None)
         report["correction"] = {"cells_changed": fix["cells_changed"], "period": fix["period"],

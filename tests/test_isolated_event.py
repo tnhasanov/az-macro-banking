@@ -71,3 +71,16 @@ def test_a_log_directory_removed_under_the_handler_never_breaks_a_run(tmp_path):
     record = logging.LogRecord("azmonitor.test", logging.INFO, __file__, 1, "after the directory went", None, None)
     handler.emit(record)                                    # recreated, not raised
     assert "after the directory went" in (tmp_path / "work" / "logs" / "monitor.jsonl").read_text()
+
+
+def test_the_override_hook_is_given_a_file_the_fetcher_reads(tmp_path, monkeypatch):
+    """The first real trial passed the mapping itself and the fetcher, which expects a file, went to
+    the network instead. The script and the fetcher must agree."""
+    from azmonitor.ingest.fetch import _override_for
+
+    fixture = tmp_path / "deposits.xlsx"
+    fixture.write_bytes(b"PK\x03\x04")
+    monkeypatch.setenv("AZMONITOR_FETCH_OVERRIDES", "")      # restored (removed) after the test
+    _script().use_overrides(tmp_path, {"https://uploads.cbar.az/assets/x.xlsx": str(fixture)})
+    assert _override_for("https://uploads.cbar.az/assets/x.xlsx") == fixture
+    assert _override_for("https://uploads.cbar.az/assets/other.xlsx") is None
