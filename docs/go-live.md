@@ -169,7 +169,7 @@ files above in one folder, from a PowerShell window:
 ```powershell
 git clone https://github.com/tnhasanov/az-macro-banking.git
 cd az-macro-banking
-git checkout <the commit named in the handover>
+git checkout 7c13b23
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\seed-from-bundle.ps1 -Downloads "$HOME\Downloads"
 ```
 
@@ -193,6 +193,15 @@ through Python, the Node helper and the SDK against a stand-in Blob service
 (`tools/blob/fake-store.mjs`), then restores the result and its backup on a clean directory. What it
 cannot rehearse is the real service and the 254 MB multipart upload; the real run is the first test
 of those from Windows.
+
+It passed on commit `7c13b23` (runs
+[36323604039](https://github.com/tnhasanov/az-macro-banking/actions/runs/36323604039) and
+[36323606130](https://github.com/tnhasanov/az-macro-banking/actions/runs/36323606130)) under Windows
+PowerShell 5.1.26100 with Python 3.14.7 (found through `py -3`) and Node 20.20.2. Getting there
+found and fixed three Windows defects that would otherwise have met you first: the local store
+listed keys with backslashes, `oidc-from-env-file.mjs` never recognised that it had been run, and
+the archive fingerprint spelled paths with backslashes, which would have made the first Linux run
+re-upload the 254 MB source archive.
 
 *On Linux or macOS*, rejoin and check the parts (`cat raw-*.part-0? > raw-….tar.gz`,
 `sha256sum -c`), lay the files out as `azmonitor-bootstrap/dataset/…`, and run, from the same
