@@ -15,8 +15,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { parseEnvFile, extract } from "./oidc-from-env-file.mjs";
+import { fileURLToPath } from "node:url";
 
-const SCRIPT = new URL("./oidc-from-env-file.mjs", import.meta.url).pathname;
+const SCRIPT = fileURLToPath(new URL("./oidc-from-env-file.mjs", import.meta.url));
 
 /** What the CLI actually writes: every value quoted, one per line. */
 const PULLED = [

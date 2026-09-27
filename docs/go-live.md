@@ -158,10 +158,45 @@ token's store matches `BLOB_STORE_ID`, authenticated; the store was empty).
 
 **2. You — seed the store from the bootstrap bundle, on your computer.** The development environment
 cannot reach Blob, and the bundle does not travel through the repository or any public artifact: it
-was handed to you privately (README-SEED.txt, SHA256SUMS, PARTS.SHA256SUMS, VERIFICATION.json,
-`current.json`, the state archive and the source-document archive in nine parts). Rejoin and check
-the parts, lay the files out as `azmonitor-bootstrap/dataset/…`, and run, from a checkout of
-`claude/vercel-deployment` with its Python and Node dependencies installed:
+was handed to you privately — `README-SEED.txt`, `SHA256SUMS`, `PARTS.SHA256SUMS`,
+`VERIFICATION.json`, `current.json`, `state-20260920T093543Z-snapshot.tar.gz` and
+`raw-20260920T093543Z-snapshot.tar.gz.part-00` … `part-08`.
+
+*On Windows* — no WSL: the seed runs natively. It needs Git, 64-bit Python 3.11 or later (3.12
+recommended) and Node 20 or later, and runs in Windows PowerShell 5.1 or PowerShell 7. With the
+files above in one folder, from a PowerShell window:
+
+```powershell
+git clone https://github.com/tnhasanov/az-macro-banking.git
+cd az-macro-banking
+git checkout <the commit named in the handover>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\seed-from-bundle.ps1 -Downloads "$HOME\Downloads"
+```
+
+`scripts/windows/seed-from-bundle.ps1` checks the three tools' versions; checks each part against
+`PARTS.SHA256SUMS` and joins `part-00` to `part-08` in that order; lays the bundle out in a temporary
+folder and checks it against `SHA256SUMS`; creates `.venv` and installs this checkout into it
+(`pip install -e ".[cloud]"`) and the Blob helper from its lockfile (`npm ci --omit=dev`); asks for
+the store's token at a hidden prompt; and runs `publish seed --from-bundle`, which verifies every
+digest and SQLite's integrity, refuses a store that already holds a dataset, uploads, reads back
+what arrived, and records a backup that it restores once more. Exit 0 is done; 4 means the store
+already held a dataset and nothing was uploaded; anything else stopped before or without changing
+the store unless its JSON says `"seeded": true`. `-ExecutionPolicy Bypass` applies to that one
+process and changes no setting on the machine. The token is typed, not pasted into a command: it
+is not echoed, is not in PowerShell's history (which records command lines, not prompt input), is
+never written to disk, and exists only in that process's environment until the script removes it.
+
+The `windows-seed` job in `checks.yml` rehearses this on a Windows runner under Windows PowerShell
+5.1 on every push, with a stand-in bundle carrying the same file names: it seeds once, refuses a
+second seed, refuses a damaged part before installing anything, and runs the post-prompt command
+through Python, the Node helper and the SDK against a stand-in Blob service
+(`tools/blob/fake-store.mjs`), then restores the result and its backup on a clean directory. What it
+cannot rehearse is the real service and the 254 MB multipart upload; the real run is the first test
+of those from Windows.
+
+*On Linux or macOS*, rejoin and check the parts (`cat raw-*.part-0? > raw-….tar.gz`,
+`sha256sum -c`), lay the files out as `azmonitor-bootstrap/dataset/…`, and run, from the same
+checkout with its Python and Node dependencies installed:
 
 ```
 read -rs BLOB_READ_WRITE_TOKEN && export BLOB_READ_WRITE_TOKEN   # the store's token, typed locally only
@@ -169,8 +204,7 @@ export AZMONITOR_BLOB_AUTH=read-write AZMONITOR_PROFILE=neutral
 python -m azmonitor.cloud.publish seed --from-bundle /path/to/azmonitor-bootstrap
 ```
 
-The last JSON it prints must show `"seeded": true` and `"backup_restores_intact": true`. It refuses a
-store that already holds a dataset and a bundle whose digests or SQLite integrity do not check out.
+Either way, the last JSON it prints must show `"seeded": true` and `"backup_restores_intact": true`.
 Then I run `preflight` unticked on a runner: a fresh-runner restore of what is now in the store, and
 a second verified backup.
 

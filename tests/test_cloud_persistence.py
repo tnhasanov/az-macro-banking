@@ -480,6 +480,21 @@ def test_a_restored_dataset_fingerprints_the_same_as_the_one_that_was_saved(tmp_
     assert again["static_reused"] is True
 
 
+def test_the_fingerprint_spells_paths_the_same_on_every_platform(tmp_path):
+    """The bootstrap is uploaded from Windows and restored on Linux. A fingerprint built from
+    `raw\\x.xlsx` would never match one built from `raw/x.xlsx`, and the first Linux run would
+    re-upload the whole raw archive."""
+    import hashlib
+
+    data = _dataset_on_disk(tmp_path / "data")
+    lines = []
+    for entry in sorted((data / "raw").rglob("*")):
+        st = entry.stat()
+        lines.append(f"raw/{entry.relative_to(data / 'raw').as_posix()}|{st.st_size}|{int(st.st_mtime)}\n")
+    expected = hashlib.sha256("".join(lines).encode()).hexdigest()
+    assert OS._tree_fingerprint([data / p for p in OS.STATIC_PARTS], data) == expected
+
+
 def test_retention_never_removes_an_object_a_pointer_still_names(tmp_path):
     """A reused raw archive looks old. Deleting it would break every restore afterwards."""
     store = OS.LocalObjectStore(tmp_path / "bucket")

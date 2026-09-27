@@ -17,6 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MockAgent, setGlobalDispatcher } from "undici";
+import { fileURLToPath } from "node:url";
 
 const TOKEN = "vercel_blob_rw_teststore_conformanceonly";
 const STORE_ID = TOKEN.split("_")[3];
@@ -377,7 +378,7 @@ test("a token for another store is refused before any request, and nothing secre
   const env = { ...process.env, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_otherstore_s3cr3t",
                 BLOB_STORE_ID: `store_${STORE_ID}` };
   delete env.VERCEL_OIDC_TOKEN;
-  const run = spawnSync(process.execPath, [new URL("./blob.mjs", import.meta.url).pathname, "check"],
+  const run = spawnSync(process.execPath, [fileURLToPath(new URL("./blob.mjs", import.meta.url)), "check"],
                         { env, encoding: "utf8" });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /different store/);
@@ -389,7 +390,7 @@ test("a required mode is enforced rather than fallen back from", async () => {
   const env = { ...process.env, AZMONITOR_BLOB_AUTH: "read-write", VERCEL_OIDC_TOKEN: unexpiredJwt(),
                 BLOB_STORE_ID: STORE_ID };
   delete env.BLOB_READ_WRITE_TOKEN;
-  const run = spawnSync(process.execPath, [new URL("./blob.mjs", import.meta.url).pathname, "check"],
+  const run = spawnSync(process.execPath, [fileURLToPath(new URL("./blob.mjs", import.meta.url)), "check"],
                         { env, encoding: "utf8" });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /AZMONITOR_BLOB_AUTH=read-write/);

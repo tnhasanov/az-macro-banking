@@ -17,11 +17,12 @@ import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 /** undici resolved from here, because the preload below lives in a temp directory. */
 const UNDICI = import.meta.resolve("undici");
 
 const run = promisify(execFile);
-const SCRIPT = new URL("./vercel-oidc.mjs", import.meta.url).pathname;
+const SCRIPT = fileURLToPath(new URL("./vercel-oidc.mjs", import.meta.url));
 const PROJECT = "prj_TestProject";
 const TEAM = "team_TestTeam";
 const TOKEN = "vercel_access_token_for_tests";

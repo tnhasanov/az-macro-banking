@@ -132,6 +132,35 @@ class ObjectStore:
         return None
 
 
+def _lock_file(fh) -> None:
+    """An exclusive lock on an open file, on POSIX and on Windows."""
+    if os.name == "nt":
+        import msvcrt
+
+        fh.seek(0)
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:          # LK_LOCK gives up after ten seconds; keep waiting
+                continue
+    import fcntl
+
+    fcntl.flock(fh, fcntl.LOCK_EX)
+
+
+def _unlock_file(fh) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 class LocalObjectStore(ObjectStore):
     """A directory pretending to be a bucket.
 
@@ -172,16 +201,14 @@ class LocalObjectStore(ObjectStore):
         return (data, self._etag(data)) if data is not None else (None, None)
 
     def put_if(self, key, data, *, expected, content_type="application/octet-stream"):
-        import fcntl
-
         p = self._path(key)
         p.parent.mkdir(parents=True, exist_ok=True)
         # The lock lives beside the store, not in it, so listings never show it. Workers on one
         # machine are separate processes, so it has to be a file lock.
         locks = self.root.parent / f".{self.root.name}.locks"
         locks.mkdir(parents=True, exist_ok=True)
-        with open(locks / hashlib.sha1(key.encode()).hexdigest(), "a") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+        with open(locks / hashlib.sha1(key.encode()).hexdigest(), "a+b") as fh:
+            _lock_file(fh)
             try:
                 current = p.read_bytes() if p.exists() else None
                 if expected is None and current is not None:
@@ -192,7 +219,7 @@ class LocalObjectStore(ObjectStore):
                 staged.write_bytes(data)
                 staged.replace(p)
             finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                _unlock_file(fh)
         return {"key": key, "size": len(data), "etag": self._etag(data)}
 
     def exists(self, key):
@@ -396,8 +423,13 @@ class VercelBlobStore(ObjectStore):
             # paragraph, and truncating it leaves the symptom without the fix.
             raise StorageError(
                 f"blob {' '.join(argv)} failed ({proc.returncode}): {proc.stderr.strip()[:2000]}")
+        # Every command prints one JSON object when it succeeds. Silence with exit 0 is a helper that
+        # ran nothing — it decided it had been imported rather than run — and must not read as an
+        # upload that worked.
+        if not proc.stdout.strip():
+            raise StorageError(f"blob {argv[0]} printed nothing; the helper did not run the command")
         try:
-            return 0, json.loads(proc.stdout or "{}")
+            return 0, json.loads(proc.stdout)
         except ValueError as exc:
             raise StorageError(f"blob {argv[0]} returned output that is not JSON") from exc
 
@@ -408,7 +440,7 @@ class VercelBlobStore(ObjectStore):
     # ------------------------------------------------------------------ operations
     def put(self, key, data, *, content_type="application/octet-stream", overwrite=False):
         full = self._key(key)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             staged = Path(tmp) / "payload"
             staged.write_bytes(data)
             return self.put_file(key, staged, content_type=content_type, overwrite=overwrite)
@@ -436,14 +468,14 @@ class VercelBlobStore(ObjectStore):
                 "sha256": digest.hexdigest()}
 
     def get(self, key):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             dest = Path(tmp) / "payload"
             if not self.get_file(key, dest):
                 return None
             return dest.read_bytes()
 
     def get_versioned(self, key):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             dest = Path(tmp) / "payload"
             code, meta = self._run("get", "--key", self._key(key), "--out", str(dest))
             if code != 0:
@@ -452,7 +484,7 @@ class VercelBlobStore(ObjectStore):
 
     def put_if(self, key, data, *, expected, content_type="application/octet-stream"):
         full = self._key(key)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             staged = Path(tmp) / "payload"
             staged.write_bytes(data)
             argv = ["put", "--key", full, "--file", str(staged), "--content-type", content_type]
@@ -563,7 +595,10 @@ def _tree_fingerprint(paths: Iterable[Path], base: Path) -> str:
             if not entry.is_file():
                 continue
             stat = entry.stat()
-            digest.update(f"{entry.relative_to(base)}|{stat.st_size}|{int(stat.st_mtime)}\n".encode())
+            # Forward slashes whatever the platform: a dataset seeded from Windows must fingerprint
+            # the same on the Linux worker that restores it, or its raw archive is re-uploaded.
+            digest.update(f"{entry.relative_to(base).as_posix()}|{stat.st_size}|{int(stat.st_mtime)}\n"
+                          .encode())
     return digest.hexdigest()
 
 
@@ -663,7 +698,7 @@ def save_dataset(data_dir: Path, store: ObjectStore | None = None, *, stamp: str
     reuse_static = bool(reused.get("fingerprint") == static_fingerprint and reused.get("key")
                         and store.exists(reused["key"]))
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp = Path(tmp)
         mutable_key = f"dataset/state-{stamp}.tar.gz"
         mutable_archive = tmp / "mutable.tar.gz"
@@ -766,7 +801,7 @@ def restore_dataset(data_dir: Path, store: ObjectStore | None = None) -> dict[st
               else [{"key": pointer["key"], "sha256": pointer["sha256"]}])
 
     total = 0
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         for piece in pieces:
             archive = Path(tmp) / f"{Path(piece['key']).name}"
             if not store.get_file(piece["key"], archive):
@@ -837,7 +872,7 @@ def backup_dataset(store: ObjectStore | None = None, *, label: str | None = None
     raw, etag = store.get_versioned(POINTER_KEY)
     if not raw:
         raise StorageError("there is no dataset in the store to back up")
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         restored = restore_dataset(Path(tmp) / "data", store)
         if restored.get("pointer_etag") != etag:
             raise Conflict("the dataset changed while it was being backed up; run the backup again")
@@ -864,7 +899,7 @@ def restore_backup(key: str, data_dir: Path, store: ObjectStore | None = None) -
     if not raw:
         raise StorageError(f"no backup at {key}")
     record = json.loads(raw)
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         scratch = LocalObjectStore(Path(tmp) / "pointer-only")
         scratch.put(POINTER_KEY, json.dumps(record["pointer"]).encode(), overwrite=True)
 

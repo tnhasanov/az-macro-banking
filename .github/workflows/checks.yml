@@ -223,3 +223,122 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npx next build
+
+  windows-seed:
+    # The bootstrap upload is run by hand on the owner's Windows machine, so the procedure is
+    # rehearsed on one, under Windows PowerShell 5.1, against a stand-in bundle carrying the real
+    # bundle's exact file names (scripts/windows/rehearsal_bundle.py; the real dataset is never
+    # committed or published). The script seeds a local store once and refuses the second time; a
+    # damaged part is refused before anything is installed; and the command the script runs after
+    # its token prompt is run with the rehearsal token — Python starting Node, the helper, the SDK
+    # building every request — against tools/blob/fake-store.mjs, then restored on a clean
+    # directory. That last is this machine's side only; it proves nothing about Vercel.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    env:
+      VERCEL_BLOB_RETRIES: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: What this runner has
+        run: |
+          "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+          git --version
+          py -3 --version
+          python --version
+          node --version
+
+      - name: The Blob helper's tests, on Windows
+        working-directory: tools/blob
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+          node --test conformance.test.mjs oidc-from-env-file.test.mjs vercel-oidc.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "the Blob helper's tests failed on Windows" }
+
+      - name: The storage tests, on Windows
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e ".[dev,cloud]"
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+          python -m pytest -q tests/test_cloud_persistence.py
+          if ($LASTEXITCODE -ne 0) { throw "the storage tests failed on Windows" }
+
+      - name: A stand-in bundle under the real file names
+        run: |
+          python scripts\windows\rehearsal_bundle.py "$env:RUNNER_TEMP\downloads"
+          if ($LASTEXITCODE -ne 0) { throw "could not build the stand-in bundle" }
+
+      - name: The script seeds an empty store, then refuses to seed it again
+        run: |
+          $store = "$env:RUNNER_TEMP\store"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\seed-from-bundle.ps1 -Downloads "$env:RUNNER_TEMP\downloads" -RehearsalStoreDir $store
+          if ($LASTEXITCODE -ne 0) { throw "the first seed exited $LASTEXITCODE; expected 0" }
+          if (-not (Test-Path "$store\dataset\current.json")) { throw "the store holds no dataset pointer" }
+          if (-not (Get-ChildItem "$store\dataset\backups\*-bootstrap.json")) { throw "no bootstrap backup was recorded" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\seed-from-bundle.ps1 -Downloads "$env:RUNNER_TEMP\downloads" -RehearsalStoreDir $store
+          if ($LASTEXITCODE -ne 4) { throw "the second seed exited $LASTEXITCODE; expected 4 (already holds a dataset)" }
+          exit 0
+
+      - name: A damaged part is refused before anything is installed or written
+        run: |
+          $bad = "$env:RUNNER_TEMP\downloads-damaged"
+          Copy-Item "$env:RUNNER_TEMP\downloads" $bad -Recurse
+          $part = "$bad\raw-20260920T093543Z-snapshot.tar.gz.part-04"
+          $bytes = [System.IO.File]::ReadAllBytes($part)
+          $bytes[1000] = $bytes[1000] -bxor 0xFF
+          [System.IO.File]::WriteAllBytes($part, $bytes)
+          $store = "$env:RUNNER_TEMP\store-untouched"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\seed-from-bundle.ps1 -Downloads $bad -RehearsalStoreDir $store
+          if ($LASTEXITCODE -ne 1) { throw "a damaged part exited $LASTEXITCODE; expected 1" }
+          if (Test-Path $store) { throw "the store was created despite a damaged part" }
+          exit 0
+
+      - name: The token prompt's conversion and check
+        run: |
+          # The prompt itself needs a keyboard; what follows it is what can go wrong on 5.1.
+          $secure = ConvertTo-SecureString "vercel_blob_rw_rehearsal_windowsci" -AsPlainText -Force
+          $plain = [System.Net.NetworkCredential]::new("", $secure).Password
+          if ($plain -ne "vercel_blob_rw_rehearsal_windowsci") { throw "SecureString conversion changed the value" }
+          if ($plain -notmatch '^vercel_blob_rw_[A-Za-z0-9]+_[A-Za-z0-9]+$') { throw "the token check rejects a valid shape" }
+          if ("not-a-token" -match '^vercel_blob_rw_[A-Za-z0-9]+_[A-Za-z0-9]+$') { throw "the token check accepts anything" }
+
+      - name: The upload path end to end, against the stand-in Blob service
+        env:
+          AZMONITOR_FAKE_BLOB_DIR: ${{ runner.temp }}\fake-blob
+        run: |
+          # Exactly what the script runs after its prompt, with the rehearsal token, from the .venv
+          # the script created. The seeded local store is itself a bundle in the same layout.
+          $env:NODE_OPTIONS = "--import=" + ([System.Uri](Resolve-Path .\tools\blob\fake-store.mjs).Path).AbsoluteUri
+          $env:BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_rehearsal_windowsci"
+          $env:AZMONITOR_BLOB_AUTH = "read-write"
+          $env:AZMONITOR_PROFILE = "neutral"
+          $py = ".\.venv\Scripts\python.exe"
+          & $py -m azmonitor.cloud.publish seed --from-bundle "$env:RUNNER_TEMP\store"
+          if ($LASTEXITCODE -ne 0) { throw "the seed through the helper exited $LASTEXITCODE; expected 0" }
+          & $py -m azmonitor.cloud.publish seed --from-bundle "$env:RUNNER_TEMP\store"
+          if ($LASTEXITCODE -ne 4) { throw "the second seed through the helper exited $LASTEXITCODE; expected 4" }
+
+          # A clean directory restores what arrived, and the recorded backup restores intact.
+          $env:AZMONITOR_DATA_DIR = "$env:RUNNER_TEMP\fresh-restore"
+          & $py -m azmonitor.cloud.publish restore
+          if ($LASTEXITCODE -ne 0) { throw "a fresh restore from the stand-in service failed" }
+          if (-not (Test-Path "$env:RUNNER_TEMP\fresh-restore\monitor.sqlite")) { throw "the restore produced no database" }
+          $backup = Get-ChildItem "$env:AZMONITOR_FAKE_BLOB_DIR\objects" |
+            Where-Object { $_.Name -like "dataset%2Fbackups%2F*-bootstrap.json" } | Select-Object -First 1
+          if (-not $backup) { throw "no bootstrap backup reached the stand-in service" }
+          & $py -m azmonitor.cloud.publish backup --verify ([uri]::UnescapeDataString($backup.Name))
+          if ($LASTEXITCODE -ne 0) { throw "the bootstrap backup did not restore intact" }
+          exit 0

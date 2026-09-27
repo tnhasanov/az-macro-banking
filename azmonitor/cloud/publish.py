@@ -529,7 +529,7 @@ def _seed_from_bundle(args) -> int:
     bundle = Path(args.from_bundle)
     if not (bundle / OS.POINTER_KEY).is_file():
         return _out({"seeded": False, "error": f"{bundle} holds no {OS.POINTER_KEY}; it is not a bundle"}, 2)
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         work = Path(tmp) / "data"
         try:
             OS.restore_dataset(work, OS.LocalObjectStore(bundle))
@@ -638,7 +638,7 @@ def cmd_backup(args) -> int:
     """Pin the current dataset as a verified backup; with --verify, restore one and check it."""
     try:
         if args.verify:
-            with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
                 result = OS.restore_backup(args.verify, Path(tmp) / "data")
             result["ok"] = bool(result["verification"]["ok"])
         else:
