@@ -265,10 +265,13 @@ jobs:
         if: ${{ !inputs.seed && inputs.task == 'isolated-event' }}
         run: |
           prefix="isolated/run-${{ github.run_id }}"
+          # --fixture: the release is the snapshot's own deposits file served for the URL CBA's page
+          # lists today, so the automatic path is proven while CBA's downloads fail from runners. A
+          # successful live download is a separate check (run the script without --fixture).
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python scripts/cloud/isolated_event.py --prefix "$prefix" --plan
           else
-            python scripts/cloud/isolated_event.py --prefix "$prefix" --correction
+            python scripts/cloud/isolated_event.py --prefix "$prefix" --fixture --correction
           fi
 
       - name: "Preflight: what the store holds"

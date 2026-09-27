@@ -1,12 +1,18 @@
 """A controlled publication through the automatic path, on the real services, kept apart from production.
 
-    python scripts/cloud/isolated_event.py --prefix isolated/<name> [--correction] [--plan]
+    python scripts/cloud/isolated_event.py --prefix isolated/<name> [--fixture] [--correction] [--plan]
 
 It runs the same source-check job the scheduler starts — a real runner, the real Neon database, the
 real private Blob store, the live CBA website — against a *copy* of the production dataset with the
 latest deposits month withdrawn, so the live deposits file is a genuine new release to it. With
 `--correction` a second check then sees a corrected copy of that file (three cells changed), which
 must become a revised edition. `--plan` checks the preconditions and writes nothing.
+
+`--fixture` serves the release from a fixture instead of CBA's download host: the snapshot's own
+deposits file, fetched by the job at whatever URL CBA's page lists today (discovery itself is live).
+Everything after the download — classification, planning, production, validation, publication,
+announcement — runs exactly as in the scheduler's job. A successful live download is a separate
+check; this proves the automatic path, not the source.
 
 What keeps it apart from production:
 
@@ -64,6 +70,45 @@ def withdraw_latest_month(data_dir: Path) -> dict:
     finally:
         conn.close()
     return {"withdrawn_period": latest, "observations_removed": removed, "now_latest": previous}
+
+
+def fixture_for_release(data_dir: Path, out: Path) -> dict:
+    """The snapshot's newest deposits file, and the URLs a check today would fetch it from.
+
+    Discovery runs against CBA's live page (which answers), on a scratch copy, so the override is
+    keyed on the URL the job will actually request. The snapshot's own URL is included too.
+    """
+    import shutil
+
+    from azmonitor import config
+    from azmonitor.pipeline import Pipeline
+
+    conn = sqlite3.connect(data_dir / "monitor.sqlite")
+    url, stored = conn.execute(
+        "SELECT document_url, stored_path FROM documents WHERE dataset_id = ? AND status = 'parsed' "
+        "ORDER BY retrieved_at DESC LIMIT 1", (DATASET,)).fetchone()
+    conn.close()
+    shutil.copy2(data_dir / stored, out)
+    sources = [sid for sid, scfg in config.sources().get("sources", {}).items() if DATASET in str(scfg)]
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Path(tmp) / "data"
+        scratch.mkdir()
+        shutil.copy2(data_dir / "monitor.sqlite", scratch / "monitor.sqlite")
+        saved = os.environ.get("AZMONITOR_DATA_DIR")
+        os.environ["AZMONITOR_DATA_DIR"] = str(scratch)
+        try:
+            pipe = Pipeline()
+            try:
+                found = [d.document_url for d in pipe.discover(sources) if d.dataset_id == DATASET]
+            finally:
+                pipe.db.close()
+        finally:
+            if saved is None:
+                os.environ.pop("AZMONITOR_DATA_DIR", None)
+            else:
+                os.environ["AZMONITOR_DATA_DIR"] = saved
+    urls = sorted(set(found) | {url})
+    return {"urls": urls, "file": str(out), "discovered": found}
 
 
 def corrected_copy(store: OS.ObjectStore, out: Path) -> dict:
@@ -138,6 +183,8 @@ def main() -> int:
     ap.add_argument("--prefix", required=True, help="isolated/<lower-case-name>")
     ap.add_argument("--correction", action="store_true", help="then publish a corrected copy as a revision")
     ap.add_argument("--plan", action="store_true", help="check the preconditions; write nothing")
+    ap.add_argument("--fixture", action="store_true",
+                    help="serve the release from the snapshot's own deposits file, not CBA's download host")
     args = ap.parse_args()
     if not PREFIX.match(args.prefix):
         raise SystemExit("--prefix must look like isolated/<lower-case-name>")
@@ -174,16 +221,24 @@ def main() -> int:
     finally:
         conn.close()
 
+    fixture_dir = Path(tempfile.mkdtemp(prefix="isolated-fixture-"))
     with tempfile.TemporaryDirectory() as tmp:
         seed = Path(tmp) / "seed"
         OS.restore_dataset(seed, production)
+        if args.fixture:
+            fixture = fixture_for_release(seed, fixture_dir / "cba_deposits.xlsx")
+            report["fixture"] = {"served_for": len(fixture["urls"]), "discovered_live": len(fixture["discovered"]),
+                                 "live_source_refresh": "not exercised by this run"}
         report["seed"] = withdraw_latest_month(seed)
         OS.save_dataset(seed, isolated, based_on=None)
 
     # Only the deposits source is fetched: the event under test is its release, and the check must
     # not also pick up unrelated sources. The worker refuses this setting for production jobs.
     os.environ["AZMONITOR_REFRESH_DATASETS"] = DATASET
+    if args.fixture:
+        os.environ["AZMONITOR_FETCH_OVERRIDES"] = json.dumps({u: fixture["file"] for u in fixture["urls"]})
     first = run_check(f"source_check:{args.prefix}:release", isolated)
+    os.environ.pop("AZMONITOR_FETCH_OVERRIDES", None)
     report["release"] = {**first, **describe([first["job_id"]])}
 
     released = any(p["cause"] == "new_data" for p in report["release"]["publications"])

@@ -146,20 +146,26 @@ no dataset** and the build reported no source errors, then pins a verified backu
 
 ## The steps, in order
 
-**1. You — create the store token as a GitHub secret.** Do not paste it anywhere else, including
-this chat.
-1. Vercel → **Storage** → the Blob store this project uses → the **.env.local** tab (or
-   *Quickstart*) → reveal `BLOB_READ_WRITE_TOKEN` and copy its value.
-2. GitHub → this repository → **Settings → Secrets and variables → Actions → New repository
-   secret** → Name `BLOB_READ_WRITE_TOKEN` → paste → **Add secret**.
+**1. Done — the store token is a GitHub secret** (verified by run 36297069332: `read-write`, the
+token's store matches `BLOB_STORE_ID`, authenticated; the store was empty).
 
-If the store page shows no read-write token, say so and we will use the other route (adding
-Development to the store's project connection, which is your decision).
+**2. You — seed the store from the bootstrap bundle, on your computer.** The development environment
+cannot reach Blob, and the bundle does not travel through the repository or any public artifact: it
+was handed to you privately (README-SEED.txt, SHA256SUMS, PARTS.SHA256SUMS, VERIFICATION.json,
+`current.json`, the state archive and the source-document archive in nine parts). Rejoin and check
+the parts, lay the files out as `azmonitor-bootstrap/dataset/…`, and run, from a checkout of
+`claude/vercel-deployment` with its Python and Node dependencies installed:
 
-**2. Me — prove it, then back up or seed.** Manual run, task `preflight`, dry run: the log must show
-`"credential": "read-write token"`, `"token_store_matches_blob_store_id": true` and what the store
-holds. Then, if it holds a dataset, `preflight` unticked (verified backup); if it is empty,
-`seed-from-sources` unticked (build, seed, verified backup).
+```
+read -rs BLOB_READ_WRITE_TOKEN && export BLOB_READ_WRITE_TOKEN   # the store's token, typed locally only
+export AZMONITOR_BLOB_AUTH=read-write AZMONITOR_PROFILE=neutral
+python -m azmonitor.cloud.publish seed --from-bundle /path/to/azmonitor-bootstrap
+```
+
+The last JSON it prints must show `"seeded": true` and `"backup_restores_intact": true`. It refuses a
+store that already holds a dataset and a bundle whose digests or SQLite integrity do not check out.
+Then I run `preflight` unticked on a runner: a fresh-runner restore of what is now in the store, and
+a second verified backup.
 
 **3. You — merge PR #5** (registers `report-job.yml` on `main`; starts nothing).
 
@@ -204,7 +210,9 @@ database preflight and — with your connected Gmail — in your inbox):
    the live CBA file must publish a new edition, and a corrected copy of it a revision. Its jobs
    and publications are environment `test`, never shown by the production dashboard; its
    announcements are recorded as suppressed; the production pointer is compared before and after.
-   Needs the CBA download host to be answering. Email on the automatic path is then proven by the
+   The release is served from a fixture — the snapshot's own deposits file, at the URL CBA's page
+   lists that day (`--fixture`) — so it does not depend on CBA's download host; a successful live
+   download remains a separate, outstanding check. Email on the automatic path is then proven by the
    first genuine release after activation (step 7), which goes to you alone.
 6. Preview isolation: on a Preview deployment, Settings shows *preview — never emails subscribers*
    and a test email is recorded `suppressed`.
