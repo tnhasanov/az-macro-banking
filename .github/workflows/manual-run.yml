@@ -30,7 +30,7 @@ on:
         description: "Which task to run"
         required: true
         type: choice
-        options: [preflight, source-check, weekly-digest, monitor]
+        options: [preflight, seed-from-sources, source-check, weekly-digest, monitor]
         default: source-check
       dry_run:
         description: "Decide everything, produce and send nothing"
@@ -171,6 +171,34 @@ jobs:
             python -m azmonitor.appstate preflight
           fi
 
+      - name: "Seed from sources: build the dataset from the official websites"
+        # For a store that has never held a dataset. Downloads and parses the full history
+        # (settings.history_start onward) exactly as a local backfill does, on this empty runner.
+        # Public sources only; nothing is written anywhere by this step.
+        if: inputs.task == 'seed-from-sources'
+        id: build
+        run: |
+          set +e
+          python -m azmonitor.cli backfill > "$RUNNER_TEMP/backfill.json"
+          code=$?
+          set -e
+          python - <<'PY'
+          import json, os
+          text = open(os.path.join(os.environ["RUNNER_TEMP"], "backfill.json")).read()
+          start = text.find("{")
+          summary = json.loads(text[start:]) if start >= 0 else {}
+          bad = {k: v.get("errors") for k, v in summary.items() if v.get("errors")}
+          print(json.dumps({"datasets": len(summary), "with_errors": bad}, indent=2)[:6000])
+          PY
+          echo "backfill_exit=$code" >> "$GITHUB_OUTPUT"
+          python -m azmonitor.cli validate || true
+          python - <<'PY'
+          import json
+          from azmonitor import config
+          from azmonitor.cloud import objectstore as OS
+          print(json.dumps(OS.verify_restored(config.paths().data_dir), indent=2, default=str)[:4000])
+          PY
+
       - name: Choose the Blob credential explicitly
         # A configured store token is used, and required; the SDK on its own would prefer any OIDC
         # token it found. The client refuses a token that belongs to another store than
@@ -209,6 +237,24 @@ jobs:
         if: inputs.seed
         run: python -m azmonitor.cloud.publish seed --check
 
+      - name: "Seed from sources: seed an empty store, then pin a verified backup"
+        # Refuses a store that already holds a dataset (seed's own check), refuses a build that
+        # reported source errors, and on a dry run only reports what it would upload.
+        if: ${{ !inputs.seed && inputs.task == 'seed-from-sources' }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python -m azmonitor.cloud.publish seed --check
+            exit 0
+          fi
+          if [ "${{ steps.build.outputs.backfill_exit }}" != "0" ]; then
+            echo "::error::the build reported source errors (above); not seeding a partial dataset"
+            exit 1
+          fi
+          python -m azmonitor.cloud.publish seed
+          python -m azmonitor.cloud.publish backup --label seeded | tee "$RUNNER_TEMP/backup.json"
+          key=$(python -c "import json,os; print(json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'backup.json')))['key'])")
+          python -m azmonitor.cloud.publish backup --verify "$key"
+
       - name: "Preflight: what the store holds"
         if: ${{ !inputs.seed && inputs.task == 'preflight' }}
         run: python -m azmonitor.cloud.publish status
@@ -226,7 +272,7 @@ jobs:
           python -m azmonitor.cloud.publish backup --verify "$key"
 
       - name: Take the run lease
-        if: ${{ !inputs.seed && inputs.task != 'preflight' }}
+        if: ${{ !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
         id: lease
         run: |
           python - <<'PY'
@@ -301,11 +347,11 @@ jobs:
           PY
 
       - name: What the store and the read model now hold
-        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
         run: python -m azmonitor.cloud.publish status || true
 
       - name: Fail the job if the run failed
-        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' }}
+        if: ${{ always() && !inputs.seed && inputs.task != 'preflight' && inputs.task != 'seed-from-sources' }}
         run: |
           if [ "${{ steps.lease.outcome }}" != "success" ]; then
             echo "another run holds the lease; nothing to do"; exit 0
