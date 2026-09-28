@@ -1,0 +1,23 @@
+# Accepted data-quality exceptions.
+#
+# A critical check failure blocks publication (see azmonitor/reports.py). An entry here is the only
+# way to publish anyway, and it is deliberately laborious: it must name the check, the exact periods
+# it covers, why the discrepancy is acceptable, what evidence was examined, what the impact on the
+# report is, who accepted it and when it is reviewed again. A failure on any period not listed here
+# still blocks.
+#
+# A failure confined to periods the edition does not display is a warning, not a critical failure,
+# and needs no exception: it is reported in the appendix and in docs/quality_exceptions.md.
+#
+# Example of the required shape:
+#
+# exceptions:
+#   - check_id: components_sum:cba_deposits
+#     periods: ["2015-12-31", "2016-01-31"]
+#     reason: "the published total and the published components disagree in the source file"
+#     evidence: "CBA table 2.11, rows for those months; recomputed from the stored workbook"
+#     impact: "no figure in the current edition depends on these months"
+#     decided_by: "unassigned"
+#     review_by: "2027-01-31"
+
+exceptions: []

@@ -1,0 +1,15 @@
+# Twice a day, offset from the source checks so it reports on runs that have finished rather than
+# racing them. 07:45 catches an overnight problem before the working day; 18:45 catches the day's.
+
+[Unit]
+Description=azmonitor health check, 07:45 and 18:45 Asia/Baku
+
+[Timer]
+OnCalendar=*-*-* 07:45:00
+OnCalendar=*-*-* 18:45:00
+Persistent=false
+AccuracySec=1min
+Unit=azmonitor-monitor.service
+
+[Install]
+WantedBy=timers.target

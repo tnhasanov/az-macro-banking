@@ -1,0 +1,31 @@
+# One source check: refresh the official sources, produce whatever is now due, deliver it.
+#
+# Type=oneshot because this is a job, not a service. The container exits when the work is done and
+# systemd records the exit code, which carries meaning:
+#   0 ok   2 partial   3 failed   4 another run held the lock   5 restore failed   6 save failed
+#
+# Only 3 and 5 are worth waking someone for; 4 is normal when a run overlaps a slow one.
+
+[Unit]
+Description=azmonitor source check (CBA and SSC)
+Documentation=file:/opt/az-macro-banking/docs/deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/az-macro-banking/deploy
+Environment=COMPOSE_PROJECT_NAME=azmonitor
+ExecStart=/usr/bin/docker compose run --rm source-check
+TimeoutStartSec=45min
+# 4 means another run still holds the lock. That is the design working, not a failure.
+SuccessExitStatus=0 2 4
+# A failed run must not be retried immediately: whatever broke is usually still broken.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=azmonitor-source-check
+
+[Install]
+WantedBy=multi-user.target

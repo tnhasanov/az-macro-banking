@@ -1,0 +1,177 @@
+# Metric dictionary: deterministic formulas over stored observations.
+# Formulas (azmonitor/calc/metrics.py):
+#   yoy_growth        (x / x[t-lag] - 1) * 100, denominator must be > 0 (lag default 12)
+#   diff              x - x[t-lag]
+#   pp_change         x - x[t-lag]   (for percentages; unit pp)
+#   share             sum(numerators) / denominator * 100
+#   ratio             numerator / denominator * scale
+#   contribution      (component - component[t-lag]) / total[t-lag] * 100
+#   spread            a - b
+#   real_growth       ((1 + nominal/100) / (1 + price/100) - 1) * 100
+#   ytd_to_monthly    x - x[t-1] except January = x (calendar-year reset)
+#   index_to_growth   x - 100
+#   sum               a + b + ...
+#   ratio_decomposition   numerator_effect = 100*(Q1-Q0)/L0 ; denominator_effect = 100*Q1*(1/L1-1/L0)
+# `dims` selects a dimension slice of a series (e.g. currency: AZN). `types` lists the
+# period types allowed for the inputs; combining incompatible period types is rejected.
+
+metrics:
+  # ---------------- lending
+  - { id: cba.loans.total_ci.yoy, label_en: "Loans to the economy, y/y", formula: yoy_growth, input: cba.loans.total_ci, unit: "%", basis: "nominal stock, all credit institutions, current exchange rates" }
+  - { id: cba.loans.total_ci.mom_change, label_en: "Loans to the economy, m/m change", formula: diff, input: cba.loans.total_ci, lag: 1, unit: "AZN mln" }
+  - { id: cba.loans.total_ci.yoy_change, label_en: "Loans to the economy, y/y change", formula: diff, input: cba.loans.total_ci, lag: 12, unit: "AZN mln" }
+  - { id: cba.loans.banks, label_en: "Loans, banks only (state + private)", formula: sum, inputs: [cba.loans.state_banks, cba.loans.private_banks], unit: "AZN mln" }
+  - { id: cba.loans.banks.yoy, label_en: "Bank loans, y/y", formula: yoy_growth, input: cba.loans.banks, unit: "%" }
+  - { id: cba.loans.nbci.yoy, label_en: "Non-bank credit institution loans, y/y", formula: yoy_growth, input: cba.loans.nbci, unit: "%" }
+  - { id: cba.loans.state_banks.yoy, formula: yoy_growth, input: cba.loans.state_banks, unit: "%" }
+  - { id: cba.loans.private_banks.yoy, formula: yoy_growth, input: cba.loans.private_banks, unit: "%" }
+  - { id: cba.loans.overdue_ratio, label_en: "Overdue loans / total loans (CBA 'vaxtı keçmiş')", formula: ratio, numerator: cba.loans.overdue, denominator: cba.loans.total_ci_m, scale: 100, unit: "%" }
+  - { id: cba.loans.overdue.yoy, formula: yoy_growth, input: cba.loans.overdue, unit: "%" }
+  - { id: cba.loans.overdue_ratio.pp_yoy, formula: pp_change, input: cba.loans.overdue_ratio, lag: 12, unit: pp }
+  - { id: cba.loans.fx_share, label_en: "FX share of loans (AZN equivalent, current rates)", formula: share, numerators: [cba.loans.fx], denominator: cba.loans.total_ci_m, unit: "%" }
+  - { id: cba.loans.fx_share.pp_yoy, formula: pp_change, input: cba.loans.fx_share, lag: 12, unit: pp }
+  - { id: cba.loans.long_share, label_en: "Long-term share of loans", formula: share, numerators: [cba.loans.azn_long, cba.loans.fx_long], denominator: cba.loans.total_ci_m, unit: "%" }
+  - { id: cba.loans.short_share, label_en: "Short-term share of loans", formula: share, numerators: [cba.loans.azn_short, cba.loans.fx_short], denominator: cba.loans.total_ci_m, unit: "%" }
+  - { id: cba.new_loans.total.yoy, label_en: "New loans, y/y (monthly flow)", formula: yoy_growth, input: cba.new_loans.total, unit: "%" }
+  - { id: cba.new_loans.total.3m, label_en: "New loans, 3-month sum", formula: rolling_sum, input: cba.new_loans.total, window: 3, unit: "AZN mln" }
+  - { id: cba.new_loans.fx_share, formula: share, numerators: [cba.new_loans.fx], denominator: cba.new_loans.total, unit: "%" }
+  # sector contributions to real-sector loan growth (mutually exclusive components reconciling to the total)
+  - { id: cba.loans.sector.households.yoy, formula: yoy_growth, input: cba.loans.sector.households, unit: "%" }
+  - { id: cba.loans.sector.trade_services.yoy, formula: yoy_growth, input: cba.loans.sector.trade_services, unit: "%" }
+  - { id: cba.loans.sector.agriculture.yoy, formula: yoy_growth, input: cba.loans.sector.agriculture, unit: "%" }
+  - { id: cba.loans.sector.construction.yoy, formula: yoy_growth, input: cba.loans.sector.construction, unit: "%" }
+  - { id: cba.loans.sector.industry.yoy, formula: yoy_growth, input: cba.loans.sector.industry, unit: "%" }
+  - { id: cba.loans.sector.transport_comm.yoy, formula: yoy_growth, input: cba.loans.sector.transport_comm, unit: "%" }
+  - { id: cba.loans.sector.mining_energy.yoy, formula: yoy_growth, input: cba.loans.sector.mining_energy, unit: "%" }
+  - { id: cba.loans.sector.real_total.yoy, formula: yoy_growth, input: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.households.contrib, formula: contribution, component: cba.loans.sector.households, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.trade_services.contrib, formula: contribution, component: cba.loans.sector.trade_services, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.agriculture.contrib, formula: contribution, component: cba.loans.sector.agriculture, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.construction.contrib, formula: contribution, component: cba.loans.sector.construction, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.industry.contrib, formula: contribution, component: cba.loans.sector.industry, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.transport_comm.contrib, formula: contribution, component: cba.loans.sector.transport_comm, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.mining_energy.contrib, formula: contribution, component: cba.loans.sector.mining_energy, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.other_all.contrib, label_en: "Other sectors and instruments (state entities, budget, other, LCs, guarantees, factoring, overdraft)", formula: contribution_sum, components: [cba.loans.sector.state_entities, cba.loans.sector.budget_orgs, cba.loans.sector.other, cba.loans.sector.letters_of_credit, cba.loans.sector.guarantees, cba.loans.sector.factoring, cba.loans.sector.overdraft], total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.overdue_unclassified.contrib, label_en: "Overdue loans (not sector-classified in table 2.8)", formula: contribution, component: cba.loans.sector.overdue_unclassified, total: cba.loans.sector.real_total, lag: 12, unit: pp }
+  - { id: cba.loans.sector.households.share, formula: share, numerators: [cba.loans.sector.households], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.trade_services.share, formula: share, numerators: [cba.loans.sector.trade_services], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.agriculture.share, formula: share, numerators: [cba.loans.sector.agriculture], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.construction.share, formula: share, numerators: [cba.loans.sector.construction], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.industry.share, formula: share, numerators: [cba.loans.sector.industry], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.transport_comm.share, formula: share, numerators: [cba.loans.sector.transport_comm], denominator: cba.loans.sector.real_total, unit: "%" }
+  - { id: cba.loans.sector.mining_energy.share, formula: share, numerators: [cba.loans.sector.mining_energy], denominator: cba.loans.sector.real_total, unit: "%" }
+  # bank portfolio (prudential)
+  - { id: cba.bank.portfolio.business.yoy, formula: yoy_growth, input: cba.bank.portfolio.business, unit: "%" }
+  - { id: cba.bank.portfolio.consumer.yoy, formula: yoy_growth, input: cba.bank.portfolio.consumer, unit: "%" }
+  - { id: cba.bank.portfolio.mortgage.yoy, formula: yoy_growth, input: cba.bank.portfolio.mortgage, unit: "%" }
+  - { id: cba.bank.portfolio.total.yoy, formula: yoy_growth, input: cba.bank.portfolio.total, unit: "%" }
+
+  # ---------------- deposits and funding
+  - { id: cba.deposits.total.yoy, label_en: "Total deposits, y/y", formula: yoy_growth, input: cba.deposits.total, unit: "%" }
+  - { id: cba.deposits.total.mom_change, formula: diff, input: cba.deposits.total, lag: 1, unit: "AZN mln" }
+  - { id: cba.deposits.total.yoy_change, formula: diff, input: cba.deposits.total, lag: 12, unit: "AZN mln" }
+  - { id: cba.deposits.hh.total.yoy, label_en: "Household deposits, y/y", formula: yoy_growth, input: cba.deposits.hh.total, unit: "%" }
+  - { id: cba.deposits.nfc.total.yoy, label_en: "Non-financial corporate deposits, y/y", formula: yoy_growth, input: cba.deposits.nfc.total, unit: "%" }
+  - { id: cba.deposits.fin.total.yoy, label_en: "Financial corporate deposits, y/y", formula: yoy_growth, input: cba.deposits.fin.total, unit: "%" }
+  - { id: cba.deposits.hh.contrib, formula: contribution, component: cba.deposits.hh.total, total: cba.deposits.total, lag: 12, unit: pp }
+  - { id: cba.deposits.nfc.contrib, formula: contribution, component: cba.deposits.nfc.total, total: cba.deposits.total, lag: 12, unit: pp }
+  - { id: cba.deposits.fin.contrib, formula: contribution, component: cba.deposits.fin.total, total: cba.deposits.total, lag: 12, unit: pp }
+  - { id: cba.deposits.hh.share, formula: share, numerators: [cba.deposits.hh.total], denominator: cba.deposits.total, unit: "%" }
+  - { id: cba.deposits.nfc.share, formula: share, numerators: [cba.deposits.nfc.total], denominator: cba.deposits.total, unit: "%" }
+  - { id: cba.deposits.fx_share, label_en: "FX share of total deposits (current rates)", formula: share, numerators: [cba.deposits.cur.fx_demand, cba.deposits.cur.fx_time], denominator: cba.deposits.cur.total, unit: "%" }
+  - { id: cba.deposits.fx_share.pp_yoy, formula: pp_change, input: cba.deposits.fx_share, lag: 12, unit: pp }
+  - { id: cba.deposits.fx_share.pp_mom, formula: pp_change, input: cba.deposits.fx_share, lag: 1, unit: pp }
+  - { id: cba.deposits.time_share, label_en: "Time-deposit share of total deposits", formula: share, numerators: [cba.deposits.cur.azn_time, cba.deposits.cur.fx_time], denominator: cba.deposits.cur.total, unit: "%" }
+  - { id: cba.deposits.time_share.pp_yoy, formula: pp_change, input: cba.deposits.time_share, lag: 12, unit: pp }
+  - { id: cba.deposits.hh.fx_share, label_en: "FX share of household deposits", formula: share, numerators: [cba.deposits.hh.fx_demand, cba.deposits.hh.fx_time], denominator: cba.deposits.hh.total, unit: "%" }
+  - { id: cba.deposits.hh.fx_share.pp_yoy, formula: pp_change, input: cba.deposits.hh.fx_share, lag: 12, unit: pp }
+  - { id: cba.deposits.hh.time_share, label_en: "Time share of household deposits", formula: share, numerators: [cba.deposits.hh.azn_time, cba.deposits.hh.fx_time], denominator: cba.deposits.hh.total, unit: "%" }
+  - { id: cba.deposits.nfc.fx_share, label_en: "FX share of non-financial corporate deposits", formula: share, numerators: [cba.deposits.nfc.fx_demand, cba.deposits.nfc.fx_time], denominator: cba.deposits.nfc.total, unit: "%" }
+  - { id: cba.hh_savings.total.yoy, formula: yoy_growth, input: cba.hh_savings.total, unit: "%" }
+  - { id: cba.hh_savings.fx_share, formula: share, numerators: [cba.hh_savings.fx], denominator: cba.hh_savings.total, unit: "%" }
+  - { id: cba.ldr, label_en: "Loan-to-deposit ratio (gross loans, all credit institutions / total deposits, all credit institutions)", formula: ratio, numerator: cba.loans.total_ci, denominator: cba.deposits.total, scale: 100, unit: "%", basis: "not a regulatory liquidity ratio" }
+  - { id: cba.ldr.pp_yoy, formula: pp_change, input: cba.ldr, lag: 12, unit: pp }
+  - { id: cba.loans_minus_deposits.yoy_growth_gap, label_en: "Loan growth minus deposit growth", formula: spread, a: cba.loans.total_ci.yoy, b: cba.deposits.total.yoy, unit: pp }
+
+  # ---------------- rates and pricing
+  - { id: cba.rates.new.spread, label_en: "Indicative pricing spread: new loans minus new term deposits", formula: spread, a: cba.rates.new.loan, b: cba.rates.new.deposit, by_dims: currency, unit: pp, basis: "not NIM; all maturities, all credit institutions" }
+  - { id: cba.rates.new.loan.pp_yoy, formula: pp_change, input: cba.rates.new.loan, lag: 12, by_dims: currency, unit: pp }
+  - { id: cba.rates.new.deposit.pp_yoy, formula: pp_change, input: cba.rates.new.deposit, lag: 12, by_dims: currency, unit: pp }
+  - { id: cba.rates.new.spread.pp_yoy, formula: pp_change, input: cba.rates.new.spread, lag: 12, by_dims: currency, unit: pp }
+  - { id: cba.rates.out.spread, label_en: "Spread on outstanding balances: loans minus term deposits", formula: spread, a: cba.rates.out.loan, b: cba.rates.out.deposit, by_dims: currency, unit: pp }
+
+  # ---------------- asset quality (banks, prudential NPL)
+  - { id: cba.bank.npl.ratio_calc, label_en: "NPL / bank loan portfolio (calculated)", formula: ratio, numerator: cba.bank.npl.total, denominator: cba.bank.portfolio.total, scale: 100, unit: "%" }
+  - { id: cba.bank.npl.total.yoy, formula: yoy_growth, input: cba.bank.npl.total, unit: "%" }
+  - { id: cba.bank.npl.total.yoy_change, formula: diff, input: cba.bank.npl.total, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.npl.ratio.pp_yoy, formula: pp_change, input: cba.bank.npl.ratio, lag: 12, unit: pp }
+  - { id: cba.bank.npl.ratio.pp_mom, formula: pp_change, input: cba.bank.npl.ratio, lag: 1, unit: pp }
+  - { id: cba.bank.npl.decomp_yoy, label_en: "NPL ratio change decomposition, y/y (numerator first)", formula: ratio_decomposition, numerator: cba.bank.npl.total, denominator: cba.bank.portfolio.total, lag: 12, unit: pp }
+  - { id: cba.bank.npl.decomp_mom, label_en: "NPL ratio change decomposition, m/m (numerator first)", formula: ratio_decomposition, numerator: cba.bank.npl.total, denominator: cba.bank.portfolio.total, lag: 1, unit: pp }
+  - { id: cba.bank.allowance_to_npl, label_en: "Allowance for loan losses (stock) / NPL", formula: ratio, numerator: cba.bank.assets.loan_provisions, denominator: cba.bank.npl.total, scale: 100, unit: "%", dims_numerator: { currency: all }, basis: "allowance stock from balance sheet 5.2; not an impairment expense" }
+  - { id: cba.bank.allowance_to_gross_loans, formula: ratio, numerator: cba.bank.assets.loan_provisions, denominator: cba.bank.assets.loans_customers_gross, scale: 100, unit: "%", dims_numerator: { currency: all }, dims_denominator: { currency: all } }
+
+  # ---------------- profitability (YTD prudential P&L)
+  - { id: cba.bank.pnl.net_profit.yoy, label_en: "Net profit YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.net_profit, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.net_profit.yoy_change, formula: diff, input: cba.bank.pnl.net_profit, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.net_profit.monthly, label_en: "Net profit, monthly (from YTD, January reset)", formula: ytd_to_monthly, input: cba.bank.pnl.net_profit, unit: "AZN mln" }
+  - { id: cba.bank.pnl.net_interest_income.yoy, formula: yoy_growth, input: cba.bank.pnl.net_interest_income, unit: "%" }
+  - { id: cba.bank.pnl.net_interest_income.yoy_change, formula: diff, input: cba.bank.pnl.net_interest_income, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.non_interest_income.yoy_change, formula: diff, input: cba.bank.pnl.non_interest_income, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.non_interest_expense.yoy_change, formula: diff, input: cba.bank.pnl.non_interest_expense, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.provisions.yoy_change, formula: diff, input: cba.bank.pnl.provisions, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.other_income.yoy_change, formula: diff, input: cba.bank.pnl.other_income, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.tax.yoy_change, formula: diff, input: cba.bank.pnl.tax, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.cost_to_income, label_en: "Cost-to-income (non-interest expense / (net interest income + non-interest income)), YTD", formula: ratio_sum, numerator: cba.bank.pnl.non_interest_expense, denominators: [cba.bank.pnl.net_interest_income, cba.bank.pnl.non_interest_income], scale: 100, unit: "%" }
+  - { id: cba.bank.pnl.cost_to_income.pp_yoy, formula: pp_change, input: cba.bank.pnl.cost_to_income, lag: 12, unit: pp }
+  - { id: cba.bank.pnl.provisions_to_income, formula: ratio_sum, numerator: cba.bank.pnl.provisions, denominators: [cba.bank.pnl.net_interest_income, cba.bank.pnl.non_interest_income], scale: 100, unit: "%" }
+  - { id: cba.bank.roa_annualised, label_en: "Return on average assets, annualised (net profit YTD x 12/m / average of month-end total assets)", formula: roa, profit_ytd: cba.bank.pnl.net_profit, assets: cba.bank.assets.total, dims_assets: { currency: all }, unit: "%" }
+  - { id: cba.bank.roe_annualised, label_en: "Return on average equity, annualised (net profit YTD x 12/m / average of month-end total capital)", formula: roa, profit_ytd: cba.bank.pnl.net_profit, assets: cba.bank.capital.total, dims_assets: { currency: all }, unit: "%" }
+
+  # ---------------- balance sheet, capital, liquidity (book measures)
+  - { id: cba.bank.assets.total.yoy, formula: yoy_growth, input: cba.bank.assets.total, dims: { currency: all }, unit: "%" }
+  - { id: cba.bank.capital.total.yoy, formula: yoy_growth, input: cba.bank.capital.total, dims: { currency: all }, unit: "%" }
+  - { id: cba.bank.equity_to_assets, label_en: "Total capital / total assets (book, prudential reporting; not a regulatory ratio)", formula: ratio, numerator: cba.bank.capital.total, denominator: cba.bank.assets.total, dims_numerator: { currency: all }, dims_denominator: { currency: all }, scale: 100, unit: "%" }
+  - { id: cba.bank.equity_to_assets.pp_yoy, formula: pp_change, input: cba.bank.equity_to_assets, lag: 12, unit: pp }
+  - { id: cba.bank.liquid_assets, label_en: "Liquid assets (cash + CBA accounts + nostro + securities), book", formula: sum, inputs: [cba.bank.assets.cash, cba.bank.assets.cba_accounts, cba.bank.assets.nostro, cba.bank.assets.securities], dims: { currency: all }, unit: "AZN mln" }
+  - { id: cba.bank.liquid_assets_ratio, label_en: "Liquid assets / total assets (book; not LCR)", formula: ratio, numerator: cba.bank.liquid_assets, denominator: cba.bank.assets.total, dims_denominator: { currency: all }, scale: 100, unit: "%" }
+  - { id: cba.bank.liquid_assets_ratio.pp_yoy, formula: pp_change, input: cba.bank.liquid_assets_ratio, lag: 12, unit: pp }
+  - { id: cba.bank.fx_assets_share, label_en: "FX share of total assets", formula: ratio, numerator: cba.bank.assets.total, denominator: cba.bank.assets.total, dims_numerator: { currency: fx }, dims_denominator: { currency: all }, scale: 100, unit: "%" }
+  - { id: cba.bank.fx_liab_share, label_en: "FX share of total liabilities", formula: ratio, numerator: cba.bank.liab.total, denominator: cba.bank.liab.total, dims_numerator: { currency: fx }, dims_denominator: { currency: all }, scale: 100, unit: "%" }
+  - { id: cba.bank.deposits_nonfi.yoy, formula: yoy_growth, input: cba.bank.liab.deposits_nonfi, dims: { currency: all }, unit: "%" }
+
+  # ---------------- external, FX, reserves
+  - { id: cba.reserves.official_usd.yoy, formula: yoy_growth, input: cba.reserves.official_usd, unit: "%" }
+  - { id: cba.reserves.official_usd.mom_change, formula: diff, input: cba.reserves.official_usd, lag: 1, unit: "USD mln" }
+  - { id: cba.money.m3.yoy, formula: yoy_growth, input: cba.money.m3, unit: "%" }
+  - { id: cba.money.m2.yoy, formula: yoy_growth, input: cba.money.m2, unit: "%" }
+  - { id: ssc.hl.trade_balance.level, label_en: "Trade balance (exports minus imports), YTD", formula: spread, a: ssc.hl.exports.level, b: ssc.hl.imports.level, unit: "USD mln", types: [ytd_flow] }
+
+  # ---------------- SSC macro derived
+  - { id: ssc.cpi.all.mom, label_en: "CPI m/m", formula: index_to_growth, input: ssc.cpi.all.mom_index, unit: "%" }
+  - { id: ssc.cpi.all.yoy, label_en: "CPI y/y (same month previous year)", formula: index_to_growth, input: ssc.cpi.all.yoy_index, unit: "%" }
+  - { id: ssc.cpi.all.ytd, label_en: "CPI, YTD average vs previous year", formula: index_to_growth, input: ssc.cpi.all.ytd_index, unit: "%" }
+  - { id: ssc.cpi.food.yoy, formula: index_to_growth, input: ssc.cpi.food.yoy_index, unit: "%" }
+  - { id: ssc.cpi.nonfood.yoy, formula: index_to_growth, input: ssc.cpi.nonfood.yoy_index, unit: "%" }
+  - { id: ssc.cpi.services.yoy, formula: index_to_growth, input: ssc.cpi.services.yoy_index, unit: "%" }
+  - { id: ssc.cpi.all.yoy_from_index, label_en: "CPI y/y computed from the 2010=100 index", formula: yoy_growth, input: ssc.cpi.all.index_2010, unit: "%" }
+  - { id: ssc.real_wage_growth_est, label_en: "Real wage growth, estimate (nominal YTD wage growth deflated by YTD average CPI)", formula: real_growth, nominal: ssc.hl.wage.growth, price: ssc.cpi.all.ytd, unit: "%", types: [ytd_growth_yoy, ytd_average_index_vs_prev_year], basis: "estimate; SSC does not publish a matched real-wage series in the headline table" }
+  - { id: ssc.gdp.sector.agriculture.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.agriculture.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.construction.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.construction.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.trade.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.trade.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.transport.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.transport.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.manufacturing.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.manufacturing.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.mining.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.mining.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.industry.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.industry.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.ict.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.ict.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.accommodation.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.accommodation.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.total.real_growth_ytd, formula: index_to_growth, input: ssc.gdp.sector.total.real_index_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.agriculture.share_nominal, formula: share, numerators: [ssc.gdp.sector.agriculture.nominal_ytd], denominator: ssc.gdp.sector.total.nominal_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.construction.share_nominal, formula: share, numerators: [ssc.gdp.sector.construction.nominal_ytd], denominator: ssc.gdp.sector.total.nominal_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.trade.share_nominal, formula: share, numerators: [ssc.gdp.sector.trade.nominal_ytd], denominator: ssc.gdp.sector.total.nominal_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.transport.share_nominal, formula: share, numerators: [ssc.gdp.sector.transport.nominal_ytd], denominator: ssc.gdp.sector.total.nominal_ytd, unit: "%" }
+  - { id: ssc.gdp.sector.industry.share_nominal, formula: share, numerators: [ssc.gdp.sector.industry.nominal_ytd], denominator: ssc.gdp.sector.total.nominal_ytd, unit: "%" }
+  - { id: ssc.gdp.nonoil_share_nominal, label_en: "Non-oil-gas share of GDP (nominal, YTD)", formula: share, numerators: [ssc.hl.gdp_nonoil.level], denominator: ssc.hl.gdp.level, unit: "%" }
+  - { id: ssc.gdp.quarterly.total.real_yoy, label_en: "Quarterly GDP real growth y/y (constant 2005 prices)", formula: yoy_growth, input: ssc.gdp.sector.total.real2005_q, lag: 4, unit: "%" }
+  - { id: ssc.gdp.trailing4q_nominal, label_en: "Nominal GDP, trailing four quarters", formula: rolling_sum, input: ssc.gdp.sector.total.nominal_q, window: 4, unit: "AZN mln" }
+  - { id: cba.credit_to_gdp, label_en: "Loans to the economy / trailing-four-quarter nominal GDP", formula: ratio_quarter_aligned, numerator: cba.loans.total_ci, denominator: ssc.gdp.trailing4q_nominal, scale: 100, unit: "%", basis: "quarter-end loan stock over the trailing 4-quarter nominal GDP ending in that quarter" }

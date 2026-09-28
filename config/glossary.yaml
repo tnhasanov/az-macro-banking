@@ -1,0 +1,161 @@
+# Controlled terminology. Every user-visible label used by the renderer is looked up
+# here by key; `en` and `az` must both exist. Definitions are shown in appendix A01.
+# Add terms here rather than in code.
+
+terms:
+  report_title:
+    en: "Azerbaijan Macro & Banking Monitor"
+    az: "Azərbaycan Makro və Bank Monitoru"
+  draft_label:
+    en: "Draft for review"
+    az: "Baxış üçün layihə"
+  monthly_edition:
+    en: "Monthly edition"
+    az: "Aylıq buraxılış"
+  weekly_digest:
+    en: "Weekly release digest"
+    az: "Həftəlik buraxılış icmalı"
+  sector_review:
+    en: "Sector review"
+    az: "Sektor icmalı"
+  information_cutoff:
+    en: "Information cutoff"
+    az: "Məlumat kəsimi"
+  generated:
+    en: "Generated"
+    az: "Hazırlanıb"
+  source:
+    en: "Source"
+    az: "Mənbə"
+  cba:
+    en: "Central Bank of Azerbaijan (CBA)"
+    az: "Azərbaycan Respublikasının Mərkəzi Bankı (AMB)"
+  ssc:
+    en: "State Statistical Committee (SSC)"
+    az: "Dövlət Statistika Komitəsi (DSK)"
+  loans_total_ci:
+    en: "Loans to the economy, all credit institutions"
+    az: "İqtisadiyyata kredit qoyuluşları, bütün kredit təşkilatları"
+  loans_banks:
+    en: "Loans, banks only"
+    az: "Kreditlər, yalnız banklar"
+  deposits_total:
+    en: "Deposits in credit institutions, total"
+    az: "Kredit təşkilatlarında depozit və əmanətlər, cəmi"
+  deposits_households:
+    en: "Household deposits"
+    az: "Ev təsərrüfatlarının əmanətləri"
+  deposits_nonfinancial:
+    en: "Non-financial corporate deposits"
+    az: "Qeyri-maliyyə təşkilatlarının depozitləri"
+  deposits_financial:
+    en: "Financial corporate deposits"
+    az: "Maliyyə təşkilatlarının depozitləri"
+  fx_share:
+    en: "FX share"
+    az: "Xarici valyutanın payı"
+  overdue_loans:
+    en: "Overdue loans (CBA label: vaxtı keçmiş kreditlər)"
+    az: "Vaxtı keçmiş kreditlər"
+  npl:
+    en: "Non-performing loans (CBA prudential label: qeyri-işlək kreditlər)"
+    az: "Qeyri-işlək kreditlər (QİK)"
+  gdp_real_growth:
+    en: "Real GDP growth"
+    az: "Real ÜDM artımı"
+  non_oil_gdp:
+    en: "Non-oil-gas GDP"
+    az: "Qeyri-neft-qaz ÜDM"
+  oil_gdp:
+    en: "Oil-gas GDP"
+    az: "Neft-qaz ÜDM"
+  cpi_yoy:
+    en: "CPI inflation, y/y"
+    az: "İstehlak qiymətləri indeksi, əvvəlki ilin müvafiq ayına nisbətən"
+  cpi_ytd:
+    en: "CPI inflation, YTD average"
+    az: "İnflyasiya, ilin əvvəlindən orta"
+  cpi_mom:
+    en: "CPI, m/m"
+    az: "İQİ, əvvəlki aya nisbətən"
+  nominal_wage:
+    en: "Average monthly nominal wage"
+    az: "Orta aylıq nominal əməkhaqqı"
+  real_wage_estimate:
+    en: "Real wage growth (estimate)"
+    az: "Real əməkhaqqı artımı (qiymətləndirmə)"
+  pricing_spread:
+    en: "Indicative pricing spread (new loans minus new term deposits)"
+    az: "İndikativ qiymət spredi (yeni kreditlər – yeni müddətli depozitlər)"
+  ldr:
+    en: "Loan-to-deposit ratio (gross loans / total deposits, all credit institutions)"
+    az: "Kredit/depozit nisbəti"
+  net_profit_ytd:
+    en: "Banking-sector net profit, YTD"
+    az: "Bank sektorunun xalis mənfəəti, ilin əvvəlindən"
+  total_capital:
+    en: "Total capital (book, prudential reporting)"
+    az: "Cəmi kapital (prudensial hesabatlılıq)"
+  reserves_cba:
+    en: "CBA official foreign reserves"
+    az: "AMB-nin rəsmi valyuta ehtiyatları"
+  strategic_reserves:
+    en: "Strategic foreign-exchange reserves (SSC headline, incl. SOFAZ)"
+    az: "Strateji valyuta ehtiyatları"
+  exports:
+    en: "Exports (goods)"
+    az: "İxrac"
+  imports:
+    en: "Imports (goods)"
+    az: "İdxal"
+  non_oil_exports:
+    en: "Non-oil-gas exports"
+    az: "Qeyri-neft-qaz ixracı"
+  trade_balance:
+    en: "Trade balance"
+    az: "Ticarət saldosu"
+  yoy:
+    en: "y/y"
+    az: "illik"
+  mom:
+    en: "m/m"
+    az: "aylıq"
+  pp:
+    en: "pp"
+    az: "f.b."
+  ytd:
+    en: "YTD"
+    az: "ilin əvvəlindən"
+  not_available:
+    en: "n/a"
+    az: "m/y"
+  so_what:
+    en: "SO WHAT"
+    az: "NƏTİCƏ"
+  view:
+    en: "View"
+    az: "Şərh"
+  latest:
+    en: "Latest"
+    az: "Son"
+  prior:
+    en: "Prior"
+    az: "Əvvəlki"
+  change:
+    en: "Change"
+    az: "Dəyişmə"
+  period:
+    en: "Period"
+    az: "Dövr"
+  trend:
+    en: "Trend"
+    az: "Meyl"
+  preliminary:
+    en: "preliminary"
+    az: "ilkin"
+  revised:
+    en: "revised"
+    az: "dəqiqləşdirilmiş"
+  reconstructed_history:
+    en: "Reconstructed history (current vintage)"
+    az: "Bərpa edilmiş tarixçə (cari versiya)"

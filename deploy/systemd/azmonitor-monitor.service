@@ -1,0 +1,25 @@
+# Health of the system itself: missed runs, sources that have gone quiet, deliveries that ended
+# without a clear answer. Sends an alert when something needs attention and nothing when it does not,
+# because an alert that arrives every day is one nobody reads.
+
+[Unit]
+Description=azmonitor health check
+Documentation=file:/opt/az-macro-banking/docs/deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/az-macro-banking/deploy
+Environment=COMPOSE_PROJECT_NAME=azmonitor
+ExecStart=/usr/bin/docker compose run --rm monitor
+TimeoutStartSec=10min
+SuccessExitStatus=0 2 4
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=azmonitor-monitor
+
+[Install]
+WantedBy=multi-user.target

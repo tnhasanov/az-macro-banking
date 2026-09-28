@@ -1,0 +1,831 @@
+# Source register configuration: discovery pages, datasets to collect, parser settings.
+# Discovery pages are entry points, not guaranteed file URLs. Document URLs are
+# resolved at run time from the page structure (CBA "download_item" anchors, SSC
+# links) and recorded in the source register with retrieval evidence.
+#
+# Dataset fields:
+#   title_pattern   regex matched against the original (Azerbaijani) link title
+#   parser          parser id (see azmonitor/parsers/registry.py)
+#   expected_lag_days  from the CBA "Schedule of publication of statistical reports"
+#                      (within 30 days after the reporting period) or SSC practice
+#   role            anchor | companion | optional | reference
+#   history_in_file true when the current file already contains the full history
+#                   (reconstructed history, single vintage)
+
+sources:
+  CBA_MONETARY:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-42/monetary-indicators
+    role: "Lending, deposits, rates, money aggregates, currency and maturity breakdowns"
+    discovery: cba_download_items
+    datasets:
+      - id: cba_loans_by_institution
+        title_pattern: "kredit qoyuluşlarının kred[iı]t təşkilatları üzrə strukturu"
+        title_en: "Structure of loans to the economy by type of credit institution (end of period)"
+        parser: cba_month_matrix
+        role: anchor
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.6"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.loans.total_ci, col: 1, population: all_credit_institutions, label_az: "Cəmi kredit qoyuluşları", label_en: "Total loans, all credit institutions" }
+            - { id: cba.loans.state_banks, col: 2, population: banks, label_az: "Dövlət bankları", label_en: "State-owned banks" }
+            - { id: cba.loans.private_banks, col: 4, population: banks, label_az: "Özəl banklar, cəmi", label_en: "Private banks, total" }
+            - { id: cba.loans.foreign_banks, col: 6, population: banks, label_az: "Xarici kapitallı banklar", label_en: "Banks with foreign capital" }
+            - { id: cba.loans.nbci, col: 10, population: nbci, label_az: "Qeyri-bank kredit təşkilatları", label_en: "Non-bank credit institutions" }
+          checks:
+            - { type: components_sum, total: cba.loans.total_ci, parts: [cba.loans.state_banks, cba.loans.private_banks, cba.loans.nbci], tolerance: 0.5 }
+
+      - id: cba_loans_by_maturity
+        title_pattern: "^Kredit təşkilatlarının müddətlər üzrə kredit qoyuluşları"
+        title_en: "Loans of credit institutions by maturity and currency (end of period)"
+        parser: cba_month_matrix
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.7"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.loans.total_ci_m, col: 1, population: all_credit_institutions, label_en: "Total loans (maturity table)" }
+            - { id: cba.loans.overdue, col: 2, population: all_credit_institutions, label_az: "vaxtı keçmiş kreditlər", label_en: "Overdue loans (CBA label: vaxtı keçmiş)" }
+            - { id: cba.loans.azn, col: 3, population: all_credit_institutions, label_en: "Loans in national currency" }
+            - { id: cba.loans.azn_overdue, col: 4, population: all_credit_institutions, label_en: "Overdue loans in national currency" }
+            - { id: cba.loans.azn_short, col: 5, population: all_credit_institutions, label_en: "Short-term loans, AZN" }
+            - { id: cba.loans.azn_long, col: 7, population: all_credit_institutions, label_en: "Long-term loans, AZN" }
+            - { id: cba.loans.fx, col: 9, population: all_credit_institutions, label_en: "Loans in foreign currency (AZN equivalent)" }
+            - { id: cba.loans.fx_overdue, col: 10, population: all_credit_institutions, label_en: "Overdue loans in foreign currency" }
+            - { id: cba.loans.fx_short, col: 11, population: all_credit_institutions, label_en: "Short-term loans, FX" }
+            - { id: cba.loans.fx_long, col: 13, population: all_credit_institutions, label_en: "Long-term loans, FX" }
+          checks:
+            - { type: components_sum, total: cba.loans.total_ci_m, parts: [cba.loans.azn, cba.loans.fx], tolerance: 0.5 }
+            - { type: components_sum, total: cba.loans.overdue, parts: [cba.loans.azn_overdue, cba.loans.fx_overdue], tolerance: 0.5 }
+
+      - id: cba_new_loans_by_maturity
+        title_pattern: "müddətlər üzrə yeni kredit qoyuluşları"
+        title_en: "New loans of credit institutions by maturity and currency (monthly flow)"
+        parser: cba_month_matrix
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.7.1"
+          header_check: { row: 7, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: monthly_flow
+          series:
+            - { id: cba.new_loans.total, col: 1, population: all_credit_institutions, label_en: "New loans, total" }
+            - { id: cba.new_loans.azn, col: 2, population: all_credit_institutions, label_en: "New loans, AZN" }
+            - { id: cba.new_loans.fx, col: 5, population: all_credit_institutions, label_en: "New loans, FX" }
+
+      - id: cba_loans_by_sector
+        title_pattern: "^Kredit qoyuluşlarının sahələr üzrə strukturu"
+        title_en: "Sectoral breakdown of loans (end of period)"
+        parser: cba_month_matrix
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.8"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.loans.sector.real_total, col: 1, population: all_credit_institutions, label_en: "Loans to real sector, total" }
+            - { id: cba.loans.sector.overdue_unclassified, col: 2, population: all_credit_institutions, label_az: "vaxtı keçmiş kredit", label_en: "Overdue loans (not classified by sector in table 2.8)" }
+            - { id: cba.loans.sector.trade_services, col: 4, population: all_credit_institutions, label_az: "Ticarət və xidmət sektoru", label_en: "Trade and services" }
+            - { id: cba.loans.sector.mining_energy, col: 6, population: all_credit_institutions, label_az: "Mədənçıxarma və elektrik enerjisi, qaz, su", label_en: "Mining, electricity, gas and water" }
+            - { id: cba.loans.sector.agriculture, col: 8, population: all_credit_institutions, label_az: "Kənd təsərrüfatı, meşə təsərrüfatı və balıqçılıq", label_en: "Agriculture, forestry and fisheries" }
+            - { id: cba.loans.sector.construction, col: 10, population: all_credit_institutions, label_az: "İnşaat və tikinti sektoru", label_en: "Building and construction" }
+            - { id: cba.loans.sector.industry, col: 12, population: all_credit_institutions, label_az: "Sənaye və istehsal sektoru", label_en: "Industry and manufacturing" }
+            - { id: cba.loans.sector.transport_comm, col: 14, population: all_credit_institutions, label_az: "Nəqliyyat və rabitə sektoru", label_en: "Transportation and communication" }
+            - { id: cba.loans.sector.households, col: 16, population: all_credit_institutions, label_az: "Ev təsərrüfatlarına", label_en: "Households" }
+            - { id: cba.loans.sector.households_real_estate, col: 18, population: all_credit_institutions, label_en: "of which: household real-estate related" }
+            - { id: cba.loans.sector.state_entities, col: 20, population: all_credit_institutions, label_en: "State-owned legal entities and municipalities" }
+            - { id: cba.loans.sector.budget_orgs, col: 22, population: all_credit_institutions, label_en: "Budget organisations and state funds" }
+            - { id: cba.loans.sector.other, col: 24, population: all_credit_institutions, label_en: "Other sectors" }
+            - { id: cba.loans.sector.letters_of_credit, col: 26, population: all_credit_institutions, label_en: "Letters of credit" }
+            - { id: cba.loans.sector.guarantees, col: 28, population: all_credit_institutions, label_en: "Guarantees" }
+            - { id: cba.loans.sector.factoring, col: 30, population: all_credit_institutions, label_en: "Factoring" }
+            - { id: cba.loans.sector.overdraft, col: 32, population: all_credit_institutions, label_en: "Overdraft" }
+            - { id: cba.loans.sector.financial, col: 34, population: all_credit_institutions, label_en: "Loans to financial sector" }
+          checks:
+            - type: components_sum
+              total: cba.loans.sector.real_total
+              parts: [cba.loans.sector.overdue_unclassified, cba.loans.sector.trade_services, cba.loans.sector.mining_energy, cba.loans.sector.agriculture, cba.loans.sector.construction, cba.loans.sector.industry, cba.loans.sector.transport_comm, cba.loans.sector.households, cba.loans.sector.state_entities, cba.loans.sector.budget_orgs, cba.loans.sector.other, cba.loans.sector.letters_of_credit, cba.loans.sector.guarantees, cba.loans.sector.factoring, cba.loans.sector.overdraft]
+              tolerance: 1.0
+              note: "In table 2.8 the sector columns cover performing loans; overdue loans are shown separately and are not sector-classified."
+
+      - id: cba_loans_by_sector_split
+        title_pattern: "^Kredit qoyuluşunun sektorlar üzrə bölgüsü"
+        title_en: "Structure of loans by sector: state, non-state, households"
+        parser: cba_month_matrix
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "sektorlar üzrə"
+          header_check: { row: 6, col: 0, contains: "İl" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.loans.split.total, col: 1, population: all_credit_institutions, label_en: "Total loans (sector split table)" }
+            - { id: cba.loans.split.overdue, col: 2, population: all_credit_institutions, label_en: "Overdue loans (sector split table)" }
+            - { id: cba.loans.split.state_sector, col: 3, population: all_credit_institutions, label_en: "Loans to state sector" }
+            - { id: cba.loans.split.non_state_sector, col: 5, population: all_credit_institutions, label_en: "Loans to non-state sector (incl. households)" }
+            - { id: cba.loans.split.households, col: 7, population: all_credit_institutions, label_en: "Loans to households" }
+
+      - id: cba_deposits
+        title_pattern: "^Kredit təşkilatlarında yerləşdirilmiş depozit"
+        title_en: "Deposits and savings in credit institutions by depositor, currency and maturity (end of period)"
+        parser: cba_month_matrix
+        role: anchor
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.11"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.deposits.total, col: 1, population: all_credit_institutions, label_az: "Cəmi depozitlər", label_en: "Total deposits" }
+            - { id: cba.deposits.hh.total, col: 2, population: all_credit_institutions, label_az: "Ev təsərrüfatları", label_en: "Household deposits" }
+            - { id: cba.deposits.hh.azn_demand, col: 3, population: all_credit_institutions, label_en: "Household AZN demand deposits" }
+            - { id: cba.deposits.hh.azn_time, col: 4, population: all_credit_institutions, label_en: "Household AZN time deposits" }
+            - { id: cba.deposits.hh.fx_demand, col: 5, population: all_credit_institutions, label_en: "Household FX demand deposits" }
+            - { id: cba.deposits.hh.fx_time, col: 6, population: all_credit_institutions, label_en: "Household FX time deposits" }
+            - { id: cba.deposits.fin.total, col: 7, population: all_credit_institutions, label_az: "Maliyyə təşkilatları", label_en: "Financial corporation deposits" }
+            - { id: cba.deposits.fin.azn_demand, col: 8, population: all_credit_institutions }
+            - { id: cba.deposits.fin.azn_time, col: 9, population: all_credit_institutions }
+            - { id: cba.deposits.fin.fx_demand, col: 10, population: all_credit_institutions }
+            - { id: cba.deposits.fin.fx_time, col: 11, population: all_credit_institutions }
+            - { id: cba.deposits.nfc.total, col: 12, population: all_credit_institutions, label_az: "Qeyri-maliyyə təşkilatları", label_en: "Non-financial corporation deposits" }
+            - { id: cba.deposits.nfc.azn_demand, col: 13, population: all_credit_institutions }
+            - { id: cba.deposits.nfc.azn_time, col: 14, population: all_credit_institutions }
+            - { id: cba.deposits.nfc.fx_demand, col: 15, population: all_credit_institutions }
+            - { id: cba.deposits.nfc.fx_time, col: 16, population: all_credit_institutions }
+          checks:
+            - { type: components_sum, total: cba.deposits.total, parts: [cba.deposits.hh.total, cba.deposits.fin.total, cba.deposits.nfc.total], tolerance: 0.5 }
+            - { type: components_sum, total: cba.deposits.hh.total, parts: [cba.deposits.hh.azn_demand, cba.deposits.hh.azn_time, cba.deposits.hh.fx_demand, cba.deposits.hh.fx_time], tolerance: 0.5 }
+
+      - id: cba_deposits_currency
+        title_pattern: "^Cəmi depozit bazasının valyutalar üzrə strukturu"
+        title_en: "Structure of total deposits by currency and maturity (end of period)"
+        parser: cba_month_matrix
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.12"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.deposits.cur.total, col: 1, population: all_credit_institutions }
+            - { id: cba.deposits.cur.azn_demand, col: 2, population: all_credit_institutions }
+            - { id: cba.deposits.cur.azn_time, col: 3, population: all_credit_institutions }
+            - { id: cba.deposits.cur.fx_demand, col: 4, population: all_credit_institutions }
+            - { id: cba.deposits.cur.fx_time, col: 5, population: all_credit_institutions }
+          checks:
+            - { type: components_sum, total: cba.deposits.cur.total, parts: [cba.deposits.cur.azn_demand, cba.deposits.cur.azn_time, cba.deposits.cur.fx_demand, cba.deposits.cur.fx_time], tolerance: 0.5 }
+
+      - id: cba_household_savings
+        title_pattern: "^Fiziki şəxslərin əmanətlərinin strukturu"
+        title_en: "Structure of household savings by currency, residency and maturity (end of period)"
+        parser: cba_month_matrix
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.13"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.hh_savings.total, col: 1, population: banks, label_en: "Household savings, total" }
+            - { id: cba.hh_savings.azn, col: 2, population: banks, label_en: "Household savings in national currency" }
+            - { id: cba.hh_savings.fx, col: 3, population: banks, label_en: "Household savings in foreign currency" }
+            - { id: cba.hh_savings.residents, col: 4, population: banks }
+            - { id: cba.hh_savings.nonresidents, col: 7, population: banks }
+            - { id: cba.hh_savings.short_term, col: 10, population: banks }
+            - { id: cba.hh_savings.long_term, col: 24, population: banks }
+          checks:
+            - { type: components_sum, total: cba.hh_savings.total, parts: [cba.hh_savings.azn, cba.hh_savings.fx], tolerance: 0.5 }
+
+      - id: cba_rates_new
+        title_pattern: "^Yeni cəlb olunmuş müddətli depozit və yeni verilmiş kreditlər üzrə orta faiz"
+        title_en: "Average interest rates on new term deposits and new loans"
+        parser: cba_rates_blocks
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "3.2.1"
+          header_check: { row: 6, col: 1, contains: "Tarix" }
+          date_col: 1
+          label_col: 1
+          unit: "% p.a."
+          period_type: monthly_average_rate
+          date_convention: first_of_following_month
+          currency_rows: { "Manatla": AZN, "Xarici valyuta ilə": FX }
+          series:
+            - { id: cba.rates.new.deposit, col: 2, label_en: "New term deposits, average rate" }
+            - { id: cba.rates.new.loan, col: 3, label_en: "New loans, average rate" }
+
+      - id: cba_rates_outstanding
+        title_pattern: "^Müddətli depozit və kreditlər üzrə orta faiz"
+        title_en: "Average interest rates on outstanding term deposits and loans"
+        parser: cba_rates_blocks
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "3.2"
+          header_check: { row: 6, col: 1, contains: "Tarix" }
+          date_col: 1
+          label_col: 1
+          unit: "% p.a."
+          period_type: month_end_average_rate
+          date_convention: first_of_following_month
+          currency_rows: { "Manatla": AZN, "Xarici valyuta ilə": FX }
+          series:
+            - { id: cba.rates.out.deposit, col: 2, label_en: "Outstanding term deposits, average rate" }
+            - { id: cba.rates.out.deposit_legal, col: 3 }
+            - { id: cba.rates.out.deposit_individuals, col: 4 }
+            - { id: cba.rates.out.loan, col: 12, label_en: "Outstanding loans, average rate" }
+            - { id: cba.rates.out.loan_legal, col: 13 }
+            - { id: cba.rates.out.loan_individuals, col: 14 }
+
+      - id: cba_money_aggregates
+        title_pattern: "^Pul aqreqatları"
+        title_en: "Money aggregates (end of period)"
+        parser: cba_month_matrix
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.4"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.money.m3, col: 1, label_en: "Broad money M3" }
+            - { id: cba.money.m2, col: 2, label_en: "M2" }
+            - { id: cba.money.m1, col: 3, label_en: "M1" }
+            - { id: cba.money.m0, col: 4, label_en: "Cash outside banks M0" }
+            - { id: cba.money.fx_deposits, col: 7, label_en: "Deposits in hard currency" }
+
+      - id: cba_analytical_balance
+        title_pattern: "^AMB-nin analitik balansı"
+        title_en: "Analytical balance of the CBA (official reserves, monetary base)"
+        parser: cba_month_matrix
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.2"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN mln
+          period_type: month_end_stock
+          series:
+            - { id: cba.reserves.official_usd, col: 1, unit: USD mln, label_az: "Rəsmi beynəlxalq ehtiyatlar", label_en: "CBA official foreign reserves" }
+            - { id: cba.monetary_base, col: 4, label_en: "Monetary base" }
+            - { id: cba.monetary_base_azn, col: 5, label_en: "Monetary base in manat" }
+
+      - id: cba_fx_rates
+        title_pattern: "^Manatın xarici valyutalara qarşı rəsmi orta məzənnəsi"
+        title_en: "Official average exchange rates of the manat"
+        parser: cba_month_matrix
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        frequency: M
+        parse:
+          sheet: "2.16"
+          header_check: { row: 6, col: 0, contains: "Tarix" }
+          date_col: 0
+          unit: AZN per unit
+          period_type: monthly_average_rate
+          series:
+            - { id: cba.fx.usd_azn, col: 1, label_en: "AZN per USD, monthly average" }
+            - { id: cba.fx.eur_azn, col: 2, label_en: "AZN per EUR, monthly average" }
+            - { id: cba.fx.try_azn, col: 18, label_en: "AZN per TRY, monthly average" }
+            - { id: cba.fx.rub_azn, col: 26, label_en: "AZN per RUB, monthly average" }
+
+      - id: cba_loans_regions
+        title_pattern: "^Regionlar üzrə kredit qoyuluşu"
+        title_en: "Loans by economic region (banks, latest month)"
+        parser: cba_region_snapshot
+        role: optional
+        expected_lag_days: 30
+        history_in_file: false
+        frequency: M
+        parse:
+          sheet: "2.10"
+          header_check: { row: 6, col: 1, contains: "Region" }
+          label_col: 1
+          unit: AZN mln
+          scale: 0.001          # published in thousand manats
+          period_type: month_end_stock
+          population: banks
+          period_from_dataset: cba_loans_by_institution
+          national_label: "Azərbaycan Respublikası"
+          series:
+            - { id: cba.loans.region.total, col: 2, label_en: "Loans by region, total" }
+            - { id: cba.loans.region.rate, col: 3, unit: "% p.a.", scale: 100, label_en: "Average loan rate by region" }
+            - { id: cba.loans.region.azn, col: 4 }
+            - { id: cba.loans.region.fx, col: 6 }
+          validate_national_total_against: { series: cba.loans.state_banks, plus: [cba.loans.private_banks], tolerance: 1.0 }
+
+      - id: cba_deposits_regions
+        title_pattern: "^Regionlar üzrə cəlb olunmuş əmanətlər"
+        title_en: "Household savings by economic region (banks, latest month)"
+        parser: cba_region_snapshot
+        role: optional
+        expected_lag_days: 30
+        history_in_file: false
+        frequency: M
+        parse:
+          sheet: "2.14"
+          header_check: { row: 6, col: 0, contains: "Region" }
+          label_col: 0
+          unit: AZN mln
+          scale: 0.001
+          period_type: month_end_stock
+          population: banks
+          period_from_dataset: cba_household_savings
+          national_label: "Azərbaycan Respublikası"
+          series:
+            - { id: cba.hh_savings.region.total, col: 1, label_en: "Household savings by region, total" }
+            - { id: cba.hh_savings.region.rate, col: 2, unit: "% p.a.", scale: 100 }
+            - { id: cba.hh_savings.region.azn, col: 3 }
+            - { id: cba.hh_savings.region.fx, col: 5 }
+          validate_national_total_against: { series: cba.hh_savings.total, tolerance: 1.0 }
+
+  CBA_BANKING:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-188/credit-institutions
+    role: "Published bank-sector overviews (balance sheet, P&L, portfolio, NPL) and other credit-institution statistics"
+    discovery: cba_download_items
+    datasets:
+      - id: cba_bank_balance
+        title_pattern: "^Bank sektorunun icmal balansı"
+        title_en: "Overview of the banking sector: consolidated balance sheet (prudential reporting)"
+        parser: cba_bank_overview
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true      # one workbook per year; all matching titles are collected
+        frequency: M
+        parse:
+          sheet: "5.2"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 2
+          unit: AZN mln
+          period_type: month_end_stock
+          population: banks
+          rows:
+            - { id: cba.bank.assets.cash, match: "^1\\. Nağd vəsaitlər" }
+            - { id: cba.bank.assets.cba_accounts, match: "^2\\. Mərkəzi Bankda müxbir" }
+            - { id: cba.bank.assets.nostro, match: "^3\\. Nostro" }
+            - { id: cba.bank.assets.fi_deposits, match: "^4\\. Banklar da daxil olmaqla, maliyyə institutlarındakı depoz" }
+            - { id: cba.bank.assets.securities, match: "^5\\. Qiymətli kağızlar" }
+            - { id: cba.bank.assets.loans_customers_gross, match: "^7\\. Müştərilərə verilən kreditlər", label_en: "Loans to customers (gross)" }
+            - { id: cba.bank.assets.loan_provisions, match: "^7\\.1 Kreditlər üzrə mümkün zərərlərin", label_en: "Allowance for possible loan losses (stock)" }
+            - { id: cba.bank.assets.loans_customers_net, match: "^7\\.2 Xalis kreditlər" }
+            - { id: cba.bank.assets.total, match: "^11\\. Cəmi aktivlər", label_en: "Total assets" }
+            - { id: cba.bank.liab.deposits_nonfi, match: "^1\\. Depozitlər \\(maliyyə institutları istisna", label_en: "Deposits (excluding financial institutions)" }
+            - { id: cba.bank.liab.deposits_individuals, match: "^1\\.1 Fiziki şəxslərin depoziti" }
+            - { id: cba.bank.liab.deposits_individuals_term, match: "1\\.1\\.1 müddətli" }
+            - { id: cba.bank.liab.deposits_individuals_demand, match: "1\\.1\\.2 tələbli" }
+            - { id: cba.bank.liab.deposits_legal, match: "^1\\.2 Hüquqi şəxslərin depoziti" }
+            - { id: cba.bank.liab.deposits_legal_term, match: "1\\.2\\.1 müddətli" }
+            - { id: cba.bank.liab.deposits_legal_demand, match: "1\\.2\\.2 tələbli" }
+            - { id: cba.bank.liab.cba_claims, match: "^2\\. Mərkəzi Bankın banklara qarşı tələbləri" }
+            - { id: cba.bank.liab.fi_deposits, match: "^4\\. Maliyyə institutlarının  ?depozitləri" }
+            - { id: cba.bank.liab.bank_loans, match: "^5\\. Bankların kreditləri" }
+            - { id: cba.bank.liab.other_fi_loans, match: "^6\\. Digər maliyyə institutlarının kreditləri" }
+            - { id: cba.bank.liab.securities_issued, match: "^7\\. Banklar tərəfindən buraxılmış" }
+            - { id: cba.bank.liab.total, match: "^9\\. Cəmi öhdəliklər", label_en: "Total liabilities" }
+            - { id: cba.bank.capital.own, match: "^10\\. Xüsusi kapital", label_en: "Own (paid-in and retained) capital" }
+            - { id: cba.bank.capital.total, match: "^12\\. Cəmi kapital", label_en: "Total capital (book, prudential reporting)" }
+          checks:
+            - { type: components_sum, total: cba.bank.assets.total, parts: [cba.bank.liab.total, cba.bank.capital.total], tolerance: 2.0, dims: { currency: all } }
+
+      - id: cba_bank_pnl
+        title_pattern: "^Bank sektorunun mənfəət və zərər haqqında hesabatı"
+        title_en: "Profit and loss statement of the banking sector (year-to-date, prudential reporting)"
+        parser: cba_bank_overview
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        parse:
+          sheet: "5.3"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 1
+          unit: AZN mln
+          period_type: ytd_flow
+          population: banks
+          rows:
+            - { id: cba.bank.pnl.interest_income, match: "^1\\. Faiz və gəlirlərin", label_en: "Interest and similar income (YTD)" }
+            - { id: cba.bank.pnl.interest_income_loans, match: "^1\\.1 kreditlər üzrə" }
+            - { id: cba.bank.pnl.interest_receivable_provisions, match: "faiz borcları üzrə yaradılmış məqsədli ehtiyatlar", label_en: "Provisions on interest receivable (deducted in net interest income), YTD" }
+            - { id: cba.bank.pnl.interest_expense, match: "^2\\. Faiz və onlara bağlı xərclər", label_en: "Interest and similar expense (YTD)" }
+            - { id: cba.bank.pnl.interest_expense_deposits, match: "^2\\.1 depozitlər üzrə faizlər" }
+            - { id: cba.bank.pnl.net_interest_income, match: "^3\\. Xalis faiz gəliri", label_en: "Net interest income (YTD)" }
+            - { id: cba.bank.pnl.non_interest_income, match: "^4\\. Qeyri-faiz gəlirləri", label_en: "Non-interest income (YTD)" }
+            - { id: cba.bank.pnl.fee_income, match: "^4\\.1 hesabların aparılması" }
+            - { id: cba.bank.pnl.fx_income, match: "^4\\.2 məzənnə dəyişməsi" }
+            - { id: cba.bank.pnl.non_interest_expense, match: "^5\\. Qeyri-faiz xərcləri", label_en: "Non-interest (operating) expense (YTD)" }
+            - { id: cba.bank.pnl.operating_profit, match: "^6\\. Əməliyyat mənfəəti", label_en: "Operating profit (YTD)" }
+            - { id: cba.bank.pnl.provisions, match: "^7\\.Aktivlər üzrə mümkün zərərlərin", label_en: "Special provisions for possible asset losses, charge (YTD)" }
+            - { id: cba.bank.pnl.other_income, match: "^8\\. Digər gəlirlər" }
+            - { id: cba.bank.pnl.pretax_profit, match: "^9\\. Vergilər ödənilənədək mənfəət", label_en: "Profit before tax (YTD)" }
+            - { id: cba.bank.pnl.tax, match: "^10\\. Mənfəətdən vergilər", label_en: "Profit tax (YTD)" }
+            - { id: cba.bank.pnl.net_profit, match: "^11\\. Xalis mənfəət", label_en: "Net profit (YTD)" }
+          checks:
+            - { type: components_sum, total: cba.bank.pnl.net_interest_income, parts: [cba.bank.pnl.interest_income, -cba.bank.pnl.interest_expense, -cba.bank.pnl.interest_receivable_provisions], tolerance: 1.0, note: "CBA table 5.3: net interest income = interest income - interest expense - provisions on interest receivable" }
+            - { type: components_sum, total: cba.bank.pnl.net_profit, parts: [cba.bank.pnl.pretax_profit, -cba.bank.pnl.tax], tolerance: 1.0 }
+
+      - id: cba_bank_loan_portfolio
+        title_pattern: "^Bankların kredit portfelinin strukturu"
+        title_en: "Structure of banks' loan portfolio: business, consumer, mortgage (prudential)"
+        parser: cba_bank_overview
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        parse:
+          sheet: "5.4"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 1
+          unit: AZN mln
+          period_type: month_end_stock
+          population: banks
+          rows:
+            - { id: cba.bank.portfolio.total, match: "^Kredit portfeli", label_en: "Bank loan portfolio, total (prudential)" }
+            - { id: cba.bank.portfolio.business, match: "biznes kreditləri", label_en: "Business loans" }
+            - { id: cba.bank.portfolio.consumer, match: "istehlak kreditləri", label_en: "Consumer loans" }
+            - { id: cba.bank.portfolio.mortgage, match: "ipoteka kreditləri", label_en: "Mortgage loans" }
+          checks:
+            - { type: components_sum, total: cba.bank.portfolio.total, parts: [cba.bank.portfolio.business, cba.bank.portfolio.consumer, cba.bank.portfolio.mortgage], tolerance: 1.0 }
+
+      - id: cba_bank_npl
+        title_pattern: "^Bankların qeyri-işlək kreditlərinin strukturu"
+        title_en: "Structure of banks' non-performing loans (prudential NPL definition)"
+        parser: cba_bank_overview
+        role: companion
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        parse:
+          sheet: "5.6"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 1
+          unit: AZN mln
+          period_type: month_end_stock
+          population: banks
+          rows:
+            - { id: cba.bank.npl.total, match: "^Qeyri-işlək kredit \\(QİK\\)", label_az: "Qeyri-işlək kredit (QİK)", label_en: "Non-performing loans (NPL), banks" }
+            - { id: cba.bank.npl.business, match: "^ - biznes kreditləri$|^\\s*- biznes kreditləri\\s*$" }
+            - { id: cba.bank.npl.consumer, match: "^\\s*- istehlak kreditləri\\s*$" }
+            - { id: cba.bank.npl.mortgage, match: "^\\s*- ipoteka kreditləri\\s*$" }
+            - { id: cba.bank.npl.ratio, match: "^QİK/Kredit portfeli", unit: "%", scale: 100, label_en: "NPL ratio (NPL / bank loan portfolio), published" }
+            - { id: cba.bank.npl.ratio_business, match: "biznes \\(QİK\\)/biznes", unit: "%", scale: 100 }
+            - { id: cba.bank.npl.ratio_consumer, match: "istehlak \\(QİK\\)/istehlak", unit: "%", scale: 100 }
+            - { id: cba.bank.npl.ratio_mortgage, match: "ipoteka \\(QİK\\)/ipoteka", unit: "%", scale: 100 }
+
+      - id: cba_bank_business_sectors
+        title_pattern: "^Biznes portfelinin sahələr üzrə bölgüsü"
+        title_en: "Sectoral breakdown of banks' business loan portfolio (prudential)"
+        parser: cba_bank_overview
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        parse:
+          sheet: "5.8"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 1
+          unit: AZN mln
+          period_type: month_end_stock
+          population: banks
+          rows:
+            - { id: cba.bank.bizsector.total, match: "^Biznes portfeli", label_en: "Business portfolio, total" }
+            - { id: cba.bank.bizsector.industry, match: "^Sənaye", label_en: "Industry" }
+            - { id: cba.bank.bizsector.agriculture, match: "^Kənd təsərrüfatı", label_en: "Agriculture" }
+            - { id: cba.bank.bizsector.construction, match: "^Tikinti", label_en: "Construction" }
+            - { id: cba.bank.bizsector.transport, match: "^Nəqliyyat", label_en: "Transport" }
+            - { id: cba.bank.bizsector.ict, match: "^İnformasiya və Rabitə", label_en: "Information and communication" }
+            - { id: cba.bank.bizsector.trade, match: "^Ticarət", label_en: "Trade" }
+            - { id: cba.bank.bizsector.other, match: "^Digər qeyri-istehsal", label_en: "Other non-production and services" }
+          checks:
+            - { type: components_sum, total: cba.bank.bizsector.total, parts: [cba.bank.bizsector.industry, cba.bank.bizsector.agriculture, cba.bank.bizsector.construction, cba.bank.bizsector.transport, cba.bank.bizsector.ict, cba.bank.bizsector.trade, cba.bank.bizsector.other], tolerance: 1.0 }
+
+      - id: cba_bank_participants
+        title_pattern: "^Maliyyə bazarlarının iştirakçıları haqqında ümumi məlumat"
+        title_en: "General information on financial market participants (number of banks, branches, staff)"
+        parser: cba_bank_overview
+        role: optional
+        expected_lag_days: 30
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        parse:
+          sheet: "5.1"
+          header_row: 6
+          label_col: 0
+          cols_per_date: 1
+          unit: count
+          period_type: month_end_stock
+          population: banks
+          rows:
+            - { id: cba.bank.count, match: "^Bankların sayı", label_en: "Number of banks" }
+            - { id: cba.bank.branches, match: "^Bankların filiallarının sayı", label_en: "Number of bank branches" }
+            - { id: cba.bank.staff, match: "^Bank işçilərinin sayı", label_en: "Number of bank employees" }
+
+  CBA_BULLETIN:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-40/statistical-bulletin
+    role: "Statistical bulletin (monthly PDF and XLSX): historical reference and reconciliation"
+    discovery: cba_download_items
+    datasets:
+      - id: cba_bulletin_xlsx
+        title_pattern: "^(Yanvar|Fevral|Mart|Aprel|May|İyun|Iyun|İyul|Iyul|Avqust|Sentyabr|Oktyabr|Noyabr|Dekabr)\\b"
+        title_en: "Statistical bulletin workbook (monthly)"
+        parser: none
+        role: reference
+        expected_lag_days: 45
+        history_in_file: true
+        multi_document: true
+        frequency: M
+        only_extension: xlsx
+        download: latest_only
+
+  CBA_CALENDAR:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-103/schedule-of-statistical-releases
+    role: "Expected release timing"
+    discovery: cba_download_items
+    datasets:
+      - id: cba_release_schedule
+        title_pattern: "^Statistik hesabatların yayımlanması qrafiki"
+        title_en: "Schedule of publication of statistical reports"
+        parser: none
+        role: reference
+        expected_lag_days: null
+        history_in_file: false
+        frequency: irregular
+
+  SSC_MACRO:
+    institution: SSC
+    entry_point: https://www.stat.gov.az/news/macroeconomy.php?page=1
+    role: "Monthly macroeconomic overview report (Sosial, iqtisadi inkişaf) and release headlines"
+    discovery: ssc_macro_news
+    datasets:
+      - id: ssc_macro_headline_html
+        title_pattern: "."
+        title_en: "SSC headline table 'Main macroeconomic indicators' (HTML, one page per monthly edition)"
+        parser: ssc_macro_html_table
+        role: anchor
+        expected_lag_days: 15
+        history_in_file: false
+        multi_document: true
+        frequency: M
+        parse: {}
+      - id: ssc_monthly_report
+        title_pattern: "(hesabat|doklad)_\\d{4}-\\d{2}\\.pdf$"
+        title_en: "SSC monthly report 'Social and economic development' (macroeconomic indicators)"
+        parser: ssc_monthly_report_pdf
+        role: anchor
+        expected_lag_days: 20
+        history_in_file: false
+        multi_document: true
+        frequency: M
+        parse: {}
+
+  SSC_OPEN_DATA:
+    institution: SSC
+    entry_point: https://www.stat.gov.az/menu/6/opendata/
+    role: "Sector tables, prices, national accounts, labour market"
+    discovery: ssc_topic_pages
+    topic_pages:
+      price_tarif: https://www.stat.gov.az/source/price_tarif/
+      system_nat_accounts: https://www.stat.gov.az/source/system_nat_accounts/
+      labour: https://www.stat.gov.az/source/labour/
+    datasets:
+      - id: ssc_price_bulletin
+        topic: price_tarif
+        href_pattern: "Qiymetler_ve_qiymet_indeksleri_bulleten_\\d{4}_[a-zə]+\\.xls$"
+        title_en: "Prices and price indices bulletin (monthly CPI m/m, y/y and YTD by product group)"
+        parser: ssc_price_bulletin_xls
+        role: anchor
+        expected_lag_days: 12
+        history_in_file: partial      # current calendar year only
+        multi_document: true
+        frequency: M
+        parse: {}
+      - id: ssc_cpi_index_2010
+        topic: price_tarif
+        href_pattern: "/001_2az\\.xlsx$"
+        title_en: "Consumer price index (2010=100), monthly"
+        parser: ssc_cpi_index_xlsx
+        role: companion
+        expected_lag_days: 40
+        history_in_file: true
+        frequency: M
+        parse: {}
+      - id: ssc_gdp_quarterly
+        topic: system_nat_accounts
+        href_pattern: "/03r\\.xls$"
+        title_en: "GDP production by quarter and activity (current prices and constant 2005 prices)"
+        parser: ssc_gdp_quarterly_xls
+        role: companion
+        expected_lag_days: 90
+        history_in_file: true
+        frequency: Q
+        parse: {}
+      - id: ssc_gdp_oil_nonoil_annual
+        topic: system_nat_accounts
+        href_pattern: "/007_1\\.xls$"
+        title_en: "GDP in oil-gas and non-oil-gas sectors, annual (nominal and real index)"
+        parser: ssc_gdp_oil_nonoil_annual_xls
+        role: reference
+        expected_lag_days: 120
+        history_in_file: true
+        frequency: A
+        parse: {}
+      - id: ssc_wages_annual
+        topic: labour
+        href_pattern: "/004_2-3\\.xls$"
+        title_en: "Average monthly nominal wage by economic activity, annual"
+        parser: ssc_wages_annual_xls
+        role: reference
+        expected_lag_days: 240
+        history_in_file: true
+        frequency: A
+        parse: {}
+
+  CBA_POLICY:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-13/monetary-policy-review
+    role: "Monetary policy reviews and annual policy statements (narrative publications)"
+    discovery: cba_publications
+    datasets:
+      - id: cba_monetary_policy_review
+        pub_type: monetary_policy_review
+        title_en: "Monetary Policy Review"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: Q
+        # the review moved from a January-to-month cumulative format to a quarterly edition in
+        # November 2024; both title forms are resolved by azmonitor/publications/editions.py
+        expected_lag_days: 45
+        pages:
+          az: https://www.cbar.az/page-13/monetary-policy-review?language=az
+          en: https://www.cbar.az/page-13/monetary-policy-review?language=en
+        parse:
+          pub_type: monetary_policy_review
+          tables: true
+          # the release event belongs to the Azerbaijani edition; the English edition is a
+          # translation whose appearance is recorded separately and never as a new release
+          original_language: az
+          # the Azerbaijani edition is the original; the English edition is stored and citable but
+          # is not a second source of numbers for the same facts
+          extract_language: az
+      - id: cba_policy_directions
+        pub_type: policy_directions
+        title_en: "Statement on the main directions of monetary policy"
+        parser: cba_publication
+        role: optional
+        multi_document: true
+        download: all
+        frequency: A
+        expected_lag_days: 40
+        pages:
+          az: https://www.cbar.az/page-14/main-directions-of-the-monetary-policy?language=az
+          en: https://www.cbar.az/page-14/main-directions-of-the-monetary-policy?language=en
+        parse:
+          pub_type: policy_directions
+          tables: false
+          original_language: az
+
+  CBA_POLICY_DECISIONS:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-134/monetary-policy-decisions
+    role: "Interest rate corridor decisions (press releases, eight scheduled meetings a year)"
+    discovery: cba_decisions
+    datasets:
+      - id: cba_policy_decisions
+        pub_type: policy_decision
+        title_en: "Monetary policy decision"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: E
+        expected_lag_days: 0
+        pages:
+          az: https://www.cbar.az/page-134/monetary-policy-decisions?language=az
+          en: https://www.cbar.az/page-134/monetary-policy-decisions?language=en
+        parse:
+          pub_type: policy_decision
+          tables: false
+          extract_language: az
+          original_language: az
+
+  CBA_STABILITY:
+    institution: CBA
+    entry_point: https://www.cbar.az/page-798/financial-stability-report
+    role: "Financial Stability Report: regulatory capital, liquidity coverage, stress tests"
+    discovery: cba_publications
+    datasets:
+      - id: cba_financial_stability_report
+        pub_type: financial_stability_report
+        title_en: "Financial Stability Report"
+        parser: cba_publication
+        role: companion
+        multi_document: true
+        download: all
+        frequency: S
+        expected_lag_days: 150
+        pages:
+          az: https://www.cbar.az/page-798/financial-stability-report?language=az
+          en: https://www.cbar.az/page-798/financial-stability-report?language=en
+        parse:
+          pub_type: financial_stability_report
+          tables: true
+          # numbers are read from the official English edition, but the Azerbaijani edition is
+          # still the original release: the two questions are separate
+          original_language: az
+          # indicator and stress-test wording is matched against the official English edition
+          extract_language: en
+
+  SSC_CALENDAR:
+    institution: SSC
+    entry_point: https://www.stat.gov.az/menu/4/publications/
+    role: "Release calendar (interactive page; no machine-readable file discovered)"
+    discovery: none
+    datasets: []
+
+# Series that parsers generate row by row rather than from an explicit list above (SSC headline
+# table, price bulletin groups, GDP workbooks, publication extraction). A metric may reference any
+# series under these prefixes; anything else must be declared as a dataset series, so a typo in a
+# metric input is caught by the checks rather than silently producing an empty series.
+generated_series_prefixes:
+  - ssc.hl.
+  - ssc.cpi.
+  - ssc.gdp.
+  - ssc.wage.
+  - cba.policy.
+  - cba.forecast.
+  - cba.fsr.
+
+# CBA-to-SSC sector mapping for M09 (credit vs activity). Unmatched sectors are excluded on purpose.
+sector_mapping:
+  - { key: agriculture, cba_series: cba.loans.sector.agriculture, ssc_metric: ssc.gdp.sector.agriculture.real_growth_ytd, label_en: "Agriculture", note: "CBA: agriculture, forestry and fisheries loans; SSC: agriculture, forestry and fisheries value added (real, YTD)" }
+  - { key: construction, cba_series: cba.loans.sector.construction, ssc_metric: ssc.gdp.sector.construction.real_growth_ytd, label_en: "Construction", note: "CBA: building and construction loans; SSC: construction value added (real, YTD)" }
+  - { key: trade, cba_series: cba.loans.sector.trade_services, ssc_metric: ssc.gdp.sector.trade.real_growth_ytd, label_en: "Trade and services", note: "CBA: trade and services loans (wider than SSC trade); SSC: trade and repair of vehicles value added" }
+  - { key: transport, cba_series: cba.loans.sector.transport_comm, ssc_metric: ssc.gdp.sector.transport.real_growth_ytd, label_en: "Transport and communication", note: "CBA: transport and communication loans; SSC: transport and storage value added (ICT excluded)" }
+  - { key: industry, cba_series: cba.loans.sector.industry, ssc_metric: ssc.gdp.sector.manufacturing.real_growth_ytd, label_en: "Industry and manufacturing", note: "CBA: industry and manufacturing loans; SSC: manufacturing value added (mining excluded)" }
+  - { key: mining_energy, cba_series: cba.loans.sector.mining_energy, ssc_metric: ssc.gdp.sector.mining.real_growth_ytd, label_en: "Mining and energy", note: "CBA: mining, electricity, gas and water loans; SSC: mining value added only" }

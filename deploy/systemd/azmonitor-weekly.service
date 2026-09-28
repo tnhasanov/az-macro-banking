@@ -1,0 +1,23 @@
+# The Monday digest, covering the previous calendar week (Monday to Sunday, Asia/Baku).
+
+[Unit]
+Description=azmonitor weekly release digest
+Documentation=file:/opt/az-macro-banking/docs/deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/az-macro-banking/deploy
+Environment=COMPOSE_PROJECT_NAME=azmonitor
+ExecStart=/usr/bin/docker compose run --rm weekly-digest
+TimeoutStartSec=45min
+SuccessExitStatus=0 2 4
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=azmonitor-weekly
+
+[Install]
+WantedBy=multi-user.target

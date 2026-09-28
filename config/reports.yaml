@@ -1,0 +1,113 @@
+# Report definitions: slide blueprint, critical inputs, optional modules and reporting rules.
+# Slide ids are stable; report numbering is consecutive at render time.
+
+monthly:
+  title_key: report_title
+  anchors:
+    banking: [cba_loans_by_institution, cba_deposits]          # reporting anchor = banking month with compatible loans + deposits
+    macro: [ssc_macro_headline_html]                             # GDP (YTD) from the SSC headline table
+    prices: [ssc_price_bulletin]                                 # CPI m/m, y/y, YTD
+  companions:                                                    # waited for up to schedule.companion_grace_days
+    - cba_bank_balance
+    - cba_bank_pnl
+    - cba_bank_npl
+    - cba_bank_loan_portfolio
+    - cba_rates_new
+    - cba_deposits_currency
+    - cba_loans_by_sector
+    - cba_loans_by_maturity
+    - cba_household_savings
+    - cba_analytical_balance
+  optional:
+    - cba_loans_regions
+    - cba_deposits_regions
+    - cba_new_loans_by_maturity
+    - cba_bank_business_sectors
+    - cba_rates_outstanding
+    - cba_money_aggregates
+    - ssc_monthly_report
+    - ssc_gdp_quarterly
+    - ssc_cpi_index_2010
+  slides:
+    - { id: M01, type: cover }
+    - { id: M02, type: exec_findings, max_findings: 5 }
+    - { id: M03, type: scorecard }
+    - { id: M04, type: growth }
+    - { id: M05, type: inflation_income }
+    - { id: M06, type: sectors }
+    - { id: M07, type: external }
+    - { id: M08, type: lending }
+    - { id: M09, type: credit_vs_activity }
+    - { id: M10, type: asset_quality }
+    - { id: M11, type: deposits }
+    - { id: M12, type: dollarisation }
+    - { id: M13, type: rates }
+    - { id: M14, type: credit_vs_funding }
+    - { id: M15, type: profitability }
+    - { id: M16, type: capital_liquidity }
+    - { id: M17, type: regions }
+    - { id: M18, type: questions_next }
+    - { id: A01, type: definitions, appendix: true }
+    - { id: A02, type: source_register, appendix: true }
+    - { id: A03, type: revisions, appendix: true, when: material }
+    - { id: A04, type: extra_series, appendix: true }
+  scorecard:
+    # metric: value shown; change_metric: change column; kind: pp (percentage points) | pct | abs
+    - { key: non_oil_growth, label: "Non-oil-gas GDP, real growth (YTD)", metric: ssc.hl.gdp_nonoil.growth, change: prior_edition, kind: pp, good: up }
+    - { key: gdp_growth, label: "GDP, real growth (YTD)", metric: ssc.hl.gdp.growth, change: prior_edition, kind: pp, good: up }
+    - { key: cpi_yoy, label: "CPI inflation, y/y", metric: ssc.cpi.all.yoy, change: lag1, kind: pp, good: down }
+    - { key: real_wage, label: "Real wage growth, estimate (YTD)", metric: ssc.real_wage_growth_est, change: prior_edition, kind: pp, good: up }
+    - { key: loans_yoy, label: "Loans to the economy, y/y", metric: cba.loans.total_ci.yoy, change: lag1, kind: pp, good: neutral }
+    - { key: deposits_yoy, label: "Total deposits, y/y", metric: cba.deposits.total.yoy, change: lag1, kind: pp, good: up }
+    - { key: deposit_fx_share, label: "FX share of deposits", metric: cba.deposits.fx_share, change: lag12, kind: pp, good: neutral }
+    - { key: npl_ratio, label: "NPL ratio, banks (published)", metric: cba.bank.npl.ratio, change: lag12, kind: pp, good: down }
+    - { key: overdue_ratio, label: "Overdue loans / loans, all credit institutions", metric: cba.loans.overdue_ratio, change: lag12, kind: pp, good: down }
+    - { key: spread_azn, label: "Indicative pricing spread, AZN (new business)", metric: cba.rates.new.spread, dims: { currency: AZN }, change: lag12, kind: pp, good: neutral }
+    - { key: net_profit, label: "Bank net profit, YTD (AZN mln)", metric: cba.bank.pnl.net_profit, change: lag12, kind: pct, good: up }
+    - { key: equity_assets, label: "Total capital / assets (book)", metric: cba.bank.equity_to_assets, change: lag12, kind: pp, good: up }
+    - { key: liquid_assets, label: "Liquid assets / assets (book)", metric: cba.bank.liquid_assets_ratio, change: lag12, kind: pp, good: neutral }
+
+weekly:
+  target_slides: [W01, W02, W03, W04, W05, W06]
+  slides:
+    - { id: W01, type: weekly_cover_releases }
+    - { id: W02, type: weekly_macro }
+    - { id: W03, type: weekly_banking }
+    - { id: W04, type: weekly_material, when: material }
+    - { id: W05, type: weekly_questions }
+    - { id: W06, type: weekly_sources, when: needed }
+
+sector:
+  sectors:
+    agriculture:
+      label: Agriculture
+      ssc_activity: [ssc.hl.agriculture.growth, ssc.gdp.sector.agriculture.real_growth_ytd]
+      cba_credit: cba.loans.sector.agriculture
+      cba_bank_business: cba.bank.bizsector.agriculture
+    construction:
+      label: Construction
+      ssc_activity: [ssc.gdp.sector.construction.real_growth_ytd, ssc.hl.investment.growth]
+      cba_credit: cba.loans.sector.construction
+      cba_bank_business: cba.bank.bizsector.construction
+    trade:
+      label: Trade and services
+      ssc_activity: [ssc.hl.retail.growth, ssc.gdp.sector.trade.real_growth_ytd]
+      cba_credit: cba.loans.sector.trade_services
+      cba_bank_business: cba.bank.bizsector.trade
+    transport:
+      label: Transport and communication
+      ssc_activity: [ssc.hl.transport.growth, ssc.gdp.sector.transport.real_growth_ytd]
+      cba_credit: cba.loans.sector.transport_comm
+      cba_bank_business: cba.bank.bizsector.transport
+    industry:
+      label: Industry and manufacturing
+      ssc_activity: [ssc.hl.industry_nonoil.growth, ssc.gdp.sector.manufacturing.real_growth_ytd]
+      cba_credit: cba.loans.sector.industry
+      cba_bank_business: cba.bank.bizsector.industry
+  slides: [S01, S02, S03, S04, S05, S06, S07, S08]
+
+rules:
+  chart_window: 36
+  revision_materiality_note: "Workflow thresholds from settings.materiality; not risk limits."
+  partial_edition_label: "Partial edition"
+  facts_only_label: "Facts-only descriptive narrative"

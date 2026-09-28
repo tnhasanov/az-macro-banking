@@ -1,0 +1,101 @@
+# Operating defaults for the Azerbaijan Macro & Banking Monitor.
+# Everything here can be changed without editing application code.
+# Environment variables AZMONITOR_DATA_DIR and AZMONITOR_OUTPUT_DIR override the paths.
+
+geography: Azerbaijan
+timezone: Asia/Baku
+
+# Output language for reports: en | az. Both use the same calculations and sources.
+language: en
+
+# Historical collection start (YYYY-MM). Older observations are stored when a
+# source file contains them, but reports and quality checks use this window.
+history_start: "2020-01"
+
+# Main chart window (number of latest observations shown on slides).
+chart_window: 36
+
+paths:
+  data_dir: data          # SQLite database, raw documents, parquet snapshots, state
+  output_dir: outputs     # report editions and the `latest` pointer
+
+report:
+  status_label: "Draft for review"
+  organisation_label: "Azer-Turk Bank"     # footer label only; no internal data is used
+  audience_label: "For internal discussion"
+  edition_title: "Azerbaijan Macro & Banking Monitor"
+  theme: config/theme.yaml
+  glossary: config/glossary.yaml
+
+http:
+  user_agent: "az-macro-banking-monitor/0.1 (+official statistics collector; contact: data-team)"
+  timeout_seconds: 90
+  retries: 3
+  backoff_seconds: 2
+  min_interval_seconds: 1.0
+  max_download_mb: 60
+
+schedule:
+  daily_check_time_local: "09:00"     # Asia/Baku; used by scripts/run_due.sh documentation and run-due
+  companion_grace_days: 7             # wait for optional banking companion tables before a partial edition
+  weekly_digest_weekday: 1            # 0=Monday ... 6=Sunday (weekly digest generated on this weekday if new evidence)
+  # A publication is briefed when it is newly released, not when it is newly stored: a backfill loads
+  # years of editions at once and none of those is a release event.
+  brief_within_days: 45
+  max_runtime_minutes: 45
+  lock_stale_minutes: 120
+
+narrative:
+  # none          -> deterministic facts-only narrative
+  # file          -> --narrative-file supplied JSON (analyst or Claude Code authored)
+  # api           -> provider call, only when credentials are configured
+  provider: none
+  api:
+    provider: anthropic
+    model_env: AZMONITOR_NARRATIVE_MODEL     # model id read from the environment; nothing is hardcoded
+    max_tokens: 4000
+
+delivery:
+  enabled: false
+  destination_env: AZMONITOR_DELIVERY_WEBHOOK_URL
+
+# Materiality by series type (workflow settings, not risk limits). Values are in the
+# unit of the series; revisions below the threshold are logged but not flagged.
+materiality:
+  stock_azn_mln: 1.0
+  flow_azn_mln: 1.0
+  ratio_pct: 0.05
+  rate_pct: 0.01
+  index: 0.05
+  count: 1
+
+monitoring_flags:
+  # Each flag: metric, comparison window (observations), direction, threshold, minimum observations.
+  - id: loans_yoy_jump
+    metric: cba.loans.total_ci.yoy
+    window: 12
+    direction: up
+    threshold_pp: 3.0
+    min_obs: 13
+  - id: overdue_ratio_rise
+    metric: cba.loans.overdue_ratio
+    window: 6
+    direction: up
+    threshold_pp: 0.3
+    min_obs: 7
+  - id: deposit_fx_share_shift
+    metric: cba.deposits.fx_share
+    window: 12
+    direction: any
+    threshold_pp: 3.0
+    min_obs: 13
+
+# Persistent storage for unattended runs. The commands run inside the job lock, so the whole
+# restore -> process -> save cycle is one protected unit. A failed restore stops the run before any
+# report is produced; a failed save leaves the outputs on the local disk and is reported as such.
+persistence:
+  backup: true              # snapshot the database with VACUUM INTO before processing
+  keep_backups: 7
+  min_documents: 50         # a restored dataset with fewer documents is treated as a failed restore
+  restore_cmd: null         # e.g. 'aws s3 sync s3://bucket/azmonitor/data "$AZMONITOR_DATA_DIR" --delete'
+  save_cmd: null            # e.g. 'aws s3 sync "$AZMONITOR_DATA_DIR" s3://bucket/azmonitor/data'

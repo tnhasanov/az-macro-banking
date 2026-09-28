@@ -1,0 +1,18 @@
+# Monday 08:30 Asia/Baku.
+#
+# Persistent=true matters more here than for the source checks: a host down on Monday morning should
+# still produce the digest when it comes back, because the window it covers is fixed and does not
+# expire. The digest names its own boundaries, so a late one is still correct.
+
+[Unit]
+Description=azmonitor weekly digest, Monday 08:30 Asia/Baku
+
+[Timer]
+OnCalendar=Mon *-*-* 08:30:00
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=120
+Unit=azmonitor-weekly.service
+
+[Install]
+WantedBy=timers.target
