@@ -8,6 +8,7 @@
 import Link from "next/link";
 import { ensureSchema, envKey, environment, meta, recentJobs, type Availability, type SourceCheck } from "@/lib/appstate";
 import { sql } from "@/lib/db";
+import { databaseProblem } from "@/lib/dbproblem";
 import { dispatcher } from "@/lib/dispatch";
 import { viewer } from "@/lib/viewer";
 import { Card, Empty, StatusBadge } from "@/components/ui";
@@ -26,16 +27,19 @@ function previousMondays(n: number): string[] {
 
 export default async function GeneratePage() {
   let unavailable: string | null = null;
+  let reason: string | null = null;
   try {
     await ensureSchema();
-  } catch {
+  } catch (error) {
     unavailable = "The application database could not be reached, so no report can be requested right now.";
+    reason = databaseProblem(error);
+    console.error(`generate: database unavailable: ${reason}`);
   }
   if (unavailable) {
     return (
       <>
         <header className="topbar"><h1>Generate a report</h1></header>
-        <div className="content"><Empty title={unavailable} /></div>
+        <div className="content"><Empty title={unavailable}>{reason}</Empty></div>
       </>
     );
   }
