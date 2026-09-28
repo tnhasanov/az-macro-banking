@@ -14,6 +14,11 @@ The system is **not operational yet**: the real-cloud journey has not run end to
 | 2026-09-27 04:29 | Building the dataset from the official websites on a runner | manual run [36294459892](https://github.com/tnhasanov/az-macro-banking/actions/runs/36294459892), commit `cb2180b`, dry run | cancelled at the 60-minute limit: `www.cbar.az` and the statistics committee answered, every file on `uploads.cbar.az` timed out (90 s, four times each). Led to the per-host cut-off (`fd55dde`) |
 | 2026-09-27 05:30 | Preflight with the store token | manual run [36297069332](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297069332), commit `fd55dde`, dry run | Neon schema 6, nothing pending, no jobs, recipients or switches; Blob `read-write`, token belongs to `BLOB_STORE_ID`'s store, authenticated; **store empty** (no dataset, no report objects) |
 | 2026-09-27 05:33 | Seed the empty store from the official sources | manual run [36297517710](https://github.com/tnhasanov/az-macro-banking/actions/runs/36297517710), commit `48177b3` | build finished in 20 min thanks to the cut-off: statistics committee and `www.cbar.az` publications collected (237 documents, 7,306 observations, 54 publications; SQLite integrity ok), every CBA table on `uploads.cbar.az` failed to download (21 datasets); **seeding refused** ("the build reported source errors; not seeding a partial dataset"); store still empty |
+| 2026-09-28 11:10 | Bootstrap bundle checked on a runner, then check-only against the store | a runner of a private repository (bundle and store token never in this public repository), code `7c13b23` | all 9 parts and the assembled bundle match their checksums; restored with SQLite integrity ok; the token authenticated `read-write`; **store empty**, nothing written |
+| 2026-09-28 11:11 | Seed the store from the bundle | same, code `7c13b23` | **seeded**: pointer, state archive (5,851,807 bytes) and source archive (254,156,293 bytes) in the store, sizes read back; the backup then failed re-downloading: *expected 0 bytes, received 5851807* |
+| 2026-09-28 11:14 | Read-only probe of what the service returns | same | a 724-byte blob comes back plain with a Content-Length; both archives come back `Content-Encoding: br`, chunked, no Content-Length, weak ETag `W/"…"`. The SDK then reports size 0. Fixed in `9dae188` (size from the metadata API; ETag in strong form) |
+| 2026-09-28 11:26 | Verified backup, then restore on a fresh runner | same, code `9dae188` | stored dataset is the bundle's (same source-archive fingerprint); backup `dataset/backups/20260928T112657Z-bootstrap.json` recorded after a restore with SQLite `ok` on both databases; a fresh runner restored the store (383 documents, 37,326 observations, 95 publications, 270 vintages, 12,833 passages, 87 policy decisions, 99 report editions; integrity ok) and the backup again, intact. Each 260 MB restore took about 4 minutes |
+| 2026-09-28 11:37 | Preflight (dry run) with this repository's credential | manual run [36416630224](https://github.com/tnhasanov/az-macro-banking/actions/runs/36416630224), commit `9dae188` | token belongs to `BLOB_STORE_ID`'s store; the store holds the seeded dataset (same keys, digests and `saved_at`), no report objects; Neon schema 6, no jobs, email or recipients, no switches (automatic checks and email off); delivery disabled; read model empty until the first production run |
 
 The isolated automatic-path event (`scripts/cloud/isolated_event.py`, below) was tried locally —
 local Postgres, a local copy of the production dataset, the live CBA website — on 2026-09-27
@@ -30,7 +35,7 @@ the URL CBA's page listed (discovery was live), classified it `new_observations`
 and published `monthly:2026-07:v41` superseding v40; no email was queued; the production pointer was
 unchanged. This is a local result; the same task still has to run on the real services.
 
-Nothing else has run against Vercel, Blob, Neon or Resend. In particular no report has been
+Nothing else has run against Vercel, Blob, Neon or Resend beyond the rows above. In particular no report has been
 requested from a deployed dashboard, no runner has been dispatched by one, and no email has been
 sent.
 
@@ -38,6 +43,13 @@ Why not more: from the development environment Vercel, Blob, Neon and Resend are
 network policy, so everything real runs on GitHub's runners, which can reach them; and the steps
 below that need your accounts (a store token, a GitHub token, Resend, Vercel production settings)
 cannot be done from here.
+
+**Open.** (1) The `windows-seed` job fails since `9dae188`: the stand-in service now compresses
+larger downloads the way the real one does, and on Windows the 3.6 MB rehearsal archive arrives
+as 0 bytes (the 300 KB case passes; Linux passes at every size, under Node 20 and 22). The Linux
+workers are not affected; the Windows reseeding procedure is not currently verified. (2) A 260 MB
+restore takes about 4 minutes because the service recompresses the archives on the way out; every
+report job pays it.
 
 ## Findings from inspecting the deployment
 
@@ -156,7 +168,11 @@ no dataset** and the build reported no source errors, then pins a verified backu
 **1. Done — the store token is a GitHub secret** (verified by run 36297069332: `read-write`, the
 token's store matches `BLOB_STORE_ID`, authenticated; the store was empty).
 
-**2. You — seed the store from the bootstrap bundle, on your computer.** The development environment
+**2. Done — the store is seeded from the bootstrap bundle** (2026-09-28, table above), from a
+private repository's runner rather than a computer. The procedures below remain for reseeding.
+The Windows script's rehearsal currently fails on a larger compressed download (see *Open*).
+
+*Reseeding from a computer:* The development environment
 cannot reach Blob, and the bundle does not travel through the repository or any public artifact: it
 was handed to you privately — `README-SEED.txt`, `SHA256SUMS`, `PARTS.SHA256SUMS`,
 `VERIFICATION.json`, `current.json`, `state-20260920T093543Z-snapshot.tar.gz` and
