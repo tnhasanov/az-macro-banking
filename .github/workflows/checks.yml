@@ -265,7 +265,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-          node --test conformance.test.mjs oidc-from-env-file.test.mjs vercel-oidc.test.mjs
+          node --test conformance.test.mjs oidc-from-env-file.test.mjs vercel-oidc.test.mjs helper-get.test.mjs
           if ($LASTEXITCODE -ne 0) { throw "the Blob helper's tests failed on Windows" }
 
       - name: The storage tests, on Windows

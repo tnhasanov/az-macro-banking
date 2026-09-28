@@ -9,6 +9,10 @@
  * file moves, the SDK building each request — while the service's answers come from here. It
  * proves nothing about Vercel itself, and must never be reported as a real upload.
  *
+ * Downloads are answered the way the real service was observed to answer them: a small object plain
+ * with a Content-Length, a larger one Brotli-compressed with no Content-Length and a weak ETag. The
+ * helper once took the missing length for a zero-byte object and called every archive truncated.
+ *
  * Two limits, both deliberate:
  *   * It only accepts the rehearsal token (`vercel_blob_rw_rehearsal_…`), so a real credential can
  *     never be pointed at it by mistake and then sent somewhere else.
@@ -20,6 +24,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { brotliCompressSync } from "node:zlib";
 
 const ROOT = process.env.AZMONITOR_FAKE_BLOB_DIR;
 const TOKEN = process.env.BLOB_READ_WRITE_TOKEN?.trim() ?? "";
@@ -31,6 +36,8 @@ if (TOKEN && !/^vercel_blob_rw_rehearsal_[A-Za-z0-9]+$/.test(TOKEN)) {
 const API = "https://vercel.com";
 const DOWNLOAD = "https://rehearsal.private.blob.vercel-storage.com";
 const OBJECTS = join(ROOT, "objects");
+/** The real service sent a 724-byte blob plain and a 5.8 MB one compressed; this sits between. */
+const COMPRESS_OVER = 16 * 1024;
 
 const file = (pathname) => join(OBJECTS, encodeURIComponent(pathname));
 const etagOf = (bytes) => `"${createHash("sha256").update(bytes).digest("hex").slice(0, 32)}"`;
@@ -129,6 +136,13 @@ async function install() {
     const m = meta(key);
     if (!m) return { statusCode: 404, data: "" };
     const bytes = readFileSync(file(key));
+    if (bytes.length > COMPRESS_OVER) {
+      // As the real service answers a larger private blob (observed 2026-09-28): Brotli, chunked,
+      // no Content-Length, and the weak form of the ETag.
+      return { statusCode: 200, data: brotliCompressSync(bytes),
+               responseOptions: { headers: { "content-encoding": "br", etag: `W/${m.etag}`,
+                                             "content-type": m.contentType } } };
+    }
     return { statusCode: 200, data: bytes,
              responseOptions: { headers: { "content-length": String(bytes.length), etag: m.etag,
                                            "content-type": m.contentType } } };

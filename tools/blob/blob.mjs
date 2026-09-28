@@ -238,14 +238,41 @@ async function cmdGet(o) {
     throw error;
   }
   const size = (await stat(partial)).size;
-  const expected = found.blob?.size ?? null;
+  const expected = await expectedSize(o.key, found);
   if (expected !== null && expected !== size) {
     await rm(partial, { force: true });
     fail(`${o.key} was truncated: expected ${expected} bytes, received ${size}`, 1);
   }
   await rename(partial, o.out);
   // The ETag arrives with the body, so the caller knows exactly which version it read.
-  emit({ key: o.key, size, contentType: found.blob?.contentType ?? null, etag: found.blob?.etag ?? null });
+  emit({ key: o.key, size, contentType: found.blob?.contentType ?? null, etag: strongEtag(found.blob?.etag) });
+}
+
+/**
+ * How many bytes a complete download of `key` holds.
+ *
+ * Observed on the real service (2026-09-28): a small private blob comes back plain with a
+ * Content-Length, but a large one comes back `Content-Encoding: br`, chunked, with no Content-Length
+ * — and the SDK then reports its size as 0, which made every download of the dataset read as
+ * truncated. fetch has already decompressed the body, so when the response cannot state the size
+ * (compressed, or no length) it is taken from the metadata API, which reports the stored bytes.
+ * Keys read this way are immutable archives, so the two requests describe the same object; the
+ * caller still checks the digest.
+ */
+async function expectedSize(key, found) {
+  const length = found.headers?.get?.("content-length");
+  if (length && !found.headers.get("content-encoding")) return Number.parseInt(length, 10);
+  const stored = await exists(key);
+  return stored?.size ?? null;
+}
+
+/**
+ * A compressed response carries the weak form of the object's ETag — `W/"x"` for the version whose
+ * ETag is `"x"` (observed alongside `br` on the real service). A conditional write takes the strong
+ * form, and a comparison with the ETag `head` or `put` reports must not fail on the prefix alone.
+ */
+function strongEtag(etag) {
+  return etag ? etag.replace(/^W\//, "") : null;
 }
 
 async function cmdHead(o) {
