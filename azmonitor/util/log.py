@@ -24,8 +24,22 @@ class JsonLineHandler(logging.Handler):
         extra = getattr(record, "data", None)
         if extra:
             payload["data"] = extra
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+        # A log line is never worth a failed run: the directory may have been removed under the
+        # handler (a job's working directory is deleted when the job ends), so recreate it once and
+        # otherwise drop the line; the stderr handler still carries it.
+        for attempt in (1, 2):
+            try:
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+                return
+            except OSError:
+                if attempt == 2:
+                    return
+                try:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    return
 
 
 def setup_logging(log_dir: Path | None = None, level: int = logging.INFO) -> logging.Logger:

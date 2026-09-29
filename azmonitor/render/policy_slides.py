@@ -76,7 +76,7 @@ class PolicyStabilitySlides:
             cats = [_d(p["date"]) for p in path]
             series = [
                 {"name": "Corridor ceiling", "values": [ceil.get(p["date"]) for p in path], "color": self.SC.get("fx", "#B39DDB")},
-                {"name": "Refinancing rate", "values": [p["value"] for p in path], "color": self.SC.get("total", "#6F00B6")},
+                {"name": "Refinancing rate", "values": [p["value"] for p in path], "color": self.SC["total"]},
                 {"name": "Corridor floor", "values": [floor.get(p["date"]) for p in path], "color": self.SC.get("deposits", "#00897B")},
             ]
             d.add_line_chart(s, x, y + 0.25, w, h * 0.55, cats, series, number_format="0.00", skip=max(1, len(cats) // 8))
@@ -138,7 +138,7 @@ class PolicyStabilitySlides:
             self._caption(s, x, y, w * 0.55, "Actual CPI inflation, y/y (%) — outcomes only")
             series = self.fp["slides"]["M05"].get("chart_cpi") or []
             if series:
-                cats, ser = self._chart_series(series[:1], [self.SC.get("cpi", "#E53935")])
+                cats, ser = self._chart_series(series[:1], [self.SC["cpi"]])
                 d.add_line_chart(s, x, y + 0.25, w * 0.55 - 0.1, h * 0.55, cats, ser, number_format="0.0")
             self._caption(s, x + w * 0.55, y, w * 0.45, f"CBA projections, {f.get('current_vintage')} round")
             rows = [[x_["label"] or x_["series_id"], x_.get("horizon") or "", _pct(x_["value"], 1),
@@ -276,7 +276,7 @@ class PolicyStabilitySlides:
                           f"Stress-test projection of regulatory capital adequacy (%), exercise from {f.get('exercise') or 'n/a'}")
             if stress and years:
                 series = []
-                colours = {"baseline": self.SC.get("total", "#6F00B6"), "adverse": self.SC.get("overdue", "#E53935")}
+                colours = {"baseline": self.SC["total"], "adverse": self.SC["overdue"]}
                 for i, sc in enumerate(scenarios):
                     values = []
                     for yr in years:

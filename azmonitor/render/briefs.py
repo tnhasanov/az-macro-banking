@@ -67,7 +67,7 @@ class BriefRenderer:
         s = d.new_slide()
         d.add_rect(s, 0, 0, 4.9, 7.5, C["primary"], None, radius=None)
         d.add_rect(s, 4.9, 0, 0.08, 7.5, C["gold"], None, radius=None)
-        d.add_text(s, 0.55, 0.95, 3.9, 0.3, self.pack["title"].upper(), size=10, bold=True, color="DDD0EA")
+        d.add_text(s, 0.55, 0.95, 3.9, 0.3, self.pack["title"].upper(), size=10, bold=True, color=C["cover_text"])
         d.add_text(s, 0.55, 1.3, 3.9, 1.5, self._title(sid, headline), size=24, bold=True, color=C["white"], autofit=True)
         d.add_text(s, 0.55, 2.9, 3.9, 1.1, subtitle, size=11, color=C["white"], autofit=True)
         rep = self.settings.get("report", {})
@@ -206,7 +206,7 @@ class MprBrief(BriefRenderer):
             cats = [_d(p["date"]) for p in path]
             d.add_line_chart(s, x, y + 0.25, w, h * 0.5, cats,
                              [{"name": "Ceiling", "values": [ceil.get(p["date"]) for p in path], "color": self.SC.get("fx", "#B39DDB")},
-                              {"name": "Refinancing rate", "values": [p["value"] for p in path], "color": self.SC.get("total", "#6F00B6")},
+                              {"name": "Refinancing rate", "values": [p["value"] for p in path], "color": self.SC["total"]},
                               {"name": "Floor", "values": [floor.get(p["date"]) for p in path], "color": self.SC.get("deposits", "#00897B")}],
                              number_format="0.00", skip=max(1, len(cats) // 8))
             d.add_text(s, x, y + h * 0.5 + 0.35, w, 0.25, "The Central Bank's stated reasoning", size=9, bold=True, color=self.C["muted"])
@@ -455,7 +455,7 @@ class FsrBrief(BriefRenderer):
             kpis.append((_pct(last["value"], 1), f"Capital adequacy, {sc} scenario", f"projection for {last['observation_date'][:4]}"))
 
         def draw(s, x, y, w, h):
-            colours = {"baseline": self.SC.get("total", "#6F00B6"), "adverse": self.SC.get("overdue", "#E53935")}
+            colours = {"baseline": self.SC["total"], "adverse": self.SC["overdue"]}
             series = []
             for sc in scenarios:
                 series.append({"name": f"{sc} scenario",

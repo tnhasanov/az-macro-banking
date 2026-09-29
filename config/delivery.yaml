@@ -46,7 +46,7 @@ routing:
 channels:
 
   email:
-    enabled: true
+    enabled: false
     provider: microsoft_graph
     # The mailbox the message is sent from. Must be a mailbox the app registration may send as.
     sender_env: AZMONITOR_GRAPH_SENDER

@@ -27,9 +27,19 @@ COUNTED_TABLES = ("documents", "observations", "vintages", "publications", "pass
                   "report_editions")
 
 
+def _read_only_uri(path: Path) -> str:
+    """A read-only SQLite URI that is valid on every platform.
+
+    `f"file:{path}"` is not: on Windows it carries backslashes and a drive letter, and anywhere a
+    space, `%` or `#` in the path is read as URI syntax. `as_uri()` percent-encodes an absolute path
+    into the form SQLite documents (file:///C:/... on Windows).
+    """
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def table_counts(path: Path) -> dict[str, int]:
     out: dict[str, int] = {}
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(_read_only_uri(path), uri=True)
     try:
         names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for t in COUNTED_TABLES:
@@ -44,7 +54,7 @@ def integrity_ok(path: Path) -> tuple[bool, str]:
     if not path.exists():
         return False, "database file does not exist"
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = sqlite3.connect(_read_only_uri(path), uri=True)
     except sqlite3.Error as exc:
         return False, f"cannot open: {exc}"
     try:

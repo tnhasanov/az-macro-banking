@@ -6,7 +6,8 @@ Three things are checked, in this order:
    rejected outright rather than partially reused, because its numbers describe superseded data.
 2. **Every number is bound to one claim** naming metric, dimensions, period, unit and comparison
    basis; the claim is re-resolved against the fact pack and checked on value, rounding, unit,
-   period and the direction the sentence asserts. No number is exempt for being small: a 0.4 pp
+   period, vintage (a forecast's round is one of its dimensions), population (a segment's figure
+   may not be described as the whole sector's) and the direction the sentence asserts. No number is exempt for being small: a 0.4 pp
    move in the overdue ratio is a financial claim. Numbers that are not measurements have to be
    declared as literals with a reason.
 3. **Every statement attributed to a source is quoted from it.** A finding classified as the Central
@@ -85,6 +86,13 @@ def _check_block(where: str, b: Any, fp: dict[str, Any], passages: dict[str, Any
                                       f"({', '.join(str(r.unit) for r in candidates)})", "text": text[:160]})
             ok = False
             continue
+        scoped = [r for r in unit_ok if C.scope_ok(text, n, r) is None]
+        if not scoped:
+            problems.append({"where": where, "number": n.value, "written": n.written, "kind": "definition",
+                             "issue": C.scope_ok(text, n, unit_ok[0]), "text": text[:160]})
+            ok = False
+            continue
+        unit_ok = scoped
         direction_problems = [C.direction_ok(text, n, r) for r in unit_ok]
         if direction_problems and all(d is not None for d in direction_problems):
             problems.append({"where": where, "number": n.value, "written": n.written, "kind": "direction",

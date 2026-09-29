@@ -209,3 +209,22 @@ def test_whatsapp_success_without_a_message_id_is_ambiguous(monkeypatch):
     # a template variable the approved template needs but the caller did not supply
     res = wa.send_template(to="+1", template_key="report_ready", variables={"report_name": "Monitor"})
     assert res.outcome == "failed" and "edition" in res.error
+
+
+def test_no_channel_is_enabled_in_the_committed_configuration():
+    """Delivery off means every channel off, not just the top-level switch.
+
+    Both matter, and they fail differently. The top-level `enabled` decides whether the dispatcher
+    sends; a channel's `enabled` is what the manual and scheduled workflows read when they refuse
+    to start at all — so an enabled channel does not leak a message, it stops every run.
+
+    This is here because the CI assertion named WhatsApp and nothing else, and `email: enabled:
+    true` therefore sat in the committed configuration unremarked until a dispatched run tripped
+    over it.
+    """
+    from azmonitor import config
+
+    d = config.delivery_config()
+    assert d.get("enabled") is False
+    on = [name for name, ch in (d.get("channels") or {}).items() if ch.get("enabled")]
+    assert not on, f"these channels are enabled in the committed configuration: {on}"

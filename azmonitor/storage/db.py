@@ -245,7 +245,10 @@ class Database:
                          ("language", "TEXT")],
         "documents": [("language", "TEXT"), ("doc_type", "TEXT"), ("publication_id", "TEXT"), ("version", "INTEGER"),
                       ("extraction_status", "TEXT"), ("page_count", "INTEGER")],
-        "report_editions": [("fingerprint", "TEXT"), ("trigger", "TEXT"), ("narrative_mode", "TEXT")],
+        "report_editions": [("fingerprint", "TEXT"), ("trigger", "TEXT"), ("narrative_mode", "TEXT"),
+                            # What was fingerprinted, so a fresh runner can tell "unchanged" without the
+                            # previous manifest file, which lives in outputs/ and is not part of the dataset.
+                            ("fingerprint_detail", "TEXT"), ("scope_key", "TEXT")],
         # Three different dates that are easy to confuse and must not be. `published_at` is when the
         # Central Bank released the publication; `translation_available_at` is when the English
         # edition of that same publication appeared, which can be weeks later; `first_seen_at` is
@@ -344,6 +347,7 @@ class Database:
         vintage_id = f"{dataset_id}:{doc_id.split(':')[-1][:12]}:{now}:{uuid.uuid4().hex[:6]}"
         n_new = n_rev = n_same = n_missing = 0
         revisions: list[dict[str, Any]] = []
+        new_periods: set[str] = set()
         with self.tx() as c:
             for o in obs:
                 dims = json.dumps(o.dims, ensure_ascii=False, sort_keys=True)
@@ -368,6 +372,7 @@ class Database:
                                       "old": cur["value"], "new": o.value})
                 else:
                     n_new += 1
+                    new_periods.add(o.period_end.isoformat())
                 c.execute(
                     """INSERT INTO observations(series_id, dims, period_start, period_end, freq, period_type, value, value_raw, missing_reason,
                        unit, scale_note, currency, population, basis, source_id, dataset_id, doc_id, sheet, cell_ref, label_original,
@@ -387,7 +392,8 @@ class Database:
                     (vintage_id, dataset_id, doc_id, now, len(obs), n_new, n_rev, n_same, json.dumps(revisions[:200], ensure_ascii=False)),
                 )
         return {"vintage_id": vintage_id if (n_new or n_rev) else None, "n_obs": len(obs), "n_new": n_new, "n_revisions": n_rev,
-                "n_unchanged": n_same, "n_missing_not_applied": n_missing, "revisions": revisions}
+                "n_unchanged": n_same, "n_missing_not_applied": n_missing, "revisions": revisions,
+                "new_periods": sorted(new_periods), "revised_periods": sorted({r["period_end"] for r in revisions})}
 
     # ---- state -----------------------------------------------------------------
     def set_dataset_state(self, dataset_id: str, **fields: Any) -> None:

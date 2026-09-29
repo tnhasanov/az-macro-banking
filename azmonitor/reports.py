@@ -19,6 +19,7 @@ from .render.pdf import convert_to_pdf, previews, soffice_available
 from .render.workbook import build_workbook
 from .storage.db import Database, utcnow
 from .storage.snapshot import export_snapshot
+from .util import progress
 from .util.log import get_logger, setup_logging
 from .util.periods import parse_as_of
 
@@ -120,6 +121,34 @@ def blocking_quality_failures(fp: dict[str, Any], settings: dict[str, Any]) -> l
             if not c.get("ok") and c.get("severity") == "critical"]
 
 
+def previous_fingerprint(row) -> dict[str, Any] | None:
+    """What the last edition was fingerprinted as, from the stored record first.
+
+    The manifest file is the fuller source, but it lives in outputs/, which is not part of the
+    persisted dataset: on a fresh runner it is simply absent. Reading only the manifest meant a
+    fresh runner could never recognise an unchanged edition and would publish a duplicate on every
+    scheduled run. The edition record travels with the dataset, so it is read first.
+    """
+    keys = row.keys() if hasattr(row, "keys") else []
+    if "fingerprint_detail" in keys and row["fingerprint_detail"]:
+        try:
+            detail = json.loads(row["fingerprint_detail"])
+            if isinstance(detail, dict) and detail.get("fingerprint"):
+                return detail
+        except ValueError:
+            pass
+    try:
+        manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+        fp = manifest.get("edition_fingerprint")
+        if fp:
+            return fp
+    except (OSError, ValueError, TypeError):
+        pass
+    if "fingerprint" in keys and row["fingerprint"]:
+        return {"fingerprint": row["fingerprint"], "inputs": None}
+    return None
+
+
 def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: str | None, lang: str,
                      force: bool = False, db: Database | None = None, dry_run: bool = False) -> dict[str, Any]:
     """Produce the monthly edition, or say what producing it would do.
@@ -135,6 +164,7 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
     own = db is None
     db = db or Database(paths.db_path)
     as_of_d = parse_as_of(as_of)
+    progress.stage("calculating", "building the fact pack from the stored vintages")
     builder = FactPackBuilder(db, as_of_d, lang=lang)
     fp = builder.build()
     fp["report_type"] = "monthly"
@@ -155,16 +185,11 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
     # The banking month on its own decides nothing.
     prior_any = [e for e in db.editions("monthly") if e["status"] == "generated"]
     prior = [e for e in prior_any if e["edition_period"] == edition]
-    last_manifest = None
-    if prior_any:
-        try:
-            last_manifest = json.loads(Path(prior_any[-1]["manifest_path"]).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            last_manifest = None
-    change = describe_change((last_manifest or {}).get("edition_fingerprint"), current_fp)
-    if prior and not force and last_manifest and \
-            (last_manifest.get("edition_fingerprint") or {}).get("fingerprint") == current_fp["fingerprint"]:
+    last_fp = previous_fingerprint(prior_any[-1]) if prior_any else None
+    change = describe_change(last_fp, current_fp)
+    if prior and not force and last_fp and last_fp.get("fingerprint") == current_fp["fingerprint"]:
         res = {"status": "unchanged", "edition": edition, "existing": prior[-1]["path"],
+               "existing_edition_id": prior[-1]["edition_id"], "version": prior[-1]["version"],
                "fact_pack_hash": fp.get("fact_pack_hash"), "fingerprint": current_fp["fingerprint"],
                "note": "every input of the last edition is unchanged; use --force to regenerate"}
         if own:
@@ -197,6 +222,7 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
     out.mkdir(parents=True, exist_ok=True)
     stem = f"AZ_Macro_Banking_Monitor_{edition}_v{version}_{ts}"
     (out / "fact_pack.json").write_text(json.dumps(fp, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    progress.stage("writing_narrative", "facts-only" if facts_only_flag and not narrative_file else None)
     nar, validation = resolve_narrative(fp, facts_only_flag, narrative_file, lang, evidence_passages(db, fp))
     (out / "narrative.json").write_text(json.dumps(nar, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     partial = bool(fp["availability"]["missing"])
@@ -205,13 +231,16 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
     # deck and workbook render the flattened text; the grounded form stays in narrative.json
     rendered = flatten(nar)
     pptx_path = out / f"{stem}.pptx"
+    progress.stage("rendering", "slides")
     deck_info = render_monthly(fp, rendered, pptx_path, lang)
+    progress.detail("evidence workbook")
     xlsx_path = build_workbook(fp, rendered, db, out / f"{stem}.xlsx", builder.eng.table())
     # pdf + previews
     pdf_info: dict[str, Any] = {"status": "skipped", "reason": "LibreOffice not available"}
     preview_files: list[str] = []
     if soffice_available():
         try:
+            progress.detail("PDF")
             pdf = convert_to_pdf(pptx_path, out)
             pdf_info = {"status": "ok", "path": str(pdf)}
             try:
@@ -239,13 +268,16 @@ def generate_monthly(as_of: str | None, facts_only_flag: bool, narrative_file: s
     db.add_edition({"edition_id": f"monthly:{edition}:v{version}", "report_type": "monthly", "edition_period": edition, "version": version, "generated_at": manifest["generated_at"],
                     "as_of": as_of_d.isoformat(), "snapshot_id": snap["snapshot_id"], "status": "generated", "path": str(out), "manifest_path": manifest["manifest_path"],
                     "anchors": json.dumps(fp["edition"]), "fingerprint": current_fp["fingerprint"], "trigger": change["trigger"],
-                    "narrative_mode": mode})
+                    "narrative_mode": mode, "fingerprint_detail": json.dumps(current_fp, default=str),
+                    "scope_key": edition})
     _update_latest(paths, "monthly", out, manifest)
     (paths.state_dir / "monthly_status.json").write_text(json.dumps({"status": "generated", "edition": edition, "version": version, "path": str(out), "at": manifest["generated_at"],
                                                                      "partial": partial}, indent=2), encoding="utf-8")
     if own:
         db.close()
-    return {"status": "generated", "edition": edition, "version": version, "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "xlsx": str(xlsx_path), "n_slides": deck_info["n_slides"],
+    return {"status": "generated", "edition": edition, "version": version, "edition_id": f"monthly:{edition}:v{version}",
+            "fingerprint": current_fp["fingerprint"], "edition_fingerprint": current_fp, "trigger": change,
+            "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "xlsx": str(xlsx_path), "n_slides": deck_info["n_slides"],
             "partial": partial, "missing_inputs": fp["availability"]["missing"], "narrative_mode": nar.get("mode"), "narrative_problems": len(validation.get("problems") or []),
             "reporting_periods": fp["edition"], "quality": fp["quality"]["summary"]}
 
@@ -276,6 +308,7 @@ def generate_brief(kind: str, as_of: str | None = None, lang: str = "en", public
     own = db is None
     db = db or Database(paths.db_path)
     as_of_d = parse_as_of(as_of)
+    progress.stage("calculating", "extracting the publication's figures and passages")
     pack = build_brief(db, kind, as_of_d, lang=lang, publication_id=publication_id)
     if pack.get("status") != "ok":
         if own:
@@ -285,12 +318,17 @@ def generate_brief(kind: str, as_of: str | None = None, lang: str = "en", public
     edition = pub["publication_id"].replace(":", "_")
     prior = [e for e in db.editions(kind) if e["edition_period"] == edition and e["status"] == "generated"]
     if prior and not force:
-        try:
-            last = json.loads(Path(prior[-1]["manifest_path"]).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            last = {}
+        # From the stored record first: the manifest lives in outputs/, which a fresh runner lacks.
+        last = previous_fingerprint(prior[-1]) or {}
+        if not last.get("fact_pack_hash"):
+            try:
+                last = json.loads(Path(prior[-1]["manifest_path"]).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                last = {}
         if last.get("fact_pack_hash") == pack["fact_pack_hash"] and last.get("narrative_file") == narrative_file:
             res = {"status": "unchanged", "kind": kind, "publication": pub["publication_id"],
+                   "existing_edition_id": prior[-1]["edition_id"], "edition": edition,
+                   "version": prior[-1]["version"], "fingerprint": pack["fact_pack_hash"],
                    "existing": prior[-1]["path"], "note": "this publication has already been briefed and nothing changed"}
             if own:
                 db.close()
@@ -305,17 +343,20 @@ def generate_brief(kind: str, as_of: str | None = None, lang: str = "en", public
     validation: dict[str, Any] = {"numbers_checked": 0, "problems": [], "note": "briefs render published values and quoted "
                                                                                 "passages; no narrative file was supplied"}
     if narrative_file:
+        progress.stage("writing_narrative", "validating the analyst narrative against the publication")
         nar = json.loads(Path(narrative_file).read_text(encoding="utf-8"))
         validation = validate_narrative(nar, pack, evidence_passages(db, {"publications": {"all": [{"publication_id": pub["publication_id"]}]}}))
         nar = flatten(nar)
     (out / "narrative.json").write_text(json.dumps({"narrative": nar, "validation": validation}, ensure_ascii=False,
                                                    indent=1, default=str), encoding="utf-8")
     pptx_path = out / f"{stem}.pptx"
+    progress.stage("rendering", "slides")
     deck_info = render_brief(kind, pack, nar, pptx_path, lang)
     pdf_info: dict[str, Any] = {"status": "skipped", "reason": "LibreOffice not available"}
     preview_files: list[str] = []
     if soffice_available():
         try:
+            progress.detail("PDF")
             pdf = convert_to_pdf(pptx_path, out)
             pdf_info = {"status": "ok", "path": str(pdf)}
             try:
@@ -340,9 +381,15 @@ def generate_brief(kind: str, as_of: str | None = None, lang: str = "en", public
     db.add_edition({"edition_id": f"{kind}:{edition}:v{version}", "report_type": kind, "edition_period": edition,
                     "version": version, "generated_at": manifest["generated_at"], "as_of": as_of_d.isoformat(),
                     "snapshot_id": None, "status": "generated", "path": str(out),
-                    "manifest_path": manifest["manifest_path"], "anchors": json.dumps(pack["edition"])})
+                    "manifest_path": manifest["manifest_path"], "anchors": json.dumps(pack["edition"]),
+                    "fingerprint": pack["fact_pack_hash"], "scope_key": edition,
+                    "fingerprint_detail": json.dumps({"fingerprint": pack["fact_pack_hash"],
+                                                      "fact_pack_hash": pack["fact_pack_hash"],
+                                                      "narrative_file": narrative_file})})
     _update_latest(paths, kind, out, manifest)
     res = {"status": "generated", "kind": kind, "publication": pub["publication_id"], "edition": pub.get("edition"),
+           "edition_key": edition, "version": version, "edition_id": f"{kind}:{edition}:v{version}",
+           "fingerprint": pack["fact_pack_hash"],
            "path": str(out), "pptx": str(pptx_path), "pdf": pdf_info, "n_slides": deck_info["n_slides"],
            "reporting_period_end": pub.get("reporting_period_end"), "published_at": pub.get("published_at")}
     if own:

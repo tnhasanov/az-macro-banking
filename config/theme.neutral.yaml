@@ -1,0 +1,94 @@
+# Presentation theme for reports distributed outside the organisation that commissioned them.
+#
+# It exists because config/theme.yaml carries a specific bank's identity: its logo, extracted from
+# a reference deck, and its brand purple. Those are that bank's assets. A deployment that renders
+# reports onto personal or third-party infrastructure must not carry them there, so this theme
+# substitutes a neutral identity and no logo at all.
+#
+# Structurally identical to config/theme.yaml — same keys, same layout, same series mapping — so
+# switching profiles changes how a deck looks and nothing about what it says. Every number, every
+# validated claim and every source citation is unchanged.
+#
+# The colours are the validated categorical palette also used by the dashboard: each adjacent pair
+# clears the colour-vision separation floor, checked with a validator rather than by eye.
+
+name: neutral
+external_distribution: permitted
+slide_size: [13.333, 7.5]      # inches, 16:9
+
+fonts:
+  title: "Segoe UI Semibold"
+  body: "Segoe UI"
+  pdf_fallback: "Open Sans"
+
+sizes:                # points
+  title: 20
+  subtitle: 13
+  body: 11
+  small: 10
+  source: 8.5
+  kpi_number: 26
+  kpi_label: 10
+  table: 10
+  table_small: 9
+  chart_label: 9
+
+colors:
+  primary: "1F3F7A"       # neutral navy
+  primary_dark: "152C56"
+  text: "10151F"
+  muted: "424B5C"
+  muted_light: "6B748A"
+  panel: "EEF2FA"
+  panel_border: "D7DFEE"
+  table_border: "DFE4EC"
+  table_header: "1F3F7A"
+  table_stripe: "F5F7FA"
+  highlight: "FFF7D6"
+  white: "FFFFFF"
+  cover_text: "C7D4E8"   # secondary text on the coloured cover panel
+  # Semantic series colours (stable across every report)
+  series_primary: "2A78D6"
+  series_secondary: "EB6834"
+  series_tertiary: "AFC3DE"
+  positive: "1BAF7A"      # favourable / increase where increase is good
+  negative: "C62828"      # adverse
+  neutral: "1F3F7A"       # comparison series
+  gold: "EDA100"
+  grey: "6B748A"
+
+# Stable mapping of report series to colours so that a series keeps its colour on every slide.
+# The same roles as the branded theme, so a reader moving between the two is never misled about
+# which line is which.
+series_colors:
+  total: "2A78D6"
+  non_oil: "1BAF7A"
+  oil: "C62828"
+  households: "2A78D6"
+  corporates: "EB6834"
+  financial: "AFC3DE"
+  azn: "2A78D6"
+  fx: "EDA100"
+  loans: "2A78D6"
+  deposits: "1BAF7A"
+  cpi: "C62828"
+  wages_nominal: "2A78D6"
+  wages_real: "1BAF7A"
+  overdue: "C62828"
+  npl: "C62828"
+  prior: "AFC3DE"
+  current: "2A78D6"
+
+# No logo. Deliberately absent rather than set to a placeholder, so nothing can be mistaken for an
+# organisation's mark.
+logo: null
+logo_size_in: [0.52, 0.34]   # unused while logo is null; kept so both themes share a shape
+
+layout:
+  margin_x: 0.45
+  title_top: 0.22
+  title_height: 0.76
+  subtitle_top: 1.0
+  content_top: 1.45
+  content_bottom: 6.75
+  footer_top: 6.95

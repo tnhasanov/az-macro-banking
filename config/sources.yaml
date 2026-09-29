@@ -523,13 +523,13 @@ sources:
           population: banks
           rows:
             - { id: cba.bank.npl.total, match: "^Qeyri-işlək kredit \\(QİK\\)", label_az: "Qeyri-işlək kredit (QİK)", label_en: "Non-performing loans (NPL), banks" }
-            - { id: cba.bank.npl.business, match: "^ - biznes kreditləri$|^\\s*- biznes kreditləri\\s*$" }
-            - { id: cba.bank.npl.consumer, match: "^\\s*- istehlak kreditləri\\s*$" }
-            - { id: cba.bank.npl.mortgage, match: "^\\s*- ipoteka kreditləri\\s*$" }
+            - { id: cba.bank.npl.business, match: "^ - biznes kreditləri$|^\\s*- biznes kreditləri\\s*$", label_en: "Non-performing business loans, banks (a segment, not the sector total)" }
+            - { id: cba.bank.npl.consumer, match: "^\\s*- istehlak kreditləri\\s*$", label_en: "Non-performing consumer loans, banks (a segment, not the sector total)" }
+            - { id: cba.bank.npl.mortgage, match: "^\\s*- ipoteka kreditləri\\s*$", label_en: "Non-performing mortgage loans, banks (a segment, not the sector total)" }
             - { id: cba.bank.npl.ratio, match: "^QİK/Kredit portfeli", unit: "%", scale: 100, label_en: "NPL ratio (NPL / bank loan portfolio), published" }
-            - { id: cba.bank.npl.ratio_business, match: "biznes \\(QİK\\)/biznes", unit: "%", scale: 100 }
-            - { id: cba.bank.npl.ratio_consumer, match: "istehlak \\(QİK\\)/istehlak", unit: "%", scale: 100 }
-            - { id: cba.bank.npl.ratio_mortgage, match: "ipoteka \\(QİK\\)/ipoteka", unit: "%", scale: 100 }
+            - { id: cba.bank.npl.ratio_business, match: "biznes \\(QİK\\)/biznes", unit: "%", scale: 100, label_en: "Business-loan NPL ratio (business NPL / business loans), banks" }
+            - { id: cba.bank.npl.ratio_consumer, match: "istehlak \\(QİK\\)/istehlak", unit: "%", scale: 100, label_en: "Consumer-loan NPL ratio (consumer NPL / consumer loans), banks" }
+            - { id: cba.bank.npl.ratio_mortgage, match: "ipoteka \\(QİK\\)/ipoteka", unit: "%", scale: 100, label_en: "Mortgage NPL ratio (mortgage NPL / mortgage loans), banks" }
 
       - id: cba_bank_business_sectors
         title_pattern: "^Biznes portfelinin sahələr üzrə bölgüsü"

@@ -1,0 +1,70 @@
+# Which reports a source change affects.
+#
+# A change is classified first (azmonitor/changes.py): a genuinely new publication, new observations
+# in an existing dataset, a substantive revision, a translation, a historical backfill, or a file
+# whose bytes changed while its data did not. Only the first three produce anything. This file then
+# says which reports those three affect, so a changed file regenerates the reports that read it and
+# no others — never all six for every download.
+#
+# `announce: false` refreshes a report without telling anyone: its content changed, but the change
+# is announced by another report in the same batch. A policy decision updates the monthly deck's
+# policy slide, but the reader hears about the decision from the decision update, once.
+#
+# Every dataset in config/sources.yaml appears below, either mapped or under `unmapped` with the
+# reason. tests/test_changes.py fails when one is added without a decision here.
+
+datasets:
+  # --- CBA monetary statistics: the monthly monitor, and the sector reviews that read them
+  cba_loans_by_institution:   [{report: monthly}]
+  cba_deposits:               [{report: monthly}]
+  cba_bank_balance:           [{report: monthly}]
+  cba_bank_pnl:               [{report: monthly}]
+  cba_bank_npl:               [{report: monthly}]
+  cba_bank_loan_portfolio:    [{report: monthly}]
+  cba_rates_new:              [{report: monthly}]
+  cba_rates_outstanding:      [{report: monthly}]
+  cba_deposits_currency:      [{report: monthly}]
+  cba_loans_by_maturity:      [{report: monthly}]
+  cba_new_loans_by_maturity:  [{report: monthly}]
+  cba_household_savings:      [{report: monthly}]
+  cba_analytical_balance:     [{report: monthly}]
+  cba_money_aggregates:       [{report: monthly}]
+  cba_loans_regions:          [{report: monthly}]
+  cba_deposits_regions:       [{report: monthly}]
+  cba_loans_by_sector:        [{report: monthly}, {report: sector}]
+  cba_loans_by_sector_split:  [{report: sector}]
+  cba_bank_business_sectors:  [{report: monthly}, {report: sector}]
+  # --- SSC statistics: macro sections of the monthly, and the sector reviews' activity figures
+  ssc_macro_headline_html:    [{report: monthly}, {report: sector}]
+  ssc_monthly_report:         [{report: monthly}, {report: sector}]
+  ssc_price_bulletin:         [{report: monthly}]
+  ssc_cpi_index_2010:         [{report: monthly}]
+  ssc_gdp_quarterly:          [{report: monthly}]
+  ssc_gdp_oil_nonoil_annual:  [{report: monthly}]
+  ssc_wages_annual:           [{report: monthly}]
+
+publication_types:
+  monetary_policy_review:
+    - {report: mpr_brief}
+    - {report: monthly, announce: false}
+  financial_stability_report:
+    - {report: fsr_brief}
+    - {report: monthly, announce: false}
+  policy_decision:
+    - {report: decision_update}
+    - {report: monthly, announce: false}
+
+unmapped:
+  cba_fx_rates: "exchange rates are context for other series, not a report input on their own"
+  cba_bank_participants: "a list of licensed institutions; no report reads it"
+  cba_bulletin_xlsx: "the bulletin duplicates tables collected individually above"
+  cba_release_schedule: "the release calendar informs readiness, it is not data a report shows"
+  cba_policy_directions: "annual strategy document; recorded as a publication, no report is produced for it"
+
+# How long after publication a newly discovered document still counts as a release. Older than
+# this, a document that appears for the first time is history being filled in, not news.
+release_within_days:
+  default: 45
+  monetary_policy_review: 45
+  financial_stability_report: 60
+  policy_decision: 10

@@ -172,18 +172,89 @@ def consecutive_failures(task: str | None = None) -> int:
     return n
 
 
-def schedule_drift() -> list[str]:
-    """Where config/schedule.yaml and the systemd timers disagree.
+# Asia/Baku is UTC+4 all year with no daylight saving, so the conversion to a UTC cron line is a
+# fixed four hours. Asserted in the tests against the real timezone database rather than assumed.
+BAKU_UTC_OFFSET_HOURS = 4
 
-    The timers cannot read the YAML, so the times are written twice. Two copies of one fact drift
-    apart eventually, and the drift is invisible until a report does not arrive; this makes it
-    visible on demand instead.
+
+def _utc_cron_times(text: str) -> set[str]:
+    """The `HH:MM` a cron expression fires at, read out of a workflow file."""
+    import re
+
+    out = set()
+    for m in re.finditer(r'cron:\s*"(\d+)\s+(\d+)\s', text):
+        out.add(f"{int(m.group(2)):02d}:{int(m.group(1)):02d}")
+    return out
+
+
+def _to_utc(local: dt.time) -> str:
+    hour = (local.hour - BAKU_UTC_OFFSET_HOURS) % 24
+    return f"{hour:02d}:{local.minute:02d}"
+
+
+def workflow_drift() -> list[str]:
+    """Where config/schedule.yaml and the application's scheduler disagree, or a second one exists.
+
+    The only scheduler is the Vercel cron tick; the times it starts work at are in
+    web/lib/slots.ts because a Vercel Function cannot read this YAML at request time. Those copies
+    are compared here. And no GitHub workflow may carry a `schedule:` trigger of its own: two
+    schedulers for the same work run it twice, or each assumes the other did and neither does.
+    """
+    import json as _json
+    import re as _re
+
+    root = Path(__file__).resolve().parents[2]
+    problems: list[str] = []
+    workflows = root / ".github" / "workflows"
+    if workflows.exists():
+        for wf in sorted(workflows.glob("*.yml")):
+            if _re.search(r"^\s*schedule:\s*$", wf.read_text(encoding="utf-8"), _re.M):
+                problems.append(f".github/workflows/{wf.name} has a schedule: trigger; the scheduler tick "
+                                f"(web/app/api/cron/tick) is the only scheduler")
+    slots = root / "web" / "lib" / "slots.ts"
+    if not slots.exists():
+        return problems
+    text = slots.read_text(encoding="utf-8")
+    listed = _re.search(r"SOURCE_CHECK_TIMES = \[([^\]]*)\]", text)
+    ts_times = _re.findall(r'"(\d\d:\d\d)"', listed.group(1)) if listed else []
+    want = [t.strftime("%H:%M") for t in _scheduled_times("source-check")]
+    if sorted(ts_times) != sorted(want):
+        problems.append(f"web/lib/slots.ts starts source checks at {ts_times}, config/schedule.yaml at {want}")
+    weekly = _re.search(r'WEEKLY_DIGEST = \{ weekday: (\d), time: "(\d\d:\d\d)" \}', text)
+    cfg = config.schedule_config().get("weekly_digest") or {}
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    if not weekly:
+        problems.append("web/lib/slots.ts no longer states the weekly digest's weekday and time")
+    else:
+        js_weekday = (days.index(str(cfg.get("weekday", "monday")).lower()) + 1) % 7
+        if int(weekly.group(1)) != js_weekday or weekly.group(2) != cfg.get("time"):
+            problems.append(f"web/lib/slots.ts runs the digest on weekday {weekly.group(1)} at {weekly.group(2)}, "
+                            f"config/schedule.yaml on {cfg.get('weekday')} at {cfg.get('time')}")
+    window = _re.search(r"CATCH_UP_MINUTES = (\d+)", text)
+    cfg_window = (config.schedule_config().get("source_checks") or {}).get("catch_up_window_minutes")
+    if window and cfg_window is not None and int(window.group(1)) != int(cfg_window):
+        problems.append(f"web/lib/slots.ts catches up {window.group(1)} minutes, config/schedule.yaml {cfg_window}")
+    vercel = root / "web" / "vercel.json"
+    if vercel.exists():
+        crons = (_json.loads(vercel.read_text(encoding="utf-8")).get("crons") or [])
+        paths = sorted(c.get("path") for c in crons)
+        if paths != ["/api/cron/tick"]:
+            problems.append(f"web/vercel.json should run only the scheduler tick; it runs {paths}")
+    return problems
+
+
+def schedule_drift() -> list[str]:
+    """Where config/schedule.yaml, the systemd timers and the GitHub crons disagree.
+
+    The schedule is written in three places because neither a systemd timer nor a GitHub workflow
+    can read YAML. Three copies of one fact drift apart eventually, and the drift is invisible until
+    a report stops arriving, so it is compared on demand and in CI.
     """
     root = Path(__file__).resolve().parents[2]
     units = root / "deploy" / "systemd"
-    problems: list[str] = []
+    problems: list[str] = workflow_drift()
     if not units.exists():
-        return ["deploy/systemd is missing: the schedule cannot be checked against the timers"]
+        return problems + ["deploy/systemd is missing: the schedule cannot be checked against the timers"]
     wanted = {
         "azmonitor-source-check.timer": [t.strftime("%H:%M") for t in _scheduled_times("source-check")],
         "azmonitor-weekly.timer": [t.strftime("%H:%M") for t in _scheduled_times("weekly-digest")],

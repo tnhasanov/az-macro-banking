@@ -20,3 +20,6 @@ outputs/
 .DS_Store
 .idea/
 .vscode/
+
+# Local end-to-end run (scripts/e2e/run.py)
+.e2e/
