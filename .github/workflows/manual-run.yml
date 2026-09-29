@@ -274,6 +274,11 @@ jobs:
             python scripts/cloud/isolated_event.py --prefix "$prefix" --fixture --correction
           fi
 
+      - name: "Preflight: the dashboard's Vercel configuration (names and environments only)"
+        # Which variables and store connections reach Production. Read-only; never a value.
+        if: ${{ !inputs.seed && inputs.task == 'preflight' }}
+        run: node scripts/cloud/vercel_config.mjs
+
       - name: "Preflight: what the store holds"
         if: ${{ !inputs.seed && inputs.task == 'preflight' }}
         run: python -m azmonitor.cloud.publish status
