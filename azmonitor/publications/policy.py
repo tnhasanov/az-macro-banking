@@ -162,7 +162,8 @@ def parse_decision_table(passages: Iterable[Any]) -> list[DecisionRow]:
     return [best[k] for k in sorted(best)]
 
 
-def decision_observations(rows: list[DecisionRow], *, publication_id: str, language: str) -> list[Observation]:
+def decision_observations(rows: list[DecisionRow], *, publication_id: str, language: str,
+                          method: str = "pdf_table", cell_ref: str | None = None) -> list[Observation]:
     """Policy rate and corridor levels as an event series dated by the decision they come from.
 
     No monthly series is manufactured from these: a decision holds until the next one, and a chart
@@ -178,9 +179,9 @@ def decision_observations(rows: list[DecisionRow], *, publication_id: str, langu
             out.append(Observation(
                 series_id=series, period_end=r.date, period_start=r.date, value=value, value_raw=f"{value}%",
                 freq="E", period_type="policy_rate_effective", unit="%", source_id="CBA_POLICY",
-                label_original=label, extraction_method="pdf_table", basis="level decided at the meeting on this date",
+                label_original=label, extraction_method=method, basis="level decided at the meeting on this date",
                 publication_id=publication_id, passage_id=r.passage_id, validation_status="verified",
-                announced_at=r.date, language=language, cell_ref=f"decisions table p{r.page}",
+                announced_at=r.date, language=language, cell_ref=cell_ref or f"decisions table p{r.page}",
             ))
     return out
 
@@ -200,7 +201,56 @@ EN_DATE_PATTERNS = (
     rf"(?P<m>{EN_MONTHS_RE})\s+(?P<d>\d{{1,2}})\b",
 )
 EFFECTIVE_AZ = re.compile(rf"(\d{{1,2}})\s+({AZ_MONTHS_RE})\s+(\d{{4}})[^.]{{0,40}}?(?:tarixind[əe]n|-d[əe]n)\s+(?:etibar[əe]n\s+)?q[üu]vv[əe]y[əe]\s+min", re.IGNORECASE)
-EFFECTIVE_EN = re.compile(rf"(?:effective|enters? into force|shall take effect)\s+(?:from|on|as of)?\s*(\d{{1,2}})\s+({EN_MONTHS_RE})\s+(\d{{4}})", re.IGNORECASE)
+# "effective from 24 September 2026", "This decision will take effect as of 24 September 2026"
+EFFECTIVE_EN = re.compile(rf"(?:effective|enters? into force|(?:shall|will)?\s*takes?\s+effect)\s+(?:from|on|as of)?\s*(\d{{1,2}})\s+({EN_MONTHS_RE})\s+(\d{{4}})", re.IGNORECASE)
+
+# ------------------------------------------------------------------ the corridor in the statement
+# The decision statement states the levels it sets. They are read here so a decision has its figures
+# on the day it is announced; the Monetary Policy Review's decision table, which arrives weeks later,
+# then confirms them (a difference is recorded as a revision, never silently overwritten).
+CORRIDOR_PARAMS = (
+    ("rate", re.compile(r"refinancing rate|uçot dərəcə", re.IGNORECASE)),
+    ("floor", re.compile(r"\bfloor\b|aşağı hədd", re.IGNORECASE)),
+    ("ceiling", re.compile(r"\bceiling\b|yuxarı hədd", re.IGNORECASE)),
+)
+ALL_UNCHANGED = re.compile(r"(?:keep|kept|leave|left)\s+all\s+(?:the\s+)?(?:interest rate corridor\s+)?parameters[^.]{0,40}?unchanged"
+                           r"|bütün parametrləri\s+dəyişməz", re.IGNORECASE)
+# English: the level a parameter is set to follows "to", "at" or "as" ("reduced to 6.5%", "unchanged at 7%")
+EN_LEVEL = re.compile(r"\b(?:to|at|as)\s+(\d{1,2}(?:\.\d{1,3})?)\s*%")
+# Azerbaijani: the level set is in the dative ("7.25%-ə"); a level held is a plain percentage that is
+# neither the starting point ("7.5%-dən") nor a step written with a percent sign ("0.25% bəndi")
+AZ_TARGET = re.compile(r"(\d{1,2}(?:[.,]\d{1,3})?)\s*%\s*-?\s*(?:ə|a|yə|ya)\b")
+AZ_LEVEL = re.compile(r"(\d{1,2}(?:[.,]\d{1,3})?)\s*%(?!\s*-?\s*d[əa]n)(?!\s*b[əe]nd)")
+CLAUSE_SPLIT = re.compile(r",|;|\s+and\s+|\s+while\s+|(?<=[.])\s+")
+
+
+def parse_corridor(text: str, language: str) -> dict[str, Any]:
+    """The refinancing rate, corridor floor and ceiling a decision statement sets.
+
+    Reads the opening sentences only (the decision itself; later paragraphs quote inflation and
+    other rates). Each clause is attributed to the first corridor parameter it names, and a
+    parameter keeps the first value found for it. Returns {"rate", "floor", "ceiling",
+    "all_unchanged"}; a value the statement does not state is None.
+    """
+    out: dict[str, Any] = {"rate": None, "floor": None, "ceiling": None, "all_unchanged": False}
+    sentences = re.split(r"(?<=[.])\s+(?=[A-ZƏÜÖÇŞİĞ])", (text or "").strip())
+    head = " ".join(sentences[:3])
+    out["all_unchanged"] = bool(ALL_UNCHANGED.search(head))
+    for clause in CLAUSE_SPLIT.split(head):
+        # one clause can set two parameters ("the ceiling kept at 9% while the floor raised to 6.75%"),
+        # so the text after each mention, up to the next mention, belongs to that parameter
+        hits = sorted((m.start(), m.end(), key) for key, rx in CORRIDOR_PARAMS for m in rx.finditer(clause))
+        for i, (_, end, key) in enumerate(hits):
+            if out[key] is not None:
+                continue
+            rest = clause[end:hits[i + 1][0]] if i + 1 < len(hits) else clause[end:]
+            m = (AZ_TARGET.search(rest) or AZ_LEVEL.search(rest)) if language == "az" else EN_LEVEL.search(rest)
+            if m:
+                try:
+                    out[key] = float(m.group(1).replace(",", "."))
+                except ValueError:
+                    continue
+    return out
 ACTION_WORDS = {
     "cut": ("azald", "endiril", "cut", "lower", "reduce", "decreas"),
     "raise": ("artırıl", "yüksəldil", "raise", "increas", "hike"),
@@ -220,6 +270,11 @@ class DecisionRelease:
     next_decision_basis: str | None = None
     language: str = "az"
     warnings: list[str] = field(default_factory=list)
+    # the corridor as the statement states it (None where it does not), see parse_corridor
+    rate: float | None = None
+    floor: float | None = None
+    ceiling: float | None = None
+    all_unchanged: bool = False
 
 
 def _dates_in(sentence: str, language: str, default_year: int | None) -> list[dt.date]:
@@ -262,6 +317,9 @@ def parse_press_release(passages: list[dict[str, Any]], language: str, announced
     rel = DecisionRelease(announcement_date=announced, language=language)
     texts = [p["text"] for p in passages]
     body = " ".join(texts)
+    corridor = parse_corridor(body, language)
+    rel.rate, rel.floor, rel.ceiling, rel.all_unchanged = (corridor["rate"], corridor["floor"], corridor["ceiling"],
+                                                           corridor["all_unchanged"])
     head = " ".join(texts[:2]).lower()
     for action, words in ACTION_WORDS.items():
         if any(w in head for w in words):

@@ -12,12 +12,14 @@
 #   index_to_growth   x - 100
 #   sum               a + b + ...
 #   ratio_decomposition   numerator_effect = 100*(Q1-Q0)/L0 ; denominator_effect = 100*Q1*(1/L1-1/L0)
+#   month_end_step    an event-dated level (a policy rate) read at each month end: the last event on or before it
 # `dims` selects a dimension slice of a series (e.g. currency: AZN). `types` lists the
 # period types allowed for the inputs; combining incompatible period types is rejected.
 
 metrics:
   # ---------------- lending
   - { id: cba.loans.total_ci.yoy, label_en: "Loans to the economy, y/y", formula: yoy_growth, input: cba.loans.total_ci, unit: "%", basis: "nominal stock, all credit institutions, current exchange rates" }
+  - { id: cba.loans.total_ci.real.yoy, label_en: "Loans to the economy, real y/y (deflated by CPI y/y)", formula: real_growth, nominal: cba.loans.total_ci.yoy, price: ssc.cpi.all.yoy, unit: "%", types: [month_end_stock_growth_yoy, monthly_index_vs_same_month_prev_year], basis: "((1 + loan growth) / (1 + CPI inflation) - 1); ignores FX valuation effects on the FX part of the stock" }
   - { id: cba.loans.total_ci.mom_change, label_en: "Loans to the economy, m/m change", formula: diff, input: cba.loans.total_ci, lag: 1, unit: "AZN mln" }
   - { id: cba.loans.total_ci.yoy_change, label_en: "Loans to the economy, y/y change", formula: diff, input: cba.loans.total_ci, lag: 12, unit: "AZN mln" }
   - { id: cba.loans.banks, label_en: "Loans, banks only (state + private)", formula: sum, inputs: [cba.loans.state_banks, cba.loans.private_banks], unit: "AZN mln" }
@@ -34,6 +36,7 @@ metrics:
   - { id: cba.loans.short_share, label_en: "Short-term share of loans", formula: share, numerators: [cba.loans.azn_short, cba.loans.fx_short], denominator: cba.loans.total_ci_m, unit: "%" }
   - { id: cba.new_loans.total.yoy, label_en: "New loans, y/y (monthly flow)", formula: yoy_growth, input: cba.new_loans.total, unit: "%" }
   - { id: cba.new_loans.total.3m, label_en: "New loans, 3-month sum", formula: rolling_sum, input: cba.new_loans.total, window: 3, unit: "AZN mln" }
+  - { id: cba.new_loans.total.3m.yoy, label_en: "New loans, 3-month sum, y/y", formula: yoy_growth, input: cba.new_loans.total.3m, unit: "%", basis: "gross originations including refinancing; same three months a year earlier" }
   - { id: cba.new_loans.fx_share, formula: share, numerators: [cba.new_loans.fx], denominator: cba.new_loans.total, unit: "%" }
   # sector contributions to real-sector loan growth (mutually exclusive components reconciling to the total)
   - { id: cba.loans.sector.households.yoy, formula: yoy_growth, input: cba.loans.sector.households, unit: "%" }
@@ -74,6 +77,7 @@ metrics:
   - { id: cba.deposits.nfc.total.yoy, label_en: "Non-financial corporate deposits, y/y", formula: yoy_growth, input: cba.deposits.nfc.total, unit: "%" }
   - { id: cba.deposits.fin.total.yoy, label_en: "Financial corporate deposits, y/y", formula: yoy_growth, input: cba.deposits.fin.total, unit: "%" }
   - { id: cba.deposits.hh.contrib, formula: contribution, component: cba.deposits.hh.total, total: cba.deposits.total, lag: 12, unit: pp }
+  - { id: cba.fx_share.deposits_minus_loans, label_en: "FX share of deposits minus FX share of loans", formula: spread, a: cba.deposits.fx_share, b: cba.loans.fx_share, unit: pp, basis: "shares of each total at current exchange rates; not an open FX position" }
   - { id: cba.deposits.nfc.contrib, formula: contribution, component: cba.deposits.nfc.total, total: cba.deposits.total, lag: 12, unit: pp }
   - { id: cba.deposits.fin.contrib, formula: contribution, component: cba.deposits.fin.total, total: cba.deposits.total, lag: 12, unit: pp }
   - { id: cba.deposits.hh.share, formula: share, numerators: [cba.deposits.hh.total], denominator: cba.deposits.total, unit: "%" }
@@ -122,6 +126,17 @@ metrics:
   - { id: cba.bank.pnl.provisions.yoy_change, formula: diff, input: cba.bank.pnl.provisions, lag: 12, unit: "AZN mln" }
   - { id: cba.bank.pnl.other_income.yoy_change, formula: diff, input: cba.bank.pnl.other_income, lag: 12, unit: "AZN mln" }
   - { id: cba.bank.pnl.tax.yoy_change, formula: diff, input: cba.bank.pnl.tax, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.non_interest_income.yoy, label_en: "Non-interest income YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.non_interest_income, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.non_interest_expense.yoy, label_en: "Operating (non-interest) expense YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.non_interest_expense, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.provisions.yoy, label_en: "Provision charges YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.provisions, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.interest_income_loans.yoy, label_en: "Interest income on loans YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.interest_income_loans, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.interest_income_loans.yoy_change, formula: diff, input: cba.bank.pnl.interest_income_loans, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.interest_expense_deposits.yoy_change, formula: diff, input: cba.bank.pnl.interest_expense_deposits, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.fee_income.yoy, label_en: "Fee and commission income YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.fee_income, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.fx_income.yoy, label_en: "FX income YTD, y/y", formula: yoy_growth, input: cba.bank.pnl.fx_income, unit: "%", types: [ytd_flow] }
+  - { id: cba.bank.pnl.operating_income, label_en: "Operating income (net interest income + non-interest income), YTD", formula: sum, inputs: [cba.bank.pnl.net_interest_income, cba.bank.pnl.non_interest_income], unit: "AZN mln" }
+  - { id: cba.bank.pnl.operating_income.yoy_change, formula: diff, input: cba.bank.pnl.operating_income, lag: 12, unit: "AZN mln" }
+  - { id: cba.bank.pnl.effective_tax_rate, label_en: "Profit tax / pre-tax profit, YTD", formula: ratio, numerator: cba.bank.pnl.tax, denominator: cba.bank.pnl.pretax_profit, scale: 100, unit: "%" }
   - { id: cba.bank.pnl.cost_to_income, label_en: "Cost-to-income (non-interest expense / (net interest income + non-interest income)), YTD", formula: ratio_sum, numerator: cba.bank.pnl.non_interest_expense, denominators: [cba.bank.pnl.net_interest_income, cba.bank.pnl.non_interest_income], scale: 100, unit: "%" }
   - { id: cba.bank.pnl.cost_to_income.pp_yoy, formula: pp_change, input: cba.bank.pnl.cost_to_income, lag: 12, unit: pp }
   - { id: cba.bank.pnl.provisions_to_income, formula: ratio_sum, numerator: cba.bank.pnl.provisions, denominators: [cba.bank.pnl.net_interest_income, cba.bank.pnl.non_interest_income], scale: 100, unit: "%" }
@@ -145,6 +160,7 @@ metrics:
   - { id: cba.reserves.official_usd.mom_change, formula: diff, input: cba.reserves.official_usd, lag: 1, unit: "USD mln" }
   - { id: cba.money.m3.yoy, formula: yoy_growth, input: cba.money.m3, unit: "%" }
   - { id: cba.money.m2.yoy, formula: yoy_growth, input: cba.money.m2, unit: "%" }
+  - { id: cba.policy.rate.month_end, label_en: "Refinancing rate in force at month end", formula: month_end_step, input: cba.policy.rate, unit: "%", basis: "level set at the last decision on or before the month end" }
   - { id: ssc.hl.trade_balance.level, label_en: "Trade balance (exports minus imports), YTD", formula: spread, a: ssc.hl.exports.level, b: ssc.hl.imports.level, unit: "USD mln", types: [ytd_flow] }
 
   # ---------------- SSC macro derived

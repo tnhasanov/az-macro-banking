@@ -55,6 +55,11 @@ def _kpi(snap: dict[str, Any] | None, label: str, dec: int = 1) -> tuple[str, st
     return (_fmt(snap, dec), label, f"{_per(snap)} · {_chg(snap, dec)}")
 
 
+def _day(iso: str) -> str:
+    d = dt.date.fromisoformat(iso[:10])
+    return f"{d.day} {d:%b %Y}"
+
+
 def _clip(text: str, n: int = 170) -> str:
     return text if len(text) <= n else text[: n - 1].rsplit(" ", 1)[0] + "…"
 
@@ -85,11 +90,48 @@ class MonthlyRenderer(PolicyStabilitySlides):
     def _text(self, sid: str) -> dict[str, Any]:
         return slide_text(self.nar, sid)
 
-    def _source(self, refs: list[str]) -> str:
+    def _source(self, refs: list[str], dataset_ids: list[str] | None = None) -> str:
         parts = []
         for r in refs:
             parts.append(r)
-        return "Source: " + "; ".join(parts) + f". Retrieved {self.fp['generated_at'][:10]}; information cutoff {self.fp['as_of']} (Asia/Baku)."
+        text = "Source: " + "; ".join(parts) + f". Retrieved {self.fp['generated_at'][:10]}; information cutoff {self.fp['as_of']} (Asia/Baku)."
+        notes = self._data_notes(dataset_ids or [])
+        return text + (" " + " ".join(notes) if notes else "")
+
+    def _data_notes(self, dataset_ids: list[str]) -> list[str]:
+        """What the system's own checks say about this slide's datasets: quality checks that failed
+        outside the displayed window, and values revised since the previous edition."""
+        if not dataset_ids:
+            return []
+
+        def short(dataset: str) -> str:
+            title = titles.get(dataset, dataset)
+            return title.split(" by ")[0].split(" (")[0].split(", ")[0].lower()
+
+        titles = {ds["id"]: (ds.get("title_en") or ds["id"]) for _, _, ds in config.iter_datasets()}
+        wanted = set(dataset_ids)
+        by_dataset: dict[str, list[str]] = {}
+        for c in (self.fp.get("quality") or {}).get("checks") or []:
+            if c.get("ok") or c.get("severity") == "critical":
+                continue
+            kind, _, target = str(c.get("check") or c.get("id") or "").partition(":")
+            dataset = target if target in titles else target.replace(".", "_")
+            periods = sorted(str(p)[:7] for p in c.get("failed_periods") or [])
+            if dataset not in wanted or not periods:
+                continue
+            what = {"components_sum": "the component sum", "contributions_reconcile": "the contribution reconciliation"}.get(kind, kind.replace("_", " "))
+            shown = ", ".join(periods[:2]) + (", …" if len(periods) > 2 else "")
+            by_dataset.setdefault(dataset, []).append(f"{what} fails in {len(periods)} historical period{'s' if len(periods) > 1 else ''} ({shown})")
+        notes = [f"Quality check, {short(ds)}: " + " and ".join(items) + "; the periods shown reconcile." for ds, items in by_dataset.items()]
+        for v in ((self.fp.get("slides") or {}).get("A03") or {}).get("revisions") or []:
+            if v.get("dataset_id") not in wanted or not v.get("n_revisions"):
+                continue
+            ex = (v.get("examples") or [{}])[0]
+            sample = (f" (e.g. {ex.get('series_id')} for {str(ex.get('period_end'))[:7]}: {ex['old']:,.1f} to {ex['new']:,.1f})"
+                      if ex.get("old") is not None and ex.get("new") is not None else "")
+            notes.append(f"Revision: {v['n_revisions']} value{'s' if v['n_revisions'] > 1 else ''} in {short(v['dataset_id'])} "
+                         f"revised since the previous edition{sample}.")
+        return notes
 
     def _doc_refs(self, dataset_ids: list[str]) -> str:
         lines = []
@@ -144,7 +186,7 @@ class MonthlyRenderer(PolicyStabilitySlides):
             paras = [[{"text": _clip(t), "size": 9.5}] for t in interp[:3]]
             d.add_text(s, right_x, y, right_w, max(0.4, so_y - y - 0.08), paras, size=9.5, color=self.C["text"], bullets=True, space_after=2, line_spacing=1.0, autofit=True)
         d.add_so_what(s, right_x, so_y, right_w, so_h, tx["so_what"] or so_what_default, heading=config.term("view", self.lang).upper() if not self.facts_only else "FACTS-ONLY NOTE")
-        d.add_footer(s, self._source(source_refs), d.page)
+        d.add_footer(s, self._source(source_refs, dataset_ids), d.page)
         self._notes(s, sid, dataset_ids, metric_ids, extra_notes)
         self.slides_index.append({"id": sid, "page": d.page, "title": self._title(sid, fallback_title)})
         return s
@@ -159,38 +201,44 @@ class MonthlyRenderer(PolicyStabilitySlides):
         return cats, out
 
     # ------------------------------------------------------------------ slides
+    # The deck's order: each banking theme's headline slide is followed by the slide that looks
+    # underneath it (M23-M29), then policy and stability, questions, and the appendices.
+    ORDER = ["M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M23", "M24", "M09", "M10", "M25", "M11", "M26",
+             "M12", "M27", "M13", "M28", "M14", "M15", "M29", "M16", "M17", "M19", "M20", "M21", "M22", "M18",
+             "A01", "A02", "A03", "A04", "A05", "A06"]
+
+    DEEP_DIVES = ("M23", "M24", "M25", "M26", "M27", "M28", "M29")
+
+    def _shown(self, sid: str) -> bool:
+        """A03 appears only when something was revised; a deep dive only when the fact pack carries it
+        (a pack built before those slides existed renders without them rather than failing)."""
+        if sid == "A03":
+            return bool(self.fp["slides"].get("A03", {}).get("revisions"))
+        if sid in self.DEEP_DIVES:
+            return bool(self.fp["slides"].get(sid))
+        return True
+
+    def page_map(self) -> dict[str, int]:
+        """Page number of every slide, known before rendering so the summary can cite slides ahead of it."""
+        return {sid: i for i, sid in enumerate((s for s in self.ORDER if self._shown(s)), start=1)}
+
     def render(self, out_path: Path) -> dict[str, Any]:
-        self.m01()
-        self.m02()
-        self.m03()
-        self.m04()
-        self.m05()
-        self.m06()
-        self.m07()
-        self.m08()
-        self.m09()
-        self.m10()
-        self.m11()
-        self.m12()
-        self.m13()
-        self.m14()
-        self.m15()
-        self.m16()
-        self.m17()
-        self.m19()
-        self.m20()
-        self.m21()
-        self.m22()
-        self.m18()
-        self.a01()
-        self.a02()
-        if self.fp["slides"].get("A03", {}).get("revisions"):
-            self.a03()
-        self.a04()
-        self.a05()
-        self.a06()
+        self.pages = self.page_map()
+        for sid in self.ORDER:
+            if self._shown(sid):
+                getattr(self, sid.lower())()
         self.d.save(out_path)
         return {"path": str(out_path), "slides": self.slides_index, "n_slides": self.d.page}
+
+    def _slide_range(self, sids: list[str]) -> str:
+        pages = sorted({self.pages[s] for s in sids if s in getattr(self, "pages", {})})
+        if not pages:
+            return ""
+        if len(pages) == 1:
+            return f"Slide {pages[0]}"
+        if pages == list(range(pages[0], pages[-1] + 1)):
+            return f"Slides {pages[0]}–{pages[-1]}"
+        return "Slides " + ", ".join(str(p) for p in pages)
 
     def m01(self):
         d = self.d
@@ -228,9 +276,16 @@ class MonthlyRenderer(PolicyStabilitySlides):
         d = self.d
         s = d.new_slide()
         C = self.C
-        d.add_title(s, self._title("M02", "Executive findings: what deserves management attention this month"), "Executive findings",
-                    f"Up to five findings ranked by materiality · banking data to {plabel(self.ed.get('banking_period'), 'month_end_stock')} · macro data to {plabel(self.ed.get('macro_period'), 'ytd_flow')}")
         findings = (self.nar.get("findings") or [])[:5]
+        tx = self._text("M02")
+        decision = ((self.fp.get("publications") or {}).get("policy") or {}).get("decision") or {}
+        if self.facts_only:
+            desc = (f"Up to five findings ranked by materiality · banking data to {plabel(self.ed.get('banking_period'), 'month_end_stock')} · "
+                    f"macro data to {plabel(self.ed.get('macro_period'), 'ytd_flow')}")
+        else:
+            desc = (f"{len(findings)} findings ranked by what they change for a bank · data to {plabel(self.ed.get('banking_period'), 'month_end_stock')}"
+                    + (f" · policy to {_day(decision['announcement_date'])}" if decision.get("announcement_date") else ""))
+        d.add_title(s, self._title("M02", "Executive findings: what deserves management attention this month"), "Executive findings", desc)
         y0, card_w, gap = 1.45, 7.9, 0.08
         card_h = (5.3 - gap * 4) / 5
         for i, f in enumerate(findings):
@@ -239,7 +294,13 @@ class MonthlyRenderer(PolicyStabilitySlides):
             col = C["negative"] if f.get("direction") == "adverse" else (C["positive"] if f.get("direction") == "favourable" else C["primary"])
             d.add_rect(s, 0.6, yy + (card_h - 0.4) / 2, 0.4, 0.4, col, None, radius=0.5)
             d.add_text(s, 0.6, yy + (card_h - 0.4) / 2, 0.4, 0.4, str(f.get("rank", i + 1)), size=11, bold=True, color=C["white"], align="c", anchor="m")
-            head = f"{f.get('slide_id', '')} · {f.get('classification', '').replace('_', ' ')} · {f.get('status', '')}"
+            # "Slides 8–10 · credit · accelerating" when the finding names its slides and theme; the
+            # facts-only edition keeps its slide id, classification and status
+            where = self._slide_range(f.get("slide_ids") or ([f["slide_id"]] if f.get("slide_id") else []))
+            if f.get("theme") or f.get("trend"):
+                head = " · ".join(x for x in (where, f.get("theme"), f.get("trend")) if x)
+            else:
+                head = f"{f.get('slide_id', '')} · {f.get('classification', '').replace('_', ' ')} · {f.get('status', '')}"
             d.add_text(s, 1.15, yy + 0.06, card_w - 1.3, 0.22, head, size=8, bold=True, color=C["primary"])
             body = f.get("statement", "")
             if f.get("banking_relevance"):
@@ -252,16 +313,21 @@ class MonthlyRenderer(PolicyStabilitySlides):
             for ref in (f.get("metric_refs") or [])[:1]:
                 m = self.fp["metrics"].get(ref)
                 if m and m.get("latest"):
-                    rows.append([f.get("id"), _clip(m.get("label") or ref, 42), _fmt(m), _per(m), _chg(m)])
+                    rows.append([f.get("id"), _clip(f.get("evidence_label") or m.get("label") or ref, 42), _fmt(m), _per(m), _chg(m)])
         rx, rw = 8.55, 4.33
         d.add_text(s, rx, y0, rw, 0.24, "Evidence for each finding (latest value, period, change)", size=9, bold=True, color=C["muted"])
         if rows:
             d.add_table(s, rx, y0 + 0.28, rw, min(2.6, 0.32 * (len(rows) + 1)), ["#", "Metric", "Latest", "Period", "Change"], rows, col_widths=[0.35, 1.7, 0.8, 0.85, 0.85],
                         font_size=7.5, align=["l", "l", "r", "l", "r"])
-        note = ("Facts-only edition: findings are the five largest documented scorecard movements, classified as observed facts without interpretation."
-                if self.facts_only else "Findings distinguish new developments, revisions and continuing themes; classification per item.")
-        d.add_so_what(s, rx, 4.6, rw, 2.15, note, heading="HOW TO READ")
-        d.add_footer(s, self._source(["CBA and SSC official tables as cited on the underlying slides"]), d.page)
+        decide = tx.get("so_what") if not self.facts_only and not (self.nar.get("slides") or {}).get("M02", {}).get("fallback") else ""
+        if decide:
+            d.add_so_what(s, rx, 4.6, rw, 2.15, decide, heading="WHAT TO DECIDE")
+        else:
+            note = ("Facts-only edition: findings are the five largest documented scorecard movements, classified as observed facts without interpretation."
+                    if self.facts_only else "Findings distinguish new developments, revisions and continuing themes; classification per item.")
+            d.add_so_what(s, rx, 4.6, rw, 2.15, note, heading="HOW TO READ")
+        footnote = (tx.get("caveat") + " ") if (tx.get("caveat") and not self.facts_only) else ""
+        d.add_footer(s, footnote + self._source(["CBA and SSC official tables as cited on the underlying slides"]), d.page)
         d.add_notes(s, "Findings are drawn from the narrative JSON; each is classified (observed fact, interpretation, hypothesis, management question) and linked to a slide and metric refs. "
                        f"Validation: {self.nar.get('validation', {}).get('numbers_checked', 0)} numbers checked, {len(self.nar.get('validation', {}).get('problems', []))} problems.")
         self.slides_index.append({"id": "M02", "page": d.page, "title": "Executive findings"})
@@ -411,6 +477,183 @@ class MonthlyRenderer(PolicyStabilitySlides):
                        ["cba_loans_by_institution", "cba_new_loans_by_maturity", "cba_loans_by_sector", "cba_bank_loan_portfolio"],
                        ["cba.loans.total_ci.yoy", "cba.loans.sector.households.contrib", "cba.loans.sector.other_all.contrib", "cba.loans.sector.overdue_unclassified.contrib"],
                        "Contributions use mutually exclusive components of Table 2.8 (sector columns plus the separately reported overdue balance) and reconcile to total growth.")
+
+    # ------------------------------------------------------------------ deep dives (M23-M29)
+    def m23(self):
+        f = self.fp["slides"]["M23"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "Real loan growth, y/y"), _kpi(k[1], "Nominal loan growth, y/y"), _kpi(k[2], "Credit to GDP"),
+                _kpi(k[3], "CPI inflation, y/y")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "Loan growth, nominal and real (deflated by CPI), % y/y")
+            cats, ser = self._chart_series(f["chart_growth"], [self.SC["loans"], self.C["series_secondary"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.55 - 0.25, cats, ser, number_format="0.0")
+            self._caption(s, x, y + h * 0.58, w, "Loans to the economy, % of trailing four-quarter nominal GDP (quarter end)")
+            cats2, ser2 = self._chart_series(f["chart_c2g"], [self.SC["total"]])
+            self.d.add_bar_chart(s, x, y + h * 0.58 + 0.25, w, h * 0.42 - 0.25, cats2, ser2, number_format="0.0", legend=False,
+                                 data_labels=True, gap_width=60)
+        self._standard("M23", "Real credit growth and credit-to-GDP", "Lending",
+                       "Derived: loan growth deflated by CPI; loan stock relative to trailing four-quarter nominal GDP",
+                       kpis, main, ["CBA Table 2.6 (loans to the economy); SSC price bulletin (CPI); SSC quarterly GDP (Table 03r). "
+                                    "Real growth = (1 + loan growth) / (1 + CPI inflation) - 1, which ignores FX valuation effects"],
+                       ["cba_loans_by_institution", "ssc_price_bulletin", "ssc_gdp_quarterly"],
+                       ["cba.loans.total_ci.real.yoy", "cba.credit_to_gdp"],
+                       "Real growth deflates the nominal loan stock by consumer prices; the FX part of the stock also moves with the exchange rate.")
+
+    def m24(self):
+        f = self.fp["slides"]["M24"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "New loans, 3-month sum, y/y"), _kpi(k[1], "New loans, 3-month sum"), _kpi(k[2], "Loan stock, y/y"),
+                _kpi(k[3], "FX share of new loans")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "New-loan flow (3-month sum) against the loan stock, % y/y")
+            cats, ser = self._chart_series(f["chart_flow"], [self.SC["loans"], self.C["series_secondary"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.55 - 0.25, cats, ser, number_format="0.0")
+            self._caption(s, x, y + h * 0.58, w, "FX share of new loans, % of the month's flow")
+            cats2, ser2 = self._chart_series(f["chart_fx"], [self.C["gold"]])
+            self.d.add_bar_chart(s, x, y + h * 0.58 + 0.25, w, h * 0.42 - 0.25, cats2, ser2, number_format="0.0", legend=False,
+                                 data_labels=True, gap_width=60)
+        self._standard("M24", "New lending against the loan stock", "Lending",
+                       "CBA Table 2.7.1 new loans (monthly flow, 3-month sums); stock growth from Table 2.6",
+                       kpis, main, ["CBA Table 2.7.1 (new loans of credit institutions), Table 2.6 (loans to the economy). "
+                                    "Flows are gross originations including refinancing, so they overstate net credit creation"],
+                       ["cba_new_loans_by_maturity", "cba_loans_by_institution"],
+                       ["cba.new_loans.total.3m", "cba.new_loans.total.3m.yoy", "cba.new_loans.fx_share"],
+                       "A flow growing faster than the stock means either shorter maturities (more refinancing) or a stock that keeps accelerating.")
+
+    def m25(self):
+        f = self.fp["slides"]["M25"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "Allowance / NPL"), _kpi(k[1], "Allowance / gross loans"), _kpi(k[2], "NPL ratio, banks"),
+                _kpi(k[3], "NPL stock, banks"), _kpi(k[4], "Provision charges, YTD"), _kpi(k[5], "Provision charges, YTD y/y")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "Provision coverage of NPLs, % (allowance stock / NPL)")
+            cats, ser = self._chart_series(f["chart_coverage"], [self.C["primary"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.5 - 0.25, cats, ser, number_format="0", legend=False)
+            self._caption(s, x, y + h * 0.53, w, "Allowance and NPLs as % of loans")
+            cats2, ser2 = self._chart_series(f["chart_ratios"], [self.SC["loans"], self.SC["npl"]])
+            self.d.add_line_chart(s, x, y + h * 0.53 + 0.25, w, h * 0.47 - 0.25, cats2, ser2, number_format="0.0")
+        self._standard("M25", "Provision coverage of non-performing loans", "Asset quality",
+                       "CBA bank-sector Tables 5.2 and 5.6 (banks, prudential); coverage ratios derived",
+                       kpis, main, ["CBA Table 5.2 (loan-loss allowance, gross customer loans), 5.6 (NPLs), 5.3 (provision charges). "
+                                    "Book measures that differ from the Financial Stability Report's NPL ratio"],
+                       ["cba_bank_balance", "cba_bank_npl", "cba_bank_pnl"],
+                       ["cba.bank.allowance_to_npl", "cba.bank.allowance_to_gross_loans", "cba.bank.pnl.provisions.yoy"],
+                       "The allowance is a balance-sheet stock; provision charges are the P&L flow. Write-offs reduce both the allowance and NPLs.")
+
+    def m26(self):
+        f = self.fp["slides"]["M26"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "Total deposits, y/y"), _kpi(k[1], "Corporate (NFC) contribution"), _kpi(k[2], "Household contribution"),
+                _kpi(k[3], "Total deposits, m/m change")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "Contribution to y/y deposit growth by depositor, pp")
+            cats, ser = self._chart_series(f["chart_contrib"], [self.SC["households"], self.C["gold"], self.SC["corporates"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.58 - 0.25, cats, ser, number_format="0.0")
+            self._caption(s, x, y + h * 0.61, w, "Total deposits, AZN mln (month end)")
+            cats2, ser2 = self._chart_series(f["chart_total"], [self.SC["deposits"]])
+            self.d.add_bar_chart(s, x, y + h * 0.61 + 0.25, w, h * 0.39 - 0.25, cats2, ser2, number_format="#,##0", legend=False, gap_width=50)
+        self._standard("M26", "What drives deposit growth", "Deposits",
+                       "CBA Table 2.11 deposits by depositor (all credit institutions); contributions to y/y growth, pp",
+                       kpis, main, ["CBA Table 2.11 deposits and savings by depositor. Contribution = the group's y/y change divided by "
+                                    "total deposits a year earlier, so the groups sum to total growth"],
+                       ["cba_deposits"], ["cba.deposits.hh.contrib", "cba.deposits.fin.contrib", "cba.deposits.nfc.contrib"],
+                       "Aggregate contributions do not show concentration: a few large depositors can move the corporate line.")
+
+    def m27(self):
+        f = self.fp["slides"]["M27"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "FX share of deposits"), _kpi(k[1], "FX share of loans"), _kpi(k[2], "FX share of household deposits"),
+                _kpi(k[3], "Gap: deposit minus loan FX share")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "FX share of loans and of deposits, % (current exchange rates)")
+            cats, ser = self._chart_series(f["chart_fx"], [self.SC["deposits"], self.SC["loans"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.58 - 0.25, cats, ser, number_format="0.0")
+            self._caption(s, x, y + h * 0.61, w, "FX share of household deposits, %")
+            cats2, ser2 = self._chart_series(f["chart_hh"], [self.SC["households"]])
+            self.d.add_line_chart(s, x, y + h * 0.61 + 0.25, w, h * 0.39 - 0.25, cats2, ser2, number_format="0.0", legend=False)
+        self._standard("M27", "Dollarisation on both sides of the balance sheet", "Funding mix",
+                       "CBA Tables 2.6, 2.7, 2.11 and 2.12: currency split of loans and deposits (all credit institutions); shares derived",
+                       kpis, main, ["CBA Tables 2.7 (loans by currency), 2.11 and 2.12 (deposits by depositor and currency). "
+                                    "Shares of each total at month-end exchange rates"],
+                       ["cba_loans_by_maturity", "cba_deposits", "cba_deposits_currency"],
+                       ["cba.loans.fx_share", "cba.deposits.fx_share", "cba.deposits.hh.fx_share", "cba.fx_share.deposits_minus_loans"],
+                       "Shares at current exchange rates; they do not show an open FX position or whether FX borrowers are hedged.")
+
+    def m28(self):
+        f = self.fp["slides"]["M28"]
+        k = f["kpis"]
+        kpis = [_kpi(k[0], "Refinancing rate (month end)", 2), _kpi(k[1], "New AZN term-deposit rate"), _kpi(k[2], "New AZN loan rate"),
+                _kpi(k[3], "M2 growth, y/y")]
+
+        def main(s, x, y, w, h):
+            self._caption(s, x, y, w, "Refinancing rate and the rate on new AZN term deposits, %")
+            cats, ser = self._chart_series(f["chart_rates"], [self.C["primary"], self.SC["deposits"]])
+            self.d.add_line_chart(s, x, y + 0.25, w, h * 0.55 - 0.25, cats, ser, number_format="0.0")
+            self._caption(s, x, y + h * 0.58, w, "Broad money growth, % y/y")
+            cats2, ser2 = self._chart_series(f["chart_money"], [self.C["series_secondary"], self.SC["total"]])
+            self.d.add_line_chart(s, x, y + h * 0.58 + 0.25, w, h * 0.42 - 0.25, cats2, ser2, number_format="0.0")
+        pending = f.get("pending_decision")
+        self._standard("M28", "Policy rate, bank pricing and money growth", "Monetary transmission",
+                       "CBA policy decisions; Table 3.2.1 new-business AZN rates (monthly averages); money aggregates M2 and M3",
+                       kpis, main, ["CBA policy decisions (refinancing rate in force at each month end); Table 3.2.1 new-business rates; "
+                                    "CBA money aggregates (end of period, 'Pul aqreqatları')" + (f". The rate line ends before the {_day(pending)} decision, "
+                                                                     "whose figures are not yet confirmed" if pending else "")],
+                       ["cba_policy_decisions", "cba_monetary_policy_review", "cba_rates_new", "cba_money_aggregates"],
+                       ["cba.policy.rate.month_end", "cba.rates.new.deposit", "cba.money.m2.yoy", "cba.money.m3.yoy"],
+                       "New-business rates are monthly averages across maturities and institutions; composition shifts move them too.")
+
+    def m29(self):
+        f = self.fp["slides"]["M29"]
+        br, g = f.get("bridge") or {}, f.get("growth") or {}
+        items = {b["key"]: b for b in br.get("items") or []}
+
+        def tile(key: str, label: str, sub: str) -> tuple[str, str, str]:
+            b = items.get(key) or {}
+            c = b.get("contribution")
+            return (f"{c:+,.0f}" if c is not None else "n/a", label, sub)
+
+        def pct(key: str) -> str:
+            v = (g.get(key) or {}).get("latest") or {}
+            return f"{v['value']:+.1f}%" if v.get("value") is not None else "n/a"
+
+        k = f["kpis"]
+        cti = (k[4].get("latest") or {}).get("value")
+        etr = k[5]
+        kpis = [tile("net_interest_income", "Net interest income, AZN mln y/y", f"{pct('net_interest_income')} · interest on loans {pct('interest_income_loans')}"),
+                tile("non_interest_income", "Non-interest income, AZN mln y/y", f"{pct('non_interest_income')} · fees {pct('fee_income')}, FX {pct('fx_income')}"),
+                tile("non_interest_expense", "Operating expense, AZN mln y/y", f"{pct('non_interest_expense')} · cost-to-income {cti:.1f}%" if cti is not None else pct("non_interest_expense")),
+                tile("provisions", "Provision charges, AZN mln y/y", f"{pct('provisions')} · {_fmt(self.fp['metrics'].get('cba.bank.pnl.provisions'))} YTD"),
+                tile("tax", "Profit tax, AZN mln y/y", f"effective rate {_fmt(etr)} · {_per(etr)}"),
+                _kpi(k[6], "Net profit, YTD y/y")]
+
+        def main(s, x, y, w, h):
+            start, end = br.get("start"), br.get("end")
+            self._caption(s, x, y, w, f"Net profit bridge, YTD {plabel(start['period'], 'ytd_flow') if start else ''} to YTD "
+                                      f"{plabel(end['period'], 'ytd_flow') if end else ''} (AZN mln)")
+            if start and end and all(b["contribution"] is not None for b in br.get("items") or []):
+                steps = [{"label": f"YTD {plabel(start['period'], 'ytd_flow')}", "value": start["value"], "kind": "total"}]
+                steps += [{"label": b["label"], "value": b["contribution"], "kind": "delta"} for b in br["items"]]
+                if br.get("residual") is not None and abs(br["residual"]) > 0.5:
+                    steps.append({"label": "Other/residual", "value": br["residual"], "kind": "delta"})
+                steps.append({"label": f"YTD {plabel(end['period'], 'ytd_flow')}", "value": end["value"], "kind": "total"})
+                self.d.add_waterfall(s, x, y + 0.25, w, h - 0.25, steps)
+            else:
+                self.d.add_text(s, x, y + 0.4, w, 1.0, "Profit bridge not available: one or more P&L components missing for the comparison period.",
+                                size=10, color=self.C["muted"])
+        self._standard("M29", "What moved net profit", "Profitability",
+                       "CBA bank-sector P&L (Table 5.3), YTD against the same months a year earlier, AZN mln; bridge derived",
+                       kpis, main, ["CBA Table 5.3 profit and loss of the banking sector (YTD). Bridge: net interest income, non-interest "
+                                    "income, operating expense, provision charges, other income and profit tax; items sum to the change in "
+                                    "net profit"],
+                       ["cba_bank_pnl"], ["cba.bank.pnl.net_interest_income.yoy_change", "cba.bank.pnl.operating_income.yoy_change",
+                                          "cba.bank.pnl.effective_tax_rate"],
+                       "Prudential P&L, not IFRS; YTD flows compared with the same months a year earlier.")
 
     def m09(self):
         f = self.fp["slides"]["M09"]

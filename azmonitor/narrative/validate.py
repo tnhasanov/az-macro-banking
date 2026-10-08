@@ -132,6 +132,10 @@ def validate_narrative(nar: dict[str, Any], fp: dict[str, Any], passages: dict[s
         if f.get("slide_id") not in SLIDE_IDS:
             problems.append({"where": f"finding {fid}", "kind": "slide", "issue": f"unknown slide {f.get('slide_id')}"})
             ok = False
+        for extra in f.get("slide_ids") or []:
+            if extra not in SLIDE_IDS:
+                problems.append({"where": f"finding {fid}", "kind": "slide", "issue": f"unknown slide {extra} in slide_ids"})
+                ok = False
         for ref in f.get("metric_refs", []) or []:
             base = ref.split("|")[0]
             if ref not in metric_refs and base not in {m.split("|")[0] for m in metric_refs}:
@@ -149,7 +153,8 @@ def validate_narrative(nar: dict[str, Any], fp: dict[str, Any], passages: dict[s
                              "issue": f"a finding classified {f.get('classification')} must quote the passage it "
                                       f"attributes the statement to"})
             ok = False
-        for key in ("statement", "banking_relevance", "caveat"):
+        # the tag line and the evidence label are printed too, so a number in them is held to the same rule
+        for key in ("statement", "banking_relevance", "caveat", "theme", "trend", "evidence_label"):
             if f.get(key):
                 block_ok, n = _check_block(f"finding {fid} {key}", f[key], fp, passages, problems)
                 checked += n

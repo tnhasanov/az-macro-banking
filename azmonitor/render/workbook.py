@@ -141,13 +141,20 @@ def build_workbook(fp: dict[str, Any], nar: dict[str, Any], db: Database, out_pa
     pol = pubs.get("policy") or {}
     stab = pubs.get("stability") or {}
     rows = []
-    for d_ in db.decisions():
+    # the same reading of each decision the deck uses: levels carried forward where the statement keeps
+    # them unchanged, and the action taken from the change in the rate rather than from the wording
+    from ..publications.factpack import PublicationFacts
+
+    as_of = dt.date.fromisoformat(str(fp.get("as_of"))[:10]) if fp.get("as_of") else dt.date.today()
+    for d_ in PublicationFacts(db, as_of).decisions():
         rows.append([d_["announcement_date"], d_["effective_date"], d_["effective_date_basis"], d_["policy_rate"],
-                     d_["corridor_floor"], d_["corridor_ceiling"], d_["rate_change_bp"], d_["action"],
+                     d_["corridor_floor"], d_["corridor_ceiling"], d_.get("rate_change_bp"), d_.get("action"),
+                     d_.get("corridor_change"), d_.get("action_wording"), d_.get("rate_basis"),
                      d_["next_decision_date"], d_["next_decision_basis"], d_["rationale_language"],
                      (d_["rationale_text"] or "")[:2000], d_["publication_id"], d_["source_doc_id"], d_["rate_source_doc_id"]])
     _sheet(wb, "PolicyDecisions", ["announcement_date", "effective_date", "effective_date_basis", "policy_rate",
-                                   "corridor_floor", "corridor_ceiling", "rate_change_bp", "action", "next_decision_date",
+                                   "corridor_floor", "corridor_ceiling", "rate_change_bp", "action", "corridor_change",
+                                   "action_as_worded", "levels_basis", "next_decision_date",
                                    "next_decision_basis", "rationale_language", "rationale_text", "publication_id",
                                    "decision_doc_id", "rate_source_doc_id"],
            rows, [18, 14, 34, 11, 13, 14, 13, 8, 18, 40, 12, 100, 34, 40, 40])

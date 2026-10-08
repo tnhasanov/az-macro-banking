@@ -20,13 +20,15 @@ Narrative JSON:
   "fact_pack_hash": "...",                       # must match the fact pack being rendered
   "cover": {"headline": <block>},
   "findings": [
-    {"id": "F1", "rank": 1, "slide_id": "M08",
+    {"id": "F1", "rank": 1, "slide_id": "M08", "slide_ids": ["M08", "M23", "M24"],   # slide_ids: optional, cited as "Slides 8-10"
+     "theme": "credit", "trend": "accelerating", "evidence_label": "Real loan growth",   # optional tag line and table label
      "classification": "observed_fact|cba_assessment|cba_forecast|interpretation|hypothesis|management_question",
      "statement": <block>, "metric_refs": [...], "period": "2026-07-31", "comparison": "y/y",
      "banking_relevance": <block>, "caveat": <block>, "direction": "adverse|favourable|neutral",
      "status": "new|revision|continuing"}
   ],
   "slides": {"M04": {"title": <block>, "interpretations": [<block>, ...], "so_what": <block>, "caveat": <block>}},
+                                                 # on M02, so_what is the WHAT TO DECIDE box and caveat a footnote
   "questions": [{"question": <block>, "signal": <block>, "why": <block>, "internal_data": "...",
                  "watch": "...", "function": "Treasury / ALM"}],
   "validation": {...}                            # filled by validate.py
@@ -43,7 +45,7 @@ CLASSIFICATIONS = {"observed_fact", "cba_assessment", "cba_forecast", "interpret
                    "management_question"}
 SOURCE_ATTRIBUTED = {"cba_assessment", "cba_forecast"}
 
-SLIDE_IDS = [f"M{i:02d}" for i in range(1, 23)] + ["A01", "A02", "A03", "A04", "A05", "A06"] + \
+SLIDE_IDS = [f"M{i:02d}" for i in range(1, 30)] + ["A01", "A02", "A03", "A04", "A05", "A06"] + \
             [f"P{i:02d}" for i in range(1, 8)] + [f"S{i:02d}" for i in range(1, 8)] + \
             [f"D{i:02d}" for i in range(1, 4)]
 

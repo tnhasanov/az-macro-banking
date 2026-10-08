@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from .. import config
-from ..util.periods import shift_months
+from ..util.periods import month_end, shift_months
 from .data import ObservationStore
 
 STOCK_TYPES = {"month_end_stock", "month_end_average_rate"}
@@ -266,6 +266,21 @@ class MetricEngine:
             qn = num[[i for i in num.index if i.month in (3, 6, 9, 12)]]
             out = qn / den.reindex(qn.index).replace(0, np.nan) * float(m.get("scale", 1.0))
             ptype = "quarter_end_ratio"
+        elif f == "month_end_step":
+            # an event-dated level (a policy rate set at irregular meetings) read at each month end:
+            # the level decided at the last event on or before that month end
+            s, t = inp(m["input"])
+            s = s.dropna().sort_index()
+            vals: dict[dt.date, float] = {}
+            if not s.empty:
+                last = self.cutoff or s.index[-1]
+                d = _month_end(s.index[0])
+                while d <= last:
+                    held = s[s.index <= d]
+                    vals[d] = float(held.iloc[-1])
+                    d = _month_end(d + dt.timedelta(days=1))
+            out = pd.Series(vals, dtype=float).sort_index()
+            ptype = "month_end_level"
         else:
             raise MetricConfigError(f"{mid}: unknown formula {f}")
         out = out.dropna() if isinstance(out, pd.Series) else out
@@ -296,3 +311,7 @@ def _lag_by_months(s: pd.Series, months: int) -> pd.Series:
     """Value `months` earlier for each period, aligned by calendar month (not by position)."""
     idx = [shift_months(i, -months) for i in s.index]
     return pd.Series(s.reindex(idx).values, index=s.index)
+
+
+def _month_end(d: dt.date) -> dt.date:
+    return month_end(d.year, d.month)

@@ -508,7 +508,10 @@ class Database:
         filled in when the preferred edition arrives.
         """
         cur = self.conn.execute("SELECT * FROM policy_decisions WHERE decision_id=? AND status='current'", (rec["decision_id"],)).fetchone()
-        compare = ("policy_rate", "corridor_floor", "corridor_ceiling", "effective_date", "next_decision_date", "action")
+        # The action word is read from each language's wording and the two editions can phrase the
+        # same decision differently; the rates decide what a decision did, so the word is stored but
+        # a difference in it is not a revision.
+        compare = ("policy_rate", "corridor_floor", "corridor_ceiling", "effective_date", "next_decision_date")
         merged = dict(rec)
         if cur is not None:
             base = dict(cur)
@@ -544,7 +547,10 @@ class Database:
         now = utcnow()
         with self.tx() as c:
             if cur is not None:
-                archived = rec["decision_id"] + ":v" + now.replace(":", "").replace("-", "")
+                # two versions can be archived within the same second (both language editions of a
+                # statement processed back to back), so the archive id carries a sequence number
+                n = c.execute("SELECT COUNT(*) FROM policy_decisions WHERE decision_id LIKE ?", (rec["decision_id"] + ":v%",)).fetchone()[0]
+                archived = rec["decision_id"] + ":v" + now.replace(":", "").replace("-", "") + f".{n + 1}"
                 c.execute("UPDATE policy_decisions SET status='superseded', superseded_at=?, decision_id=? WHERE decision_id=? AND status='current'",
                           (now, archived, rec["decision_id"]))
             r = {k: v for k, v in merged.items() if k != "superseded_at"}

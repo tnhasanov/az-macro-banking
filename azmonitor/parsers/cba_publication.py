@@ -132,6 +132,15 @@ def parse(path: Path, spec: dict[str, Any], *, source_id: str, dataset_id: str,
             "next_decision_date": pub["next_release_date"], "next_decision_basis": rel.next_decision_basis,
             "source_doc_id": doc_id, "validation_status": "verified",
         }]
+        # The statement's own figures, from the designated language edition: the decision has its
+        # rate and corridor on the day it is announced rather than when the next review prints them.
+        stated = {"policy_rate": rel.rate, "corridor_floor": rel.floor, "corridor_ceiling": rel.ceiling}
+        if numeric and announced and any(v is not None for v in stated.values()):
+            res.decisions[0].update({k: v for k, v in stated.items() if v is not None})
+            res.decisions[0]["rate_source_doc_id"] = doc_id
+            row = pol.DecisionRow(date=announced, rate=rel.rate, floor=rel.floor, ceiling=rel.ceiling)
+            res.observations.extend(pol.decision_observations([row], publication_id=publication_id, language=language,
+                                                              method="statement_text", cell_ref="decision statement"))
         if announced and numeric:
             vintage = f"{announced.year:04d}-{announced.month:02d}"
             obs, notes = pol.extract_forecasts(passages, language, publication_id=publication_id, vintage=vintage,

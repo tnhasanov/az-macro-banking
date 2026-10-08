@@ -156,8 +156,37 @@ class PublicationFacts:
 
     # ------------------------------------------------------------------ policy
     def decisions(self) -> list[dict[str, Any]]:
-        rows = [_row(r) for r in self.db.decisions(cutoff=self.cutoff)]
-        return sorted(rows, key=lambda r: r["announcement_date"])
+        """Every decision in date order, with what it did read from the numbers.
+
+        A statement that keeps "all parameters unchanged" states no figures; the levels it keeps are
+        the previous decision's, and are carried forward with that basis. The action (cut, hold,
+        raise) is then taken from the change in the refinancing rate, and a move of the corridor
+        alone is described as such: the wording of a statement ("the floor was reduced") is not a
+        rate cut. The action read from the wording stays alongside, for a statement with no figures.
+        """
+        rows = sorted((_row(r) for r in self.db.decisions(cutoff=self.cutoff)), key=lambda r: r["announcement_date"])
+        prev: dict[str, Any] | None = None
+        for r in rows:
+            r["action_wording"] = r.get("action")
+            if r.get("policy_rate") is None and prev and prev.get("policy_rate") is not None \
+                    and pol.ALL_UNCHANGED.search(r.get("rationale_text") or ""):
+                for k in ("policy_rate", "corridor_floor", "corridor_ceiling"):
+                    r[k] = prev.get(k)
+                r["rate_basis"] = f"unchanged, as the statement says; levels from the {prev['announcement_date']} decision"
+            if r.get("policy_rate") is not None and prev and prev.get("policy_rate") is not None:
+                moves = {}
+                for k, label in (("policy_rate", "rate"), ("corridor_floor", "floor"), ("corridor_ceiling", "ceiling")):
+                    if r.get(k) is not None and prev.get(k) is not None:
+                        moves[label] = round((r[k] - prev[k]) * 100.0)
+                r["rate_change_bp"] = moves.get("rate")
+                r["floor_change_bp"], r["ceiling_change_bp"] = moves.get("floor"), moves.get("ceiling")
+                r["action"] = "hold" if moves.get("rate") == 0 else ("cut" if (moves.get("rate") or 0) < 0 else "raise")
+                corridor = [f"{label} {'cut' if v < 0 else 'raised'} {abs(v)} bp" for label, v in moves.items()
+                            if label != "rate" and v]
+                r["corridor_change"] = "; ".join(corridor) if corridor else ("unchanged" if len(moves) == 3 else None)
+            if r.get("policy_rate") is not None:
+                prev = r
+        return rows
 
     def policy_block(self) -> dict[str, Any]:
         decisions = self.decisions()
@@ -203,6 +232,9 @@ class PublicationFacts:
             "policy_rate": d.get("policy_rate"), "corridor_floor": d.get("corridor_floor"),
             "corridor_ceiling": d.get("corridor_ceiling"),
             "rate_change_bp": d.get("rate_change_bp"), "action": d.get("action"),
+            "floor_change_bp": d.get("floor_change_bp"), "ceiling_change_bp": d.get("ceiling_change_bp"),
+            "corridor_change": d.get("corridor_change"), "action_wording": d.get("action_wording"),
+            "rate_basis": d.get("rate_basis"),
             "rationale": (d.get("rationale_text") or "")[:2500],
             "rationale_language": d.get("rationale_language"),
             "publication": self._publication_view(pub),
@@ -239,6 +271,14 @@ class PublicationFacts:
             base = (f"The refinancing rate was left at {current.get('policy_rate')}% on "
                     f"{current['announcement_date']}, unchanged from {previous['announcement_date']}."
                     if previous else f"The refinancing rate stands at {current.get('policy_rate')}%.")
+            if previous:
+                moved = []
+                for k, label in (("corridor_floor", "floor"), ("corridor_ceiling", "ceiling")):
+                    a, b = previous.get(k), current.get(k)
+                    if a is not None and b is not None and round((b - a) * 100) != 0:
+                        moved.append(f"the corridor {label} was {'cut' if b < a else 'raised'} {abs(round((b - a) * 100))} bp to {b}%")
+                if moved:
+                    base = base[:-1] + ", while " + " and ".join(moved) + "."
             if stance.get("rationale_changed"):
                 base += " The stated rationale changed between the two decisions."
             return base

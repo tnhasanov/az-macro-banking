@@ -274,6 +274,13 @@ class FactPackBuilder:
             "M20": ["ssc.cpi.all.yoy", "cba.forecast.inflation"],
             "M21": ["cba.fsr.car", "cba.fsr.lcr", "cba.fsr.npl_ratio", "cba.fsr.roa", "cba.fsr.roe"],
             "M22": ["cba.fsr.stress.car", "cba.fsr.deposit_dollarisation"],
+            "M23": ["cba.loans.total_ci.real.yoy", "cba.credit_to_gdp"],
+            "M24": ["cba.new_loans.total.3m", "cba.new_loans.fx_share"],
+            "M25": ["cba.bank.allowance_to_npl", "cba.bank.allowance_to_gross_loans"],
+            "M26": ["cba.deposits.hh.contrib", "cba.deposits.nfc.contrib", "cba.deposits.fin.contrib"],
+            "M27": ["cba.deposits.fx_share", "cba.loans.fx_share", "cba.deposits.hh.fx_share"],
+            "M28": ["cba.policy.rate", "cba.rates.new.deposit", "cba.money.m2.yoy"],
+            "M29": ["cba.bank.pnl.net_interest_income.yoy_change", "cba.bank.pnl.provisions.yoy_change"],
         }
         # Inputs the monthly statistical tables do not publish. Some of them are published elsewhere
         # at a lower frequency, and saying only "unverified" would now be wrong: the entry names the
@@ -572,6 +579,7 @@ class FactPackBuilder:
         fp["publications"] = pubs
         slides.update(self.policy_slides(pubs))
         slides.update(self.stability_slides(pubs))
+        slides.update(self.deep_dive_slides(pubs, slides))
         # --- appendices
         slides["A02"] = {"register": self.source_register(), "freshness": self.freshness()}
         slides["A05"] = {"decisions": pubs["policy"]["rate_path"], "forecasts": pubs["policy"]["forecasts"],
@@ -643,6 +651,110 @@ class FactPackBuilder:
         }
         return {"M19": m19, "M20": m20}
 
+    def deep_dive_slides(self, pubs: dict[str, Any], slides: dict[str, Any]) -> dict[str, Any]:
+        """The second slide behind each banking theme (M23-M29): the measure underneath the headline.
+
+        Real credit growth and credit-to-GDP behind lending; the flow of new loans behind the stock;
+        provision coverage behind NPLs; who drives deposit growth; dollarisation on both sides of the
+        balance sheet; whether policy-rate moves reach bank pricing; and the profit bridge. Every
+        figure is a metric from config/metrics.yaml, snapped with its period and comparison.
+        """
+        azn = {"currency": "AZN"}
+        out: dict[str, Any] = {}
+
+        def extremes(chart: dict[str, Any]) -> dict[str, Any] | None:
+            pts = [(p, v) for p, v in chart.get("points") or [] if v is not None]
+            if len(pts) < 3:
+                return None
+            lo, hi = min(pts, key=lambda x: x[1]), max(pts, key=lambda x: x[1])
+            return {"min": {"period": lo[0], "value": lo[1]}, "max": {"period": hi[0], "value": hi[1]},
+                    "first": {"period": pts[0][0], "value": pts[0][1]}}
+
+        # M23 real credit growth and credit-to-GDP
+        nominal = self.chart_series("cba.loans.total_ci.yoy", window=25, label="Nominal loan growth, y/y")
+        real = self.chart_series("cba.loans.total_ci.real.yoy", window=25, label="Real loan growth, y/y (CPI-deflated)")
+        c2g = self.chart_series("cba.credit_to_gdp", window=14, label="Loans to the economy, % of trailing-4Q GDP")
+        out["M23"] = {
+            "kpis": [self.snap("cba.loans.total_ci.real.yoy", compare="lag12"), self.snap("cba.loans.total_ci.yoy", compare="lag1"),
+                     self.snap("cba.credit_to_gdp", compare="lag12"), self.snap("ssc.cpi.all.yoy", compare="lag1", key="m23.cpi_yoy")],
+            "chart_growth": [nominal, real], "chart_c2g": [c2g],
+            "real_range": extremes(real), "c2g_range": extremes(c2g),
+        }
+        # M24 the flow of new loans against the stock
+        flow = self.chart_series("cba.new_loans.total.3m.yoy", window=13, label="New loans, 3-month sum, y/y")
+        fx_new = self.chart_series("cba.new_loans.fx_share", window=13, label="FX share of new loans")
+        out["M24"] = {
+            "kpis": [self.snap("cba.new_loans.total.3m.yoy", compare="lag1"), self.snap("cba.new_loans.total.3m", compare="lag12"),
+                     self.snap("cba.loans.total_ci.yoy", compare="lag1"), self.snap("cba.new_loans.fx_share", compare="lag12")],
+            "chart_flow": [self.chart_series("cba.loans.total_ci.yoy", window=13, label="Loan stock, y/y"), flow],
+            "chart_fx": [fx_new], "fx_range": extremes(fx_new),
+        }
+        # M25 provision coverage
+        coverage = self.chart_series("cba.bank.allowance_to_npl", window=25, label="Allowance / NPL")
+        out["M25"] = {
+            "kpis": [self.snap("cba.bank.allowance_to_npl", compare="lag12"), self.snap("cba.bank.allowance_to_gross_loans", compare="lag12"),
+                     self.snap("cba.bank.npl.ratio", compare="lag12"), self.snap("cba.bank.npl.total", compare="lag12"),
+                     self.snap("cba.bank.pnl.provisions", compare="lag12"), self.snap("cba.bank.pnl.provisions.yoy", compare="lag1")],
+            "chart_coverage": [coverage],
+            "chart_ratios": [self.chart_series("cba.bank.allowance_to_gross_loans", window=25, label="Allowance / gross loans"),
+                             self.chart_series("cba.bank.npl.ratio", window=25, label="NPL ratio")],
+            "coverage_range": extremes(coverage),
+        }
+        # M26 who drives deposit growth
+        contrib = [self.chart_series(f"cba.deposits.{k}.contrib", window=13, label=lbl)
+                   for k, lbl in (("hh", "Households"), ("fin", "Financial corporations"), ("nfc", "Non-financial corporations"))]
+        out["M26"] = {
+            "kpis": [self.snap("cba.deposits.total.yoy", compare="lag1"), self.snap("cba.deposits.nfc.contrib", compare="lag1"),
+                     self.snap("cba.deposits.hh.contrib", compare="lag1"), self.snap("cba.deposits.total.mom_change", compare="lag1")],
+            "chart_contrib": contrib, "chart_total": [self.chart_series("cba.deposits.total", window=13, label="Total deposits, AZN mln")],
+            "nfc_range": extremes(contrib[2]), "hh_range": extremes(contrib[0]),
+        }
+        # M27 dollarisation on both sides of the balance sheet
+        dep_fx = self.chart_series("cba.deposits.fx_share", window=25, label="FX share of deposits")
+        loan_fx = self.chart_series("cba.loans.fx_share", window=25, label="FX share of loans")
+        hh_fx = self.chart_series("cba.deposits.hh.fx_share", window=25, label="FX share of household deposits")
+        out["M27"] = {
+            "kpis": [self.snap("cba.deposits.fx_share", compare="lag12"), self.snap("cba.loans.fx_share", compare="lag12"),
+                     self.snap("cba.deposits.hh.fx_share", compare="lag12"), self.snap("cba.fx_share.deposits_minus_loans", compare="lag12")],
+            "chart_fx": [dep_fx, loan_fx], "chart_hh": [hh_fx],
+            "chart_gap": [self.chart_series("cba.fx_share.deposits_minus_loans", window=25, label="Deposit FX share minus loan FX share")],
+            "deposit_range": extremes(dep_fx), "loan_range": extremes(loan_fx), "hh_range": extremes(hh_fx),
+        }
+        # M28 does the policy rate reach bank pricing? A decision whose figures are not yet confirmed
+        # ends the rate line at the month before it, rather than carrying the old level past it.
+        pol = pubs.get("policy") or {}
+        dec, path = pol.get("decision") or {}, pol.get("rate_path") or []
+        end = None
+        if dec.get("announcement_date") and dec.get("policy_rate") is None and path and dec["announcement_date"] > path[-1]["date"]:
+            d = dt.date.fromisoformat(dec["announcement_date"])
+            end = dt.date(d.year, d.month, 1) - dt.timedelta(days=1)
+        rate = self.chart_series("cba.policy.rate.month_end", window=25, end=end, label="Refinancing rate (month end)")
+        out["M28"] = {
+            "kpis": [self.snap("cba.policy.rate.month_end", period=end, compare="lag12"), self.snap("cba.rates.new.deposit", azn, compare="lag12"),
+                     self.snap("cba.rates.new.loan", azn, compare="lag12"), self.snap("cba.money.m2.yoy", compare="lag12")],
+            "chart_rates": [rate, self.chart_series("cba.rates.new.deposit", azn, window=25, label="New AZN term deposits")],
+            "chart_money": [self.chart_series("cba.money.m2.yoy", window=25, label="M2, y/y"),
+                            self.chart_series("cba.money.m3.yoy", window=25, label="M3, y/y")],
+            "rate_range": extremes(rate), "pending_decision": dec.get("announcement_date") if end else None,
+        }
+        # M29 what moved profit: the M15 bridge with the growth of each line beside it
+        growth = {k: self.snap(f"cba.bank.pnl.{k}.yoy", compare="lag1")
+                  for k in ("net_interest_income", "non_interest_income", "non_interest_expense", "provisions",
+                            "interest_income_loans", "fee_income", "fx_income")}
+        # each bridge line also under its own metric id, so a sentence can cite it as a claim
+        changes = {k: self.snap(f"cba.bank.pnl.{k}.yoy_change", compare="lag12")
+                   for k in ("net_interest_income", "non_interest_income", "non_interest_expense", "provisions", "other_income", "tax")}
+        out["M29"] = {
+            "bridge": (slides.get("M15") or {}).get("bridge"),
+            "growth": growth, "changes": changes,
+            "kpis": [self.snap("cba.bank.pnl.operating_income.yoy_change", compare="lag12"), self.snap("cba.bank.pnl.operating_income", compare="lag12"),
+                     self.snap("cba.bank.pnl.interest_income_loans.yoy_change", compare="lag12"),
+                     self.snap("cba.bank.pnl.interest_expense_deposits.yoy_change", compare="lag12"),
+                     self.snap("cba.bank.pnl.cost_to_income", compare="lag12"), self.snap("cba.bank.pnl.effective_tax_rate", compare="lag12"),
+                     self.snap("cba.bank.pnl.net_profit.yoy", compare="lag1")],
+        }
+        return out
+
     def _stance_comparison_table(self, pol: dict[str, Any]) -> list[dict[str, Any]]:
         """Previous assessment -> current assessment -> evidence -> banking implication."""
         cur, prev = pol["decision"], pol["previous_decision"]
@@ -653,13 +765,16 @@ class FactPackBuilder:
             "dimension": "Policy rate",
             "previous": f"{prev['policy_rate']}% on {prev['announcement_date']}" if prev and prev.get("policy_rate") is not None else "not established",
             "current": f"{cur['policy_rate']}% on {cur['announcement_date']}" if cur.get("policy_rate") is not None else "not established",
-            "evidence": "decision table in the Monetary Policy Review",
+            "evidence": ("CBA decision statement" if str(cur.get("rate_source_doc_id") or "").startswith("cba_policy_decisions:")
+                         else "decision table in the Monetary Policy Review"),
             "implication": "funding cost floor for manat liquidity operations",
         }, {
             "dimension": "Corridor width",
-            "previous": (f"{round(prev['corridor_ceiling'] - prev['corridor_floor'], 2)} pp"
+            "previous": (f"{round(prev['corridor_ceiling'] - prev['corridor_floor'], 2)} pp ({prev['corridor_floor']}%–{prev['corridor_ceiling']}%)"
                          if prev and prev.get("corridor_ceiling") is not None and prev.get("corridor_floor") is not None else "not established"),
-            "current": (f"{pol['corridor_now']['width_pp']} pp" if pol["corridor_now"]["width_pp"] is not None else "not established"),
+            "current": (f"{pol['corridor_now']['width_pp']} pp ({cur.get('corridor_floor')}%–{cur.get('corridor_ceiling')}%)"
+                        + (f": {cur['corridor_change']}" if cur.get("corridor_change") and cur["corridor_change"] != "unchanged" else "")
+                        if pol["corridor_now"]["width_pp"] is not None else "not established"),
             "evidence": "corridor floor and ceiling as decided",
             "implication": "range within which overnight money-market rates can move",
         }, {

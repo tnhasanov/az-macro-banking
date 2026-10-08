@@ -62,15 +62,19 @@ class PolicyStabilitySlides:
             (_pct(corridor.get("rate")), "Refinancing rate", f"decided {_d(decision.get('announcement_date'))}"),
             (f"{_pct(corridor.get('floor'))} – {_pct(corridor.get('ceiling'))}", "Corridor floor and ceiling",
              f"width {corridor.get('width_pp')} pp" if corridor.get("width_pp") is not None else ""),
-            (f"{bp:+.0f} bp" if isinstance(bp, (int, float)) else "n/a", "Change at this meeting",
-             stance.get("label") or ""),
+            (f"{bp:+.0f} bp" if isinstance(bp, (int, float)) else "n/a", "Change in the rate at this meeting",
+             "; ".join(x for x in (stance.get("label"), (f"corridor {decision['corridor_change']}" if decision.get("corridor_change")
+                                                                    and decision.get("corridor_change") != "unchanged" else None)) if x)),
             (_d((f.get("next_decision") or {}).get("date")), "Next decision",
              (f.get("next_decision") or {}).get("status") or ""),
         ]
 
         def main(s, x, y, w, h):
             self._caption(s, x, y, w, "Refinancing rate and the interest rate corridor at each decision (%)")
-            path = f.get("rate_path") or []
+            # the decisions of the last three years: the statements go back further, but a chart of every
+            # meeting since 2020 would bury the ones a reader is asking about
+            start = f"{int(str(decision.get('announcement_date') or '0000')[:4]) - 3}{str(decision.get('announcement_date') or '')[4:10]}"
+            path = [p for p in (f.get("rate_path") or []) if p["date"] >= start] or (f.get("rate_path") or [])
             floor = {p["date"]: p["value"] for p in (f.get("corridor_path") or {}).get("floor", [])}
             ceil = {p["date"]: p["value"] for p in (f.get("corridor_path") or {}).get("ceiling", [])}
             cats = [_d(p["date"]) for p in path]
@@ -89,12 +93,16 @@ class PolicyStabilitySlides:
                         col_widths=[1.0, 2.35, 2.35, 1.0, 1.05], font_size=6.5, align=["l", "l", "l", "l", "l"])
 
         review = f.get("review") or {}
+        from_statement = str(decision.get("rate_source_doc_id") or "").startswith("cba_policy_decisions:")
+        effective = f" (effective {_d(decision['effective_date'])})" if decision.get("effective_date") else ""
+        review_name = f"{review['edition']} Monetary Policy Review" if review.get("edition") else "Monetary Policy Review"
+        rates_from = (f"rates as stated in the decision; earlier decisions also in the {review_name}" if from_statement
+                      else f"rates from the decision table in the {review_name}")
         self._standard("M19", "Monetary policy stance: the latest decision and what changed",
-                       "Monetary policy", f"Decision of {_d(decision.get('announcement_date'))}; rates from the decision "
-                                          f"table in the {review.get('edition') or 'Monetary Policy Review'}",
+                       "Monetary policy", f"Decision of {_d(decision.get('announcement_date'))}{effective}; {rates_from}",
                        kpis, main,
                        [f"CBA monetary policy decision, {_d(decision.get('announcement_date'))} "
-                        f"({decision.get('rationale_language') or 'az'} edition); CBA {review.get('edition') or 'Monetary Policy Review'} decision table"],
+                        f"({decision.get('rationale_language') or 'az'} edition){effective}; CBA {review_name} decision table"],
                        [], ["cba.policy.rate", "cba.policy.corridor_floor", "cba.policy.corridor_ceiling"],
                        so_what_default=stance.get("statement") or "",
                        extra_notes=self._policy_notes(f))

@@ -6,6 +6,7 @@ from typing import Any
 from . import claims as C
 from .contract import block, empty_narrative
 from .fmt import change_word, money, num, plabel
+from .titles import finding_titles
 
 
 def _claims(s: dict[str, Any] | None, *which: str) -> list[str]:
@@ -78,6 +79,24 @@ def stmt_share(fp, ref: str, what: str) -> str | None:
     return block(txt + ".", _claims(s, *used))
 
 
+def stmt_range(fp, sid: str, key: str, ref: str, what: str, unit: str = "%", dims: dict[str, Any] | None = None) -> str | None:
+    """'Over the period shown, <what> ranged between 2.3% (end-Oct 2025) and 20.0% (end-Oct 2024).'
+
+    The low and the high are points of the series the slide plots, so each is a claim the
+    validator can resolve."""
+    rng = ((fp.get("slides") or {}).get(sid) or {}).get(key) or {}
+    lo, hi = rng.get("min"), rng.get("max")
+    s = _s(fp, ref)
+    if not (lo and hi and s) or lo["period"] == hi["period"]:
+        return None
+    ptype = s.get("period_type")
+    fmt = (lambda v: num(v, 1, unit)) if unit in ("%", "pp") else (lambda v: num(v, 1))
+    txt = (f"Over the period shown, {what} ranged between {fmt(lo['value'])} ({plabel(lo['period'], ptype)}) "
+           f"and {fmt(hi['value'])} ({plabel(hi['period'], ptype)}).")
+    claims = [C.format_claim_id(s["id"], p["period"], "level", dims if dims is not None else (s.get("dims") or {})) for p in (lo, hi)]
+    return block(txt, claims)
+
+
 def generate(fp: dict[str, Any]) -> dict[str, Any]:
     nar = empty_narrative(fp, "facts_only")
     ed = fp["edition"]
@@ -133,6 +152,46 @@ def generate(fp: dict[str, Any]) -> dict[str, Any]:
         caveat="Book ratios from prudential balance-sheet reporting; not regulatory capital adequacy, LCR or NSFR.")
     put("M17", "Regional lending and household savings", ["Loans (banks, by booking region) and household savings by economic region are shown as shares of the national total."],
         caveat="Booking location can differ from the location of economic activity; Baku includes head-office bookings.")
+    put("M23", "Real credit growth and credit-to-GDP",
+        [stmt_growth(fp, "cba.loans.total_ci.real.yoy", "Real loan growth (deflated by CPI)", "y/y"),
+         stmt_range(fp, "M23", "real_range", "cba.loans.total_ci.real.yoy", "real loan growth"),
+         stmt_share(fp, "cba.credit_to_gdp", "Loans to the economy as a share of trailing four-quarter GDP")],
+        caveat="Real growth deflates the loan stock by consumer prices; the FX part of the stock also moves with the exchange rate.")
+    put("M24", "New lending against the loan stock",
+        [stmt_growth(fp, "cba.new_loans.total.3m.yoy", "Growth of new loans over three months", "y/y"),
+         stmt_level(fp, "cba.new_loans.total.3m", "New loans over the last three months"),
+         stmt_range(fp, "M24", "fx_range", "cba.new_loans.fx_share", "the FX share of new loans")],
+        caveat="New loans are gross originations including refinancing, so they overstate net credit creation.")
+    put("M25", "Provision coverage of non-performing loans",
+        [stmt_share(fp, "cba.bank.allowance_to_npl", "Loan-loss allowance / NPL"),
+         stmt_range(fp, "M25", "coverage_range", "cba.bank.allowance_to_npl", "coverage"),
+         stmt_growth(fp, "cba.bank.pnl.provisions.yoy", "Growth of provision charges (YTD)", "y/y")],
+        caveat="The allowance is a balance-sheet stock and provision charges a P&L flow; write-offs reduce both the allowance and NPLs.")
+    put("M26", "What drives deposit growth",
+        [stmt_growth(fp, "cba.deposits.hh.contrib", "The household contribution to deposit growth", ""),
+         stmt_growth(fp, "cba.deposits.nfc.contrib", "The non-financial corporate contribution", ""),
+         stmt_range(fp, "M26", "nfc_range", "cba.deposits.nfc.contrib", "the non-financial corporate contribution", unit="pp")],
+        caveat="Contributions sum to total growth; aggregate figures do not show concentration in particular depositors.")
+    put("M27", "Dollarisation on both sides of the balance sheet",
+        [stmt_share(fp, "cba.loans.fx_share", "The FX share of loans"), stmt_share(fp, "cba.deposits.fx_share", "The FX share of deposits"),
+         stmt_share(fp, "cba.fx_share.deposits_minus_loans", "The gap between the deposit and loan FX shares")],
+        caveat="Shares at current exchange rates; they show neither an open FX position nor whether FX borrowers are hedged.")
+    put("M28", "Policy rate, bank pricing and money growth",
+        [stmt_share(fp, "cba.policy.rate.month_end", "The refinancing rate in force"),
+         stmt_share(fp, "cba.rates.new.deposit|{\"currency\": \"AZN\"}", "The average rate on new AZN term deposits"),
+         stmt_growth(fp, "cba.money.m2.yoy", "M2 growth", "y/y")],
+        caveat="New-business rates are monthly averages across maturities and institutions; composition shifts move them too.")
+    put("M29", "What moved net profit",
+        [stmt_level(fp, "cba.bank.pnl.net_interest_income", "Net interest income (YTD)"),
+         stmt_level(fp, "cba.bank.pnl.provisions", "Provision charges (YTD)"),
+         stmt_share(fp, "cba.bank.pnl.effective_tax_rate", "Profit tax as a share of pre-tax profit")],
+        caveat="Prudential P&L, not IFRS; YTD flows compared with the same months a year earlier.")
+    # the title states the finding when the fact pack has what it needs; the topic title stays otherwise
+    for sid, title in finding_titles(fp).items():
+        if sid in slides:
+            slides[sid]["title"] = title
+        else:                       # a slide whose text is its own (policy): only the title is written here
+            slides[sid] = {"title": title, "interpretations": [], "so_what": "", "caveat": ""}
     nar["slides"] = slides
     # findings: five largest documented moves from the scorecard
     rows = fp["slides"]["M03"]["rows"]

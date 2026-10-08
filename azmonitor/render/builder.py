@@ -285,6 +285,7 @@ class Deck:
             cd.add_series(s["name"], [None if v is None else float(v) for v in s["values"]])
         gf = slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS if markers else XL_CHART_TYPE.LINE, Inches(x), Inches(y), Inches(w), Inches(h), cd)
         chart = gf.chart
+        chart.has_title = False          # every chart has its caption above it; an automatic title repeats it
         self._style_axes(chart, number_format, skip=skip or max(1, len(categories) // 12))
         self._legend(chart, legend and len(series) > 1)
         plot = chart.plots[0]
@@ -334,6 +335,7 @@ class Deck:
             ctype = XL_CHART_TYPE.COLUMN_STACKED if stacked else XL_CHART_TYPE.COLUMN_CLUSTERED
         gf = slide.shapes.add_chart(ctype, Inches(x), Inches(y), Inches(w), Inches(h), cd)
         chart = gf.chart
+        chart.has_title = False          # every chart has its caption above it; an automatic title repeats it
         self._style_axes(chart, number_format, skip=skip or (max(1, len(categories) // 12) if not horizontal else 1))
         self._legend(chart, legend and len(series) > 1)
         plot = chart.plots[0]
@@ -382,6 +384,7 @@ class Deck:
             s.add_data_point(float(p["x"]), float(p["y"]), float(p.get("size") or 1.0))
         gf = slide.shapes.add_chart(XL_CHART_TYPE.BUBBLE, Inches(x), Inches(y), Inches(w), Inches(h), cd)
         chart = gf.chart
+        chart.has_title = False          # every chart has its caption above it; an automatic title repeats it
         chart.font.size = Pt(self.S["chart_label"])
         chart.font.name = self.F["body"]
         chart.font.color.rgb = rgb(self.C["muted"])
@@ -438,6 +441,7 @@ class Deck:
                   {"name": "Increase", "values": pos, "color": pos_color or self.C["positive"]}, {"name": "Decrease", "values": neg, "color": neg_color or self.C["negative"]}]
         gf = self.add_bar_chart(slide, x, y, w, h, cats, series, stacked=True, legend=False, data_labels=False, gap_width=40, skip=1)
         chart = gf.chart
+        chart.has_title = False          # every chart has its caption above it; an automatic title repeats it
         plot = chart.plots[0]
         # data labels with the signed step value
         for i, s in enumerate(steps):
