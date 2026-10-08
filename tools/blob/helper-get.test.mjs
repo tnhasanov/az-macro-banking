@@ -47,6 +47,8 @@ test("a large object served compressed with no Content-Length downloads whole", 
   assert.equal(got.out.etag, head.out.etag,
     "the weak ETag of a compressed response names the same version as head's; it is reported in that form");
   assert.ok(!got.out.etag.startsWith("W/"));
+  const asked = readFileSync(join(dir, "store", "downloads.log"), "utf8").trim().split("\n").pop();
+  assert.equal(asked.split("\t")[1], "identity", "the download asks for the object as stored");
 });
 
 test("a small object served plain still downloads, with its own length checked", () => {
@@ -55,4 +57,22 @@ test("a small object served plain still downloads, with its own length checked",
   assert.equal(got.status, 0, got.stderr);
   assert.ok(readFileSync(join(dir, "out.bin")).equals(bytes));
   assert.equal(got.out.etag, head.out.etag);
+});
+
+test("an upload that meets one failed attempt is retried whole, not abandoned", () => {
+  // On 2026-09-30 two uploads in a row failed with "Response body object should not be disturbed
+  // or locked": the SDK retried after a passing fault and the stream it had been given was spent.
+  const dir = mkdtempSync(join(tmpdir(), "helper-put-retry-"));
+  const bytes = randomBytes(120_000);
+  writeFileSync(join(dir, "in.bin"), bytes);
+  const env = { ...process.env, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_rehearsal_helperput",
+                AZMONITOR_FAKE_BLOB_DIR: join(dir, "store"), NODE_OPTIONS: `--import=${FAKE}`,
+                AZMONITOR_FAKE_BLOB_FAIL_FIRST_PUT: "1", VERCEL_BLOB_RETRIES: "2" };
+  for (const name of ["VERCEL_OIDC_TOKEN", "BLOB_STORE_ID", "AZMONITOR_BLOB_AUTH"]) delete env[name];
+  const put = spawnSync(process.execPath, [HELPER, "put", "--key", "reports/x/v1/a.pptx", "--file", join(dir, "in.bin")],
+                        { env, encoding: "utf8" });
+  assert.equal(put.status, 0, `the retry did not succeed: ${put.stderr}`);
+  const got = helper(dir, "get", "--key", "reports/x/v1/a.pptx", "--out", join(dir, "out.bin"));
+  assert.equal(got.status, 0, got.stderr);
+  assert.ok(readFileSync(join(dir, "out.bin")).equals(bytes), "what arrived after the retry is the whole file");
 });

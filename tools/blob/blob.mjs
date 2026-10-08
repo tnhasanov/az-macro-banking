@@ -33,7 +33,7 @@
  * store, so a run that is going to fail on authentication fails before it spends an hour.
  */
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -193,9 +193,16 @@ async function cmdPut(o) {
   }
 
   const multipart = size > MULTIPART_THRESHOLD;
+  // A body the SDK can send more than once. It retries a request that met a network or server
+  // error, and a stream is spent by the first attempt, so the retry failed with "Response body
+  // object should not be disturbed or locked" — hiding the real error and turning every passing
+  // hiccup into a failed upload (seen on 2026-09-30 on a report file and on the dataset pointer).
+  // Below the multipart threshold a file is at most 8 MB and is read into memory; above it,
+  // multipart reads and retries the file part by part.
+  const body = multipart ? createReadStream(o.file) : await readFile(o.file);
   let result;
   try {
-    result = await put(o.key, createReadStream(o.file), {
+    result = await put(o.key, body, {
       access: ACCESS,
       ...credentials(),
       contentType: o.contentType || "application/octet-stream",
@@ -223,7 +230,11 @@ async function cmdPut(o) {
 
 async function cmdGet(o) {
   if (!o.key || !o.out) fail("get needs --key and --out");
-  const found = await get(o.key, { access: ACCESS, ...credentials(), useCache: false });
+  // Asked for as stored. The service otherwise recompresses a large object (Brotli) on the way
+  // out, and the dataset archive is already gzip: a 260 MB restore took about 3 minutes of every
+  // job (2026-09-28/30). A service that ignores the request still works, sized as below.
+  const found = await get(o.key, { access: ACCESS, ...credentials(), useCache: false,
+                                   headers: { "accept-encoding": "identity" } });
   if (!found || !found.stream) process.exit(NOT_FOUND);
 
   // Written to a temporary name and moved into place, so a transfer that dies part way through

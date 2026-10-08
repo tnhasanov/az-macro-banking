@@ -22,7 +22,7 @@
  *     below it.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { brotliCompressSync } from "node:zlib";
 
@@ -65,6 +65,7 @@ async function bodyOf(body) {
   return Buffer.concat(chunks);
 }
 
+const failedOnce = new Set();
 const refuse = (statusCode, code, message) => ({ statusCode, data: { error: { code, message } } });
 const bearer = (req) => req.headers.authorization === `Bearer ${TOKEN}`;
 
@@ -79,6 +80,15 @@ async function install() {
   api.intercept({ path: (p) => p.startsWith("/api/blob"), method: "PUT" }).reply((req) => {
     if (!bearer(req)) return refuse(403, "forbidden", "Access denied");
     const pathname = new URL(req.path, API).searchParams.get("pathname");
+    // AZMONITOR_FAKE_BLOB_FAIL_FIRST_PUT=1: the first attempt at each upload in a process reads the
+    // body and answers 503, as a passing fault on the real service does; the SDK then retries.
+    if (process.env.AZMONITOR_FAKE_BLOB_FAIL_FIRST_PUT === "1" && !failedOnce.has(pathname)) {
+      failedOnce.add(pathname);
+      return { statusCode: 503, data: async () => {
+        await bodyOf(req.body);
+        return { error: { code: "service_unavailable", message: "Service unavailable (stand-in)" } };
+      } };
+    }
     const current = meta(pathname);
     const ifMatch = req.headers["x-if-match"];
     if (ifMatch && (!current || current.etag !== ifMatch)) {
@@ -135,6 +145,9 @@ async function install() {
     const key = decodeURIComponent(req.path.split("?")[0].slice(1));
     const m = meta(key);
     if (!m) return { statusCode: 404, data: "" };
+    // What the client asked for, so a test can see it; the answer below ignores it, as the
+    // real service may.
+    appendFileSync(join(ROOT, "downloads.log"), `${key}\t${req.headers["accept-encoding"] ?? ""}\n`);
     const bytes = readFileSync(file(key));
     if (bytes.length > COMPRESS_OVER) {
       // As the real service answers a larger private blob (observed 2026-09-28): Brotli, chunked,
