@@ -44,6 +44,17 @@ def _rationale_gist(text: str | None) -> str:
     return " ".join(sentences[:2])[:260] or body[:260]
 
 
+# Every English statement opens "The Management Board of the Central Bank of the Republic of Azerbaijan
+# decided to ..."; in a table cell only what follows it is worth the space
+FORMULA = re.compile(r"^(?:\d{1,2} \w+ \d{4}(?:, \w+)?:\s*)?The Management Board of the Central Bank of the Republic of "
+                     r"Azerbaijan (?:has )?decided to\s+", re.IGNORECASE)
+
+
+def _without_formula(sentence: str) -> str:
+    rest = FORMULA.sub("", sentence, count=1)
+    return rest[:1].upper() + rest[1:] if rest != sentence else sentence
+
+
 def _rationale_difference(previous: str | None, current: str | None) -> tuple[str, str]:
     """What each statement says that the other does not.
 
@@ -65,6 +76,7 @@ def _rationale_difference(previous: str | None, current: str | None) -> tuple[st
         if not xs:
             return f"nothing the {other} statement does not also say"
         out = ""
+        xs = [_without_formula(s) for s in xs]
         for s in xs:                                  # whole sentences only, so nothing is cut mid-clause
             if len(out) + len(s) + 1 > 175:
                 break

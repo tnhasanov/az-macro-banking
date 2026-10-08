@@ -123,3 +123,16 @@ def test_the_wording_of_the_action_alone_is_not_a_revision(tmp_path):
     db = Database(tmp_path / "d.sqlite")
     db.upsert_decision(_decision("2026-09-23", 6.5, 5.0, 7.5, "cut"))
     assert db.upsert_decision(_decision("2026-09-23", 6.5, 5.0, 7.5, "hold")) == "unchanged"
+
+
+def test_the_rationale_comparison_drops_the_formula_every_statement_opens_with():
+    from azmonitor.facts import _rationale_difference
+    held = ("31 July 2026, Baku: The Management Board of the Central Bank of the Republic of Azerbaijan decided to keep all "
+            "parameters of the interest rate corridor unchanged.")
+    previous, current = _rationale_difference(held, EN["floor cut, rate held"][0])
+    assert previous == "Keep all parameters of the interest rate corridor unchanged."
+    assert current == ("Keep unchanged the refinancing rate at 6.5% and the ceiling at 7.5%, while the floor of the interest rate "
+                       "corridor was reduced by 0.5 pp to 5%.")
+    # a dateline without the city is dropped with the formula
+    _, lowered = _rationale_difference(held, EN["all lowered"][0])
+    assert lowered.startswith("Lower all parameters of the interest rate corridor by 0.25 percentage points")

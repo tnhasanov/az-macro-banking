@@ -60,8 +60,26 @@ def _day(iso: str) -> str:
     return f"{d.day} {d:%b %Y}"
 
 
+def _mon(iso: str) -> str:
+    return f"{dt.date.fromisoformat(iso[:10]):%b %Y}"
+
+
 def _clip(text: str, n: int = 170) -> str:
     return text if len(text) <= n else text[: n - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _fit(texts: list[str], w: float, h: float, sizes: tuple[float, ...], line_spacing: float = 1.0, gap: float = 2.0) -> float:
+    """The largest of `sizes` (pt) at which the paragraphs are estimated to fit a w x h inch box.
+
+    An estimate, not a measurement: half an em per character, a whole line for each paragraph's
+    last words, and the frame's insets taken off the width.
+    """
+    for size in sizes:
+        per_line = max(10, int((w * 72 - 14) / (size * 0.5)))
+        lines = sum(-(-len(t) // per_line) for t in texts)
+        if lines * size * 1.2 * line_spacing + gap * len(texts) <= h * 72:
+            return size
+    return sizes[-1]
 
 
 class MonthlyRenderer(PolicyStabilitySlides):
@@ -110,7 +128,7 @@ class MonthlyRenderer(PolicyStabilitySlides):
 
         titles = {ds["id"]: (ds.get("title_en") or ds["id"]) for _, _, ds in config.iter_datasets()}
         wanted = set(dataset_ids)
-        by_dataset: dict[str, list[str]] = {}
+        by_dataset: dict[str, list[tuple[str, int]]] = {}
         for c in (self.fp.get("quality") or {}).get("checks") or []:
             if c.get("ok") or c.get("severity") == "critical":
                 continue
@@ -121,8 +139,20 @@ class MonthlyRenderer(PolicyStabilitySlides):
                 continue
             what = {"components_sum": "the component sum", "contributions_reconcile": "the contribution reconciliation"}.get(kind, kind.replace("_", " "))
             shown = ", ".join(periods[:2]) + (", …" if len(periods) > 2 else "")
-            by_dataset.setdefault(dataset, []).append(f"{what} fails in {len(periods)} historical period{'s' if len(periods) > 1 else ''} ({shown})")
-        notes = [f"Quality check, {short(ds)}: " + " and ".join(items) + "; the periods shown reconcile." for ds, items in by_dataset.items()]
+            by_dataset.setdefault(dataset, []).append(
+                (f"{what} fails in {len(periods)} historical period{'s' if len(periods) > 1 else ''} ({shown})", len(periods)))
+        if len(by_dataset) == 1:
+            notes = [f"Quality check, {short(ds)}: " + " and ".join(t for t, _ in items) + "; the periods shown reconcile."
+                     for ds, items in by_dataset.items()]
+        elif by_dataset:
+            # one sentence for several datasets, so the footer stays inside the page
+            counts = [f"{short(ds)} ({n} period{'s' if n > 1 else ''})" for ds, n in
+                      ((ds, sum(n for _, n in items)) for ds, items in by_dataset.items())]
+            listed = ", ".join(counts[:-1]) + " and " + counts[-1]
+            notes = [f"Quality checks fail in historical periods of {listed}, listed in the workbook's Quality sheet; "
+                     "the periods shown reconcile."]
+        else:
+            notes = []
         for v in ((self.fp.get("slides") or {}).get("A03") or {}).get("revisions") or []:
             if v.get("dataset_id") not in wanted or not v.get("n_revisions"):
                 continue
@@ -183,9 +213,16 @@ class MonthlyRenderer(PolicyStabilitySlides):
         so_y = L["content_bottom"] - so_h
         interp = tx["interpretations"] or []
         if interp:
-            paras = [[{"text": _clip(t), "size": 9.5}] for t in interp[:3]]
-            d.add_text(s, right_x, y, right_w, max(0.4, so_y - y - 0.08), paras, size=9.5, color=self.C["text"], bullets=True, space_after=2, line_spacing=1.0, autofit=True)
-        d.add_so_what(s, right_x, so_y, right_w, so_h, tx["so_what"] or so_what_default, heading=config.term("view", self.lang).upper() if not self.facts_only else "FACTS-ONLY NOTE")
+            # an analyst's bullets run longer than the generated ones; they are set smaller to fit the
+            # panel rather than cut short, as in the hand-edited August 2026 deck
+            box_h = max(0.4, so_y - y - 0.08)
+            texts = [_clip(t, 170 if self.facts_only else 240) for t in interp[:3]]
+            size = 9.5 if self.facts_only else _fit(texts, right_w, box_h, (9.5, 9.0, 8.5))
+            paras = [[{"text": t, "size": size}] for t in texts]
+            d.add_text(s, right_x, y, right_w, box_h, paras, size=size, color=self.C["text"], bullets=True, space_after=2, line_spacing=1.0, autofit=True)
+        so_what = tx["so_what"] or so_what_default
+        d.add_so_what(s, right_x, so_y, right_w, so_h, so_what, heading=config.term("bears_on", self.lang).upper() if not self.facts_only else "FACTS-ONLY NOTE",
+                      size=_fit([so_what], right_w - 0.36, so_h - 0.46, (10, 9.5, 9), line_spacing=1.05, gap=0))
         d.add_footer(s, self._source(source_refs, dataset_ids), d.page)
         self._notes(s, sid, dataset_ids, metric_ids, extra_notes)
         self.slides_index.append({"id": sid, "page": d.page, "title": self._title(sid, fallback_title)})
@@ -526,8 +563,16 @@ class MonthlyRenderer(PolicyStabilitySlides):
     def m25(self):
         f = self.fp["slides"]["M25"]
         k = f["kpis"]
-        kpis = [_kpi(k[0], "Allowance / NPL"), _kpi(k[1], "Allowance / gross loans"), _kpi(k[2], "NPL ratio, banks"),
-                _kpi(k[3], "NPL stock, banks"), _kpi(k[4], "Provision charges, YTD"), _kpi(k[5], "Provision charges, YTD y/y")]
+        # four cards, as in the edited August 2026 deck, each set against the turning point of its series;
+        # the provision charges are in the commentary and on the profit bridge
+        peak = (f.get("coverage_range") or {}).get("max") or {}
+        low = min(((p, v) for item in f.get("chart_ratios") or [] if item.get("id") == "cba.bank.npl.ratio"
+                   for p, v in item.get("points") or [] if v is not None), key=lambda pv: pv[1], default=None)
+        kpis = [(_fmt(k[0], 0), "Allowance / NPL",
+                 f"{_per(k[0])} · " + (f"{peak['value']:.0f}% peak {_mon(peak['period'])}" if peak.get("value") is not None else _chg(k[0]))),
+                _kpi(k[1], "Allowance / gross loans"),
+                (_fmt(k[2]), "NPL ratio, banks", f"{_per(k[2])} · " + (f"{low[1]:.1f}% low {_mon(low[0])}" if low else _chg(k[2]))),
+                _kpi(k[3], "NPL stock, banks")]
 
         def main(s, x, y, w, h):
             self._caption(s, x, y, w, "Provision coverage of NPLs, % (allowance stock / NPL)")
@@ -624,13 +669,12 @@ class MonthlyRenderer(PolicyStabilitySlides):
 
         k = f["kpis"]
         cti = (k[4].get("latest") or {}).get("value")
-        etr = k[5]
+        # four cards, as in the edited August 2026 deck: tax and the profit total are on the bridge itself,
+        # and the panel keeps its room for the commentary
         kpis = [tile("net_interest_income", "Net interest income, AZN mln y/y", f"{pct('net_interest_income')} · interest on loans {pct('interest_income_loans')}"),
                 tile("non_interest_income", "Non-interest income, AZN mln y/y", f"{pct('non_interest_income')} · fees {pct('fee_income')}, FX {pct('fx_income')}"),
                 tile("non_interest_expense", "Operating expense, AZN mln y/y", f"{pct('non_interest_expense')} · cost-to-income {cti:.1f}%" if cti is not None else pct("non_interest_expense")),
-                tile("provisions", "Provision charges, AZN mln y/y", f"{pct('provisions')} · {_fmt(self.fp['metrics'].get('cba.bank.pnl.provisions'))} YTD"),
-                tile("tax", "Profit tax, AZN mln y/y", f"effective rate {_fmt(etr)} · {_per(etr)}"),
-                _kpi(k[6], "Net profit, YTD y/y")]
+                tile("provisions", "Provision charges, AZN mln y/y", f"{pct('provisions')} · {_fmt(self.fp['metrics'].get('cba.bank.pnl.provisions'))} YTD")]
 
         def main(s, x, y, w, h):
             start, end = br.get("start"), br.get("end")

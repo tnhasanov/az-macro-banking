@@ -127,3 +127,34 @@ def test_quality_notes_name_the_dataset_once_and_say_the_shown_periods_reconcile
     assert "the contribution reconciliation fails in 4 historical periods (2015-12, 2016-01, …)" in notes[0]
     assert notes[0].endswith("the periods shown reconcile.")
     assert _renderer(fp)._data_notes(["cba_loans_by_institution"]) == []
+
+
+def test_quality_notes_for_several_datasets_are_one_sentence_so_the_footer_stays_on_the_page():
+    fp = json.loads(FIXTURE.read_text())
+    fp["quality"] = {"checks": [
+        {"check": "components_sum:cba_deposits", "ok": False, "severity": "warning", "failed_periods": ["2015-12-31", "2016-01-31"]},
+        {"check": "contributions_reconcile:cba.deposits", "ok": False, "severity": "warning",
+         "failed_periods": ["2015-12-31", "2016-01-31", "2016-12-31", "2017-01-31"]},
+        {"check": "components_sum:cba_loans_by_institution", "ok": False, "severity": "warning", "failed_periods": ["2006-01-31"]}]}
+    notes = _renderer(fp)._data_notes(["cba_deposits", "cba_loans_by_institution"])
+    assert len(notes) == 1
+    assert "deposits and savings in credit institutions (6 periods)" in notes[0]
+    assert "structure of loans to the economy (1 period)" in notes[0]
+    assert notes[0].endswith("the periods shown reconcile.")
+
+
+def test_long_commentary_is_set_smaller_rather_than_cut():
+    from azmonitor.render.monthly import _fit
+    assert _fit(["A short line."], 4.43, 1.9, (9.5, 9.0, 8.5)) == 9.5
+    assert _fit(["word " * 50] * 3, 4.43, 1.9, (9.5, 9.0, 8.5)) == 9.0
+    assert _fit(["word " * 120], 4.43, 0.8, (9.5, 9.0, 8.5)) == 8.5
+
+
+def test_a_held_rate_with_a_lower_floor_puts_the_floor_move_on_the_card():
+    from azmonitor.render.policy_slides import change_card
+    held = {"floor_change_bp": -50, "ceiling_change_bp": 0, "corridor_change": "floor cut 50 bp"}
+    assert change_card(held, {"rate_change_bp": 0.0}) == ("-50 bp", "Change at this meeting: corridor floor",
+                                                          "rate and ceiling unchanged")
+    cut = {"floor_change_bp": -25, "ceiling_change_bp": -25, "corridor_change": "all cut 25 bp"}
+    assert change_card(cut, {"rate_change_bp": -25.0, "label": "cut"}) == ("-25 bp", "Change in the rate at this meeting",
+                                                                         "cut; corridor all cut 25 bp")

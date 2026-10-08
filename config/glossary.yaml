@@ -135,6 +135,9 @@ terms:
   view:
     en: "View"
     az: "Şərh"
+  bears_on:
+    en: "What it bears on"
+    az: "Nəyə təsir edir"
   latest:
     en: "Latest"
     az: "Son"

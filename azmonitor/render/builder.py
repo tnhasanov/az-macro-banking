@@ -128,17 +128,18 @@ class Deck:
     def add_panel(self, slide, x, y, w, h, fill: str | None = None, line: str | None = None):
         return self.add_rect(slide, x, y, w, h, fill or self.C["panel"], line or self.C["panel_border"], radius=0.05)
 
-    def add_so_what(self, slide, x, y, w, h, text: str, heading: str = "SO WHAT"):
+    def add_so_what(self, slide, x, y, w, h, text: str, heading: str = "SO WHAT", size: float | None = None):
         self.add_rect(slide, x, y, w, h, self.C["primary"], None, radius=0.04)
         self.add_text(slide, x + 0.18, y + 0.12, w - 0.36, 0.22, heading, size=8.5, bold=True, color=self.C["white"])
-        self.add_text(slide, x + 0.18, y + 0.36, w - 0.36, h - 0.46, text, size=self.S["small"], color=self.C["white"], line_spacing=1.05)
+        self.add_text(slide, x + 0.18, y + 0.36, w - 0.36, h - 0.46, text, size=size or self.S["small"], color=self.C["white"], line_spacing=1.05)
 
     def add_kpi(self, slide, x, y, w, h, value: str, label: str, sub: str | None = None, value_color: str | None = None, value_size: float | None = None,
                 label_size: float | None = None):
         self.add_panel(slide, x, y, w, h)
         vs = value_size or (self.S["kpi_number"] if len(value) <= 8 else self.S["kpi_number"] - 6)
-        self.add_text(slide, x + 0.14, y + 0.06, w - 0.28, h * 0.5, value, size=vs, bold=True, color=value_color or self.C["primary"], anchor="m")
-        self.add_text(slide, x + 0.14, y + h * 0.52, w - 0.28, h * 0.46, [label] + ([sub] if sub else []),
+        # the value sits a little high so the descenders of "pp" or "bp" clear the label underneath
+        self.add_text(slide, x + 0.14, y + 0.04, w - 0.28, h * 0.48, value, size=vs, bold=True, color=value_color or self.C["primary"], anchor="m")
+        self.add_text(slide, x + 0.14, y + h * 0.54, w - 0.28, h * 0.44, [label] + ([sub] if sub else []),
                       size=label_size or (self.S["kpi_label"] - 1), color=self.C["muted"], line_spacing=1.0)
 
     def add_footer(self, slide, source: str, page_no: int | None = None):
